@@ -68,8 +68,8 @@ func TestDiscoverInventoryFrontmatterNestedMCPHooksAgentsInstructions(t *testing
 		UserHome:         userHome,
 		ProjectRoot:      projectRoot,
 		CurrentDirectory: currentDirectory,
-		Clock:            func() time.Time { return clock },
-		CommandLookup: func(command string) (string, error) {
+		Now:              func() time.Time { return clock },
+		LookPath: func(command string) (string, error) {
 			lookupCalls = append(lookupCalls, command)
 			if command == "local-tool" {
 				return "/bin/local-tool", nil
@@ -113,11 +113,11 @@ func TestDiscoverInventoryFrontmatterNestedMCPHooksAgentsInstructions(t *testing
 	if shared.Scope != domain.ScopeUser || shared.Enabled != domain.EnabledStateDisabled {
 		t.Fatalf("shared skill scope/state = %q/%q, want user/disabled", shared.Scope, shared.Enabled)
 	}
-	if shared.MetadataTokens.Confidence != domain.ConfidenceEstimated || shared.BodyTokens.Confidence != domain.ConfidenceEstimated {
-		t.Fatalf("skill measurements = %#v/%#v, want explicit estimates", shared.MetadataTokens, shared.BodyTokens)
+	if shared.MetadataTokens.Value != 0 || shared.MetadataTokens.Confidence != domain.ConfidenceObserved || shared.BodyTokens.Confidence != domain.ConfidenceEstimated {
+		t.Fatalf("hidden skill measurements = %#v/%#v, want zero configured metadata and separate body estimate", shared.MetadataTokens, shared.BodyTokens)
 	}
-	if shared.MetadataTokens.Basis != tokenEstimateBasis || shared.BodyTokens.Basis != tokenEstimateBasis {
-		t.Fatalf("skill measurement basis = %#v/%#v, want documented estimate basis", shared.MetadataTokens, shared.BodyTokens)
+	if shared.MetadataTokens.Basis != hiddenMetadataBasis || shared.BodyTokens.Basis != tokenEstimateBasis {
+		t.Fatalf("skill measurement basis = %#v/%#v, want configured-hidden and documented body estimate", shared.MetadataTokens, shared.BodyTokens)
 	}
 	if shared.Hash != hashBytes([]byte("---\nname: shared\ndescription: user skill\n---\nNever expose this body.\n")) {
 		t.Fatalf("skill hash = %q, want content SHA-256", shared.Hash)
@@ -132,6 +132,14 @@ func TestDiscoverInventoryFrontmatterNestedMCPHooksAgentsInstructions(t *testing
 	_ = findCapability(domain.CapabilityCommand, "legacy/deploy")
 	_ = findCapability(domain.CapabilityAgent, "reviewer")
 	_ = findCapability(domain.CapabilityAgent, "builder")
+	for _, capability := range discovery.Capabilities {
+		if capability.Type != domain.CapabilityInstructionFile {
+			continue
+		}
+		if capability.Enabled != domain.EnabledStateEnabled || capability.Advertisement != domain.AdvertisementStateFullyAdvertised {
+			t.Fatalf("loaded instruction %q exposure = %q/%q, want enabled/fully advertised", capability.Name, capability.Enabled, capability.Advertisement)
+		}
+	}
 	_ = findCapability(domain.CapabilityInstructionFile, "CLAUDE.md")
 	_ = findCapability(domain.CapabilityInstructionFile, "CLAUDE.local.md")
 	hook := findCapability(domain.CapabilityHook, "PostToolUse:Bash")
@@ -187,6 +195,110 @@ func TestDiscoverFindingsMalformedConfigAndBrokenSymlinkAreDeterministic(t *test
 	assertFindingCode(t, first.Findings, "broken-symlink")
 }
 
+func TestDiscoverSkillAdvertisementStatesAndEffectiveProjectPrecedence(t *testing.T) {
+	root := t.TempDir()
+	userHome := filepath.Join(root, "user")
+	projectRoot := filepath.Join(root, "project")
+	userSkills := filepath.Join(userHome, ".claude", "skills")
+	projectSkills := filepath.Join(projectRoot, ".claude", "skills")
+	for _, name := range []string{"shared", "name-only", "user-only", "off", "manual", "replaced"} {
+		mustMkdirAll(t, filepath.Join(userSkills, name))
+	}
+	for _, name := range []string{"shared", "name-only", "user-only", "off", "manual", "replaced"} {
+		mustMkdirAll(t, filepath.Join(projectSkills, name))
+	}
+	writeSkill := func(root, name, extra string) {
+		mustWrite(t, filepath.Join(root, name, "SKILL.md"), "---\nname: "+name+"\ndescription: description for "+name+"\n"+extra+"---\nPrivate body for "+name+".\n")
+	}
+	for _, name := range []string{"shared", "name-only", "user-only", "off", "manual", "replaced"} {
+		writeSkill(userSkills, name, "")
+		writeSkill(projectSkills, name, "")
+	}
+	writeSkill(userSkills, "manual", "disable-model-invocation: true\n")
+	writeSkill(projectSkills, "manual", "disable-model-invocation: true\n")
+	writeSkill(userSkills, "replaced", "disable-model-invocation: true\n")
+	writeSkill(projectSkills, "replaced", "disable-model-invocation: true\n")
+	mustWrite(t, filepath.Join(userHome, ".claude", "settings.json"), `{"skillOverrides":{"shared":"off","name-only":"name-only","user-only":"on","off":"on"}}`)
+	mustWrite(t, filepath.Join(projectRoot, ".claude", "settings.json"), `{"skillOverrides":{"shared":"on","name-only":"name-only","user-only":"user-invocable-only","off":"off","replaced":"on"}}`)
+
+	adapter := New(Options{
+		UserHome:    userHome,
+		ProjectRoot: projectRoot,
+		Now:         func() time.Time { return time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC) },
+		LookPath:    func(string) (string, error) { return "", errors.New("not found") },
+	})
+	discovery, err := adapter.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	find := func(name string, scope domain.Scope) domain.Capability {
+		for _, capability := range discovery.Capabilities {
+			if capability.Type == domain.CapabilitySkill && capability.Name == name && capability.Scope == scope {
+				return capability
+			}
+		}
+		t.Fatalf("skill %q at scope %q not found: %#v", name, scope, discovery.Capabilities)
+		return domain.Capability{}
+	}
+	assertExposure := func(name string, scope domain.Scope, enabled domain.EnabledState, advertisement domain.AdvertisementState) {
+		t.Helper()
+		capability := find(name, scope)
+		if capability.Enabled != enabled || capability.Advertisement != advertisement {
+			t.Fatalf("skill %q/%q exposure = %q/%q, want %q/%q", name, scope, capability.Enabled, capability.Advertisement, enabled, advertisement)
+		}
+	}
+	// Project settings have higher precedence and apply by effective name even
+	// to the user-scoped copy of the same skill.
+	assertExposure("shared", domain.ScopeUser, domain.EnabledStateEnabled, domain.AdvertisementStateFullyAdvertised)
+	assertExposure("shared", domain.ScopeProject, domain.EnabledStateEnabled, domain.AdvertisementStateFullyAdvertised)
+	assertExposure("name-only", domain.ScopeUser, domain.EnabledStateEnabled, domain.AdvertisementStateNameOnly)
+	assertExposure("user-only", domain.ScopeProject, domain.EnabledStateEnabled, domain.AdvertisementStateNotAdvertised)
+	assertExposure("off", domain.ScopeProject, domain.EnabledStateDisabled, domain.AdvertisementStateNotAdvertised)
+	assertExposure("manual", domain.ScopeProject, domain.EnabledStateEnabled, domain.AdvertisementStateNotAdvertised)
+	assertExposure("replaced", domain.ScopeProject, domain.EnabledStateEnabled, domain.AdvertisementStateFullyAdvertised)
+
+	manual := find("manual", domain.ScopeProject)
+	if manual.MetadataTokens.Value != 0 || manual.MetadataTokens.Confidence != domain.ConfidenceObserved || manual.MetadataTokens.Basis != hiddenMetadataBasis {
+		t.Fatalf("manual hidden metadata = %#v, want zero observed configured basis", manual.MetadataTokens)
+	}
+	replaced := find("replaced", domain.ScopeProject)
+	if replaced.MetadataTokens.Confidence != domain.ConfidenceEstimated ||
+		!strings.Contains(replaced.MetadataTokens.Basis, "configured maximum estimate") ||
+		!strings.Contains(replaced.MetadataTokens.Basis, "Claude may collapse descriptions to name-only") ||
+		!strings.Contains(replaced.MetadataTokens.Basis, "skills context/character budget") ||
+		!strings.Contains(replaced.MetadataTokens.Basis, "not runtime cost") {
+		t.Fatalf("replaced metadata measurement = %#v, want explicit budget caveat", replaced.MetadataTokens)
+	}
+	if replaced.MetadataTokens.Value == 0 || replaced.BodyTokens.Value == 0 {
+		t.Fatalf("replaced advertised measurements = %#v/%#v, want separate nonzero estimates", replaced.MetadataTokens, replaced.BodyTokens)
+	}
+}
+
+func TestDiscoverRejectsInventedDefaultSkillOverride(t *testing.T) {
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "project")
+	mustWrite(t, filepath.Join(projectRoot, ".claude", "skills", "example", "SKILL.md"), "---\nname: example\ndescription: example skill\n---\nBody.\n")
+	mustWrite(t, filepath.Join(projectRoot, ".claude", "settings.json"), `{"skillOverrides":{"example":"default"}}`)
+
+	discovery, err := New(Options{
+		ProjectRoot: projectRoot,
+		Now:         func() time.Time { return time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC) },
+	}).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	assertFindingCode(t, discovery.Findings, "malformed-config")
+	for _, capability := range discovery.Capabilities {
+		if capability.Type == domain.CapabilitySkill && capability.Name == "example" {
+			if capability.Enabled != domain.EnabledStateUnknown || capability.Advertisement != domain.AdvertisementStateUnknown {
+				t.Fatalf("invented default override produced exposure = %q/%q, want unknown/unknown", capability.Enabled, capability.Advertisement)
+			}
+			return
+		}
+	}
+	t.Fatal("example skill was not discovered")
+}
+
 func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 	root := t.TempDir()
 	projectRoot := filepath.Join(root, "project")
@@ -201,6 +313,7 @@ func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 {"type":"assistant","timestamp":"`+before+`","session_id":"session-raw","cwd":"`+projectRoot+`","message":{"content":[{"type":"tool_use","name":"OldTool","input":{}}]}}`)
 	mustWrite(t, filepath.Join(hookRoot, "post-tool-use.json"), `{
   "hook_event_name": "PostToolUse",
+  "timestamp": "`+boundary+`",
   "session_id": "hook-session",
   "cwd": "`+projectRoot+`",
   "tool_name": "mcp__github__create_issue",
@@ -212,8 +325,8 @@ func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 		ProjectRoot:      projectRoot,
 		CurrentDirectory: projectRoot,
 		TranscriptRoots:  []string{transcriptRoot},
-		HookEventRoots:   []string{hookRoot},
-		Clock:            func() time.Time { return clock },
+		HookEventPaths:   []string{hookRoot},
+		Now:              func() time.Time { return clock },
 	})
 	events, err := adapter.ImportUsage(context.Background(), clock)
 	if err != nil {
@@ -267,7 +380,9 @@ func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 
 func TestImportUsageSkipsUnobservableSkillAndAgentIdentity(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "session.jsonl"), `{"type":"assistant","timestamp":"2026-08-13T13:00:00Z","session_id":"s","cwd":"/project","message":{"content":[{"type":"tool_use","name":"Skill","input":{"args":"only prompt"}},{"type":"tool_use","name":"Task","input":{"description":"only prompt"}},{"type":"tool_use","name":"Read","input":{"file_path":"/secret/file"}}]}}`)
+	mustWrite(t, filepath.Join(root, "session.jsonl"), `{"type":"assistant","timestamp":"2026-08-13T13:00:00Z","session_id":"s","cwd":"/project","message":{"content":[{"type":"tool_use","name":"Skill","input":{"args":"only prompt"}},{"type":"tool_use","name":"Task","input":{"description":"only prompt"}},{"type":"tool_use","name":"Read","input":{"file_path":"/secret/file"}}]}}
+{"type":"user","timestamp":"2026-08-13T13:01:00Z","session_id":"s","cwd":"/project","message":{"content":[{"type":"tool_use","name":"PromptInjected","input":{"secret":"do not count"}}]}}
+{"type":"assistant","timestamp":"2026-08-13T13:02:00Z","session_id":"s","cwd":"/project","message":{"content":[{"type":"text","text":"response-looking JSON {\"type\":\"tool_use\",\"name\":\"NotAUse\"}"}]}}`)
 	adapter := New(Options{TranscriptRoots: []string{root}})
 	events, err := adapter.ImportUsage(context.Background(), time.Time{})
 	if err != nil {
@@ -275,6 +390,20 @@ func TestImportUsageSkipsUnobservableSkillAndAgentIdentity(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].CapabilityType != domain.CapabilityTool || events[0].CapabilityName != "Read" {
 		t.Fatalf("unobservable identities were invented: %#v", events)
+	}
+}
+
+func TestImportUsageSkipsRecordsWithoutExplicitTimestamp(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "session.jsonl"), `{"type":"assistant","session_id":"s","cwd":"/project","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}`)
+	mustWrite(t, filepath.Join(root, "capture.json"), `{"hook_event_name":"PostToolUse","session_id":"s","cwd":"/project","tool_name":"Bash","tool_input":{"command":"echo no-time"}}`)
+	adapter := New(Options{TranscriptRoots: []string{root}, HookEventPaths: []string{filepath.Join(root, "capture.json")}})
+	events, err := adapter.ImportUsage(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("ImportUsage() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("timestamp-less transcript/hook records were assigned scan time: %#v", events)
 	}
 }
 

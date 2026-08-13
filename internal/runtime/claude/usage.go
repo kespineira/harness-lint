@@ -25,16 +25,11 @@ func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.Us
 		return nil, err
 	}
 	cutoff := since.UTC()
-	observationTime := a.observationTime()
-	if observationTime.IsZero() {
-		observationTime = time.Now().UTC()
-	}
-
 	transcriptFiles, err := collectDataFiles(ctx, a.transcriptRoots, false)
 	if err != nil {
 		return nil, err
 	}
-	hookFiles, err := collectDataFiles(ctx, append(append([]string(nil), a.hookPaths...), a.hookRoots...), true)
+	hookFiles, err := collectDataFiles(ctx, a.hookPaths, true)
 	if err != nil {
 		return nil, err
 	}
@@ -44,13 +39,13 @@ func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.Us
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
-		parseTranscriptFile(ctx, path, cutoff, observationTime, a.projectFallback(), byFingerprint)
+		parseTranscriptFile(ctx, path, cutoff, a.projectFallback(), byFingerprint)
 	}
 	for _, path := range hookFiles {
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
-		parseHookFile(ctx, path, cutoff, observationTime, byFingerprint)
+		parseHookFile(ctx, path, cutoff, byFingerprint)
 	}
 
 	result := make([]domain.UsageEvent, 0, len(byFingerprint))
@@ -144,8 +139,6 @@ type transcriptLine struct {
 	Project    string          `json:"project"`
 	Name       string          `json:"name"`
 	Input      json.RawMessage `json:"input"`
-	ToolName   string          `json:"tool_name"`
-	ToolInput  json.RawMessage `json:"tool_input"`
 	Content    json.RawMessage `json:"content"`
 	Message    transcriptMsg   `json:"message"`
 }
@@ -158,7 +151,7 @@ type transcriptMsg struct {
 	Content    json.RawMessage `json:"content"`
 }
 
-func parseTranscriptFile(ctx context.Context, path string, since, fallback time.Time, projectFallback string, result map[string]domain.UsageEvent) {
+func parseTranscriptFile(ctx context.Context, path string, since time.Time, projectFallback string, result map[string]domain.UsageEvent) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -181,7 +174,7 @@ func parseTranscriptFile(ctx context.Context, path string, since, fallback time.
 			timestamp = parseEventTime(line.Message.Timestamp)
 		}
 		if timestamp.IsZero() {
-			timestamp = fallback
+			continue
 		}
 		if timestamp.Before(since) {
 			continue
@@ -204,14 +197,13 @@ func parseTranscriptFile(ctx context.Context, path string, since, fallback time.
 			}
 			addUsageEvent(result, timestamp, session, project, capabilityType, capabilityName)
 		}
-		if strings.EqualFold(line.Type, "tool_use") && line.Name != "" {
+		if line.Type == "tool_use" && line.Name != "" {
 			visit(line.Name, line.Input)
 		}
-		if line.ToolName != "" {
-			visit(line.ToolName, line.ToolInput)
+		if line.Type == "assistant" {
+			scanToolUses(line.Message.Content, visit)
+			scanToolUses(line.Content, visit)
 		}
-		scanToolUses(line.Message.Content, visit)
-		scanToolUses(line.Content, visit)
 	}
 }
 
@@ -232,7 +224,7 @@ type hookToolCall struct {
 	ToolInput json.RawMessage `json:"tool_input"`
 }
 
-func parseHookFile(ctx context.Context, path string, since, fallback time.Time, result map[string]domain.UsageEvent) {
+func parseHookFile(ctx context.Context, path string, since time.Time, result map[string]domain.UsageEvent) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -241,7 +233,7 @@ func parseHookFile(ctx context.Context, path string, since, fallback time.Time, 
 	if strings.EqualFold(filepath.Ext(path), ".json") {
 		var line hookLine
 		if err := json.NewDecoder(file).Decode(&line); err == nil {
-			processHookLine(ctx, line, path, since, fallback, result)
+			processHookLine(ctx, line, path, since, result)
 		}
 		return
 	}
@@ -255,11 +247,11 @@ func parseHookFile(ctx context.Context, path string, since, fallback time.Time, 
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
 		}
-		processHookLine(ctx, line, path, since, fallback, result)
+		processHookLine(ctx, line, path, since, result)
 	}
 }
 
-func processHookLine(ctx context.Context, line hookLine, path string, since, fallback time.Time, result map[string]domain.UsageEvent) {
+func processHookLine(ctx context.Context, line hookLine, path string, since time.Time, result map[string]domain.UsageEvent) {
 	if err := contextError(ctx); err != nil {
 		return
 	}
@@ -268,7 +260,7 @@ func processHookLine(ctx context.Context, line hookLine, path string, since, fal
 	}
 	timestamp := parseEventTime(firstNonEmpty(line.Timestamp, line.EventTime))
 	if timestamp.IsZero() {
-		timestamp = fallback
+		return
 	}
 	if timestamp.Before(since) {
 		return
@@ -302,10 +294,14 @@ func scanToolUses(raw json.RawMessage, visit func(string, json.RawMessage)) {
 	var blocks []json.RawMessage
 	if json.Unmarshal(raw, &blocks) == nil {
 		for _, block := range blocks {
-			scanToolUses(block, visit)
+			scanToolBlock(block, visit)
 		}
 		return
 	}
+	scanToolBlock(raw, visit)
+}
+
+func scanToolBlock(raw json.RawMessage, visit func(string, json.RawMessage)) {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(raw, &object) != nil {
 		return
@@ -315,12 +311,6 @@ func scanToolUses(raw json.RawMessage, visit func(string, json.RawMessage)) {
 	_ = json.Unmarshal(object["name"], &name)
 	if typ == "tool_use" && name != "" {
 		visit(name, object["input"])
-		return
-	}
-	for _, key := range []string{"content", "blocks", "parts"} {
-		if child, ok := object[key]; ok {
-			scanToolUses(child, visit)
-		}
 	}
 }
 

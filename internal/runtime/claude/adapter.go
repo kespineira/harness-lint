@@ -27,8 +27,6 @@ const (
 	// tokenEstimateBasis is deliberately explicit: these values are advertised
 	// size approximations, never a claim about Claude's actual context cost.
 	tokenEstimateBasis = "estimated from UTF-8 bytes at approximately 4 bytes/token; not runtime cost"
-
-	unknownMeasurementBasis = "not available from Claude Code configuration"
 )
 
 // Options controls every filesystem and process lookup used by Adapter.
@@ -47,28 +45,21 @@ type Options struct {
 	// ~/.claude.json project entry are relevant.
 	ProjectRoot      string
 	CurrentDirectory string
-	CurrentDir       string // alias accepted for callers using shorter naming
 
-	// Now and Clock are equivalent injectable clocks. Clock takes precedence.
-	Now   func() time.Time
-	Clock func() time.Time
+	// Now is the injectable observation clock used for inventory seen ranges.
+	Now func() time.Time
 
-	// LookPath and CommandLookup are equivalent injectable command lookups.
-	// The lookup must only resolve a command; the adapter never executes it.
-	LookPath      func(string) (string, error)
-	CommandLookup func(string) (string, error)
+	// LookPath only resolves a configured command; the adapter never executes
+	// it or contacts an MCP server.
+	LookPath func(string) (string, error)
 
 	// TranscriptRoots supplies Claude JSONL roots. If empty, the adapter uses
 	// the configured global Claude projects directory when one is available.
 	TranscriptRoots []string
-	TranscriptRoot  string // singular alias
 
-	// HookEventPaths supplies stable PostToolUse-shaped JSON files. Roots are
-	// walked for .json and .jsonl files in deterministic order.
+	// HookEventPaths supplies stable PostToolUse-shaped JSON files. Each path
+	// may be a JSON file or a directory containing JSON/JSONL captures.
 	HookEventPaths []string
-	HookEventRoots []string
-	HookEventRoot  string
-	HookRoots      []string // alias accepted for callers that call them hook roots
 }
 
 // Adapter is the Claude Code implementation of runtime.Adapter.
@@ -83,7 +74,6 @@ type Adapter struct {
 
 	transcriptRoots []string
 	hookPaths       []string
-	hookRoots       []string
 }
 
 var _ runtimepkg.Adapter = (*Adapter)(nil)
@@ -101,9 +91,6 @@ func New(options Options) *Adapter {
 
 	projectRoot := cleanConfiguredPath(options.ProjectRoot)
 	currentDirectory := cleanConfiguredPath(options.CurrentDirectory)
-	if currentDirectory == "" {
-		currentDirectory = cleanConfiguredPath(options.CurrentDir)
-	}
 	if projectRoot == "" {
 		projectRoot = currentDirectory
 	}
@@ -112,25 +99,16 @@ func New(options Options) *Adapter {
 	}
 
 	now := options.Now
-	if options.Clock != nil {
-		now = options.Clock
-	}
 	if now == nil {
 		now = time.Now
 	}
 
 	lookPath := options.LookPath
-	if options.CommandLookup != nil {
-		lookPath = options.CommandLookup
-	}
 	if lookPath == nil {
 		lookPath = exec.LookPath
 	}
 
 	transcriptRoots := append([]string(nil), options.TranscriptRoots...)
-	if options.TranscriptRoot != "" {
-		transcriptRoots = append(transcriptRoots, options.TranscriptRoot)
-	}
 	if len(transcriptRoots) == 0 && userClaudeDir != "" {
 		transcriptRoots = append(transcriptRoots, filepath.Join(userClaudeDir, "projects"))
 	}
@@ -138,12 +116,6 @@ func New(options Options) *Adapter {
 
 	hookPaths := append([]string(nil), options.HookEventPaths...)
 	hookPaths = cleanUniquePaths(hookPaths)
-	hookRoots := append([]string(nil), options.HookEventRoots...)
-	if options.HookEventRoot != "" {
-		hookRoots = append(hookRoots, options.HookEventRoot)
-	}
-	hookRoots = append(hookRoots, options.HookRoots...)
-	hookRoots = cleanUniquePaths(hookRoots)
 
 	return &Adapter{
 		userHome:         userHome,
@@ -154,12 +126,8 @@ func New(options Options) *Adapter {
 		lookPath:         lookPath,
 		transcriptRoots:  transcriptRoots,
 		hookPaths:        hookPaths,
-		hookRoots:        hookRoots,
 	}
 }
-
-// NewAdapter is a descriptive alias for New.
-func NewAdapter(options Options) *Adapter { return New(options) }
 
 // Runtime identifies the source runtime in all normalized values.
 func (a *Adapter) Runtime() domain.Runtime { return domain.RuntimeClaudeCode }
@@ -209,11 +177,7 @@ type discoveryState struct {
 	settings []settingsFile
 }
 
-type settingsFile struct {
-	path  string
-	scope domain.Scope
-	raw   map[string]json.RawMessage
-}
+type settingsFile struct{ raw map[string]json.RawMessage }
 
 func (s *discoveryState) addCapability(capability domain.Capability) {
 	s.capabilities = append(s.capabilities, capability)

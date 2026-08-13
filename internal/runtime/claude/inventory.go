@@ -13,6 +13,11 @@ import (
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
+const (
+	metadataEstimateBasis = "configured maximum estimate from advertised skill name and description at approximately 4 UTF-8 bytes/token; Claude may collapse descriptions to name-only under its skills context/character budget; not runtime cost"
+	hiddenMetadataBasis   = "observed configured skill metadata is not advertised; not runtime cost"
+)
+
 type fileEntry struct {
 	path  string
 	root  string
@@ -27,6 +32,118 @@ const (
 	fileKindAgent       fileKind = "agent"
 	fileKindInstruction fileKind = "instruction"
 )
+
+type skillExposure struct {
+	enabled       domain.EnabledState
+	advertisement domain.AdvertisementState
+	metadata      domain.Measurement
+}
+
+func metadataMeasurement(name, description string, advertisement domain.AdvertisementState) domain.Measurement {
+	switch advertisement {
+	case domain.AdvertisementStateFullyAdvertised:
+		return domain.Measurement{
+			Value:      estimateTokens([]byte(strings.TrimSpace(name) + "\n" + strings.TrimSpace(description))),
+			Confidence: domain.ConfidenceEstimated,
+			Basis:      metadataEstimateBasis,
+		}
+	case domain.AdvertisementStateNameOnly:
+		return domain.Measurement{
+			Value:      estimateTokens([]byte(strings.TrimSpace(name))),
+			Confidence: domain.ConfidenceEstimated,
+			Basis:      metadataEstimateBasis,
+		}
+	case domain.AdvertisementStateNotAdvertised:
+		return domain.Measurement{Confidence: domain.ConfidenceObserved, Basis: hiddenMetadataBasis}
+	default:
+		return unknownMeasurement()
+	}
+}
+
+func (s *discoveryState) effectiveSkillOverride(names ...string) (string, bool) {
+	value, found := "", false
+	for _, settings := range s.settings {
+		overrides, ok := rawObject(settings.raw["skillOverrides"])
+		if !ok {
+			continue
+		}
+		for _, name := range names {
+			candidate, ok := rawString(overrides[name])
+			if !ok {
+				continue
+			}
+			value, found = strings.ToLower(strings.TrimSpace(candidate)), true
+			break
+		}
+	}
+	return value, found
+}
+
+func (s *discoveryState) skillExposure(name string, overrideNames []string, front frontMatter) skillExposure {
+	description := front.selectionDescription()
+	names := append([]string{name}, overrideNames...)
+	if override, ok := s.effectiveSkillOverride(names...); ok {
+		switch override {
+		case "on":
+			return skillExposure{
+				enabled:       domain.EnabledStateEnabled,
+				advertisement: domain.AdvertisementStateFullyAdvertised,
+				metadata:      metadataMeasurement(name, description, domain.AdvertisementStateFullyAdvertised),
+			}
+		case "name-only":
+			return skillExposure{
+				enabled:       domain.EnabledStateEnabled,
+				advertisement: domain.AdvertisementStateNameOnly,
+				metadata:      metadataMeasurement(name, description, domain.AdvertisementStateNameOnly),
+			}
+		case "user-invocable-only":
+			return skillExposure{
+				enabled:       domain.EnabledStateEnabled,
+				advertisement: domain.AdvertisementStateNotAdvertised,
+				metadata:      metadataMeasurement(name, description, domain.AdvertisementStateNotAdvertised),
+			}
+		case "off":
+			return skillExposure{
+				enabled:       domain.EnabledStateDisabled,
+				advertisement: domain.AdvertisementStateNotAdvertised,
+				metadata:      metadataMeasurement(name, description, domain.AdvertisementStateNotAdvertised),
+			}
+		default:
+			return skillExposure{
+				enabled:       domain.EnabledStateUnknown,
+				advertisement: domain.AdvertisementStateUnknown,
+				metadata:      unknownMeasurement(),
+			}
+		}
+	}
+	if disabled, known := front.boolValue("disable-model-invocation"); known && disabled {
+		return skillExposure{
+			enabled:       domain.EnabledStateEnabled,
+			advertisement: domain.AdvertisementStateNotAdvertised,
+			metadata:      metadataMeasurement(name, description, domain.AdvertisementStateNotAdvertised),
+		}
+	}
+	return skillExposure{
+		enabled:       domain.EnabledStateEnabled,
+		advertisement: domain.AdvertisementStateFullyAdvertised,
+		metadata:      metadataMeasurement(name, description, domain.AdvertisementStateFullyAdvertised),
+	}
+}
+
+func commandExposure(s *discoveryState, name string, overrideNames []string, front frontMatter) skillExposure {
+	// Legacy commands share the documented skill frontmatter and slash-command
+	// listing. Applying the effective override by name keeps the two aliases
+	// honest when they intentionally point at the same configured capability.
+	return s.skillExposure(name, overrideNames, front)
+}
+
+func agentExposure() skillExposure {
+	return skillExposure{
+		enabled:       domain.EnabledStateUnknown,
+		advertisement: domain.AdvertisementStateUnknown,
+		metadata:      unknownMeasurement(),
+	}
+}
 
 func (s *discoveryState) loadSettings(ctx context.Context) {
 	paths := make([]struct {
@@ -78,8 +195,33 @@ func (s *discoveryState) loadSettings(ctx context.Context) {
 			s.addFinding(finding("malformed-config", "a Claude settings file is not valid JSON", domain.SeverityWarning, domain.CapabilityUnknown, ""))
 			continue
 		}
-		s.settings = append(s.settings, settingsFile{path: candidate.path, scope: candidate.scope, raw: raw})
+		s.settings = append(s.settings, settingsFile{raw: raw})
+		s.validateSkillOverrides(raw)
 		s.discoverHooks(candidate.path, candidate.scope, raw)
+	}
+}
+
+func (s *discoveryState) validateSkillOverrides(settings map[string]json.RawMessage) {
+	raw, present := settings["skillOverrides"]
+	if !present {
+		return
+	}
+	overrides, ok := rawObject(raw)
+	if !ok {
+		s.addFinding(finding("malformed-config", "the Claude skillOverrides setting is not an object", domain.SeverityWarning, domain.CapabilityUnknown, ""))
+		return
+	}
+	for _, value := range overrides {
+		candidate, ok := rawString(value)
+		if !ok {
+			s.addFinding(finding("malformed-config", "a Claude skillOverrides value is not a string", domain.SeverityWarning, domain.CapabilityUnknown, ""))
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(candidate)) {
+		case "on", "name-only", "user-invocable-only", "off":
+		default:
+			s.addFinding(finding("malformed-config", "a Claude skillOverrides value is not a documented state", domain.SeverityWarning, domain.CapabilityUnknown, ""))
+		}
 	}
 }
 
@@ -149,6 +291,7 @@ func (s *discoveryState) discoverHooks(path string, scope domain.Scope, settings
 					Scope:          scope,
 					Source:         path,
 					Enabled:        enabled,
+					Advertisement:  domain.AdvertisementStateUnknown,
 					Hash:           hashJSON(json.RawMessage(definitionRaw)),
 					MetadataTokens: unknownMeasurement(),
 					BodyTokens:     unknownMeasurement(),
@@ -179,6 +322,7 @@ func (s *discoveryState) discoverSkills(ctx context.Context) {
 		if front.err != nil {
 			s.addFinding(finding("malformed-frontmatter", "a skill has malformed YAML frontmatter", domain.SeverityWarning, domain.CapabilitySkill, name))
 		}
+		exposure := s.skillExposure(name, []string{relativeCapabilityName(entry.root, entry.path, fileKindSkill)}, front)
 		first, last := s.observation()
 		s.addCapability(domain.Capability{
 			Runtime:        domain.RuntimeClaudeCode,
@@ -186,9 +330,10 @@ func (s *discoveryState) discoverSkills(ctx context.Context) {
 			Name:           name,
 			Scope:          entry.scope,
 			Source:         entry.path,
-			Enabled:        s.skillState(entry.scope, name),
+			Enabled:        exposure.enabled,
+			Advertisement:  exposure.advertisement,
 			Hash:           hashBytes(data),
-			MetadataTokens: estimateMeasurement(front.meta),
+			MetadataTokens: exposure.metadata,
 			BodyTokens:     estimateMeasurement(front.body),
 			FirstSeen:      first,
 			LastSeen:       last,
@@ -215,6 +360,7 @@ func (s *discoveryState) discoverCommands(ctx context.Context) {
 		if front.err != nil {
 			s.addFinding(finding("malformed-frontmatter", "a command has malformed YAML frontmatter", domain.SeverityWarning, domain.CapabilityCommand, name))
 		}
+		exposure := commandExposure(s, name, []string{relativeCapabilityName(entry.root, entry.path, fileKindCommand)}, front)
 		first, last := s.observation()
 		s.addCapability(domain.Capability{
 			Runtime:        domain.RuntimeClaudeCode,
@@ -222,9 +368,10 @@ func (s *discoveryState) discoverCommands(ctx context.Context) {
 			Name:           name,
 			Scope:          entry.scope,
 			Source:         entry.path,
-			Enabled:        domain.EnabledStateUnknown,
+			Enabled:        exposure.enabled,
+			Advertisement:  exposure.advertisement,
 			Hash:           hashBytes(data),
-			MetadataTokens: estimateMeasurement(front.meta),
+			MetadataTokens: exposure.metadata,
 			BodyTokens:     estimateMeasurement(front.body),
 			FirstSeen:      first,
 			LastSeen:       last,
@@ -251,6 +398,7 @@ func (s *discoveryState) discoverAgents(ctx context.Context) {
 		if front.err != nil {
 			s.addFinding(finding("malformed-frontmatter", "an agent has malformed YAML frontmatter", domain.SeverityWarning, domain.CapabilityAgent, name))
 		}
+		exposure := agentExposure()
 		first, last := s.observation()
 		s.addCapability(domain.Capability{
 			Runtime:        domain.RuntimeClaudeCode,
@@ -258,10 +406,11 @@ func (s *discoveryState) discoverAgents(ctx context.Context) {
 			Name:           name,
 			Scope:          entry.scope,
 			Source:         entry.path,
-			Enabled:        domain.EnabledStateUnknown,
+			Enabled:        exposure.enabled,
+			Advertisement:  exposure.advertisement,
 			Hash:           hashBytes(data),
-			MetadataTokens: estimateMeasurement(front.meta),
-			BodyTokens:     estimateMeasurement(front.body),
+			MetadataTokens: exposure.metadata,
+			BodyTokens:     unknownMeasurement(),
 			FirstSeen:      first,
 			LastSeen:       last,
 		})
@@ -293,7 +442,8 @@ func (s *discoveryState) discoverInstructions(ctx context.Context) {
 			Name:           filepath.Base(candidate.path),
 			Scope:          candidate.scope,
 			Source:         candidate.path,
-			Enabled:        domain.EnabledStateUnknown,
+			Enabled:        domain.EnabledStateEnabled,
+			Advertisement:  domain.AdvertisementStateFullyAdvertised,
 			Hash:           hashBytes(data),
 			MetadataTokens: unknownMeasurement(),
 			BodyTokens:     estimateMeasurement(data),
@@ -378,30 +528,6 @@ func relativeCapabilityName(root, path string, kind fileKind) string {
 		name = strings.TrimSuffix(name, filepath.Ext(name))
 	}
 	return strings.TrimSpace(name)
-}
-
-func (s *discoveryState) skillState(scope domain.Scope, name string) domain.EnabledState {
-	state := domain.EnabledStateUnknown
-	for _, settings := range s.settings {
-		if settings.scope != scope {
-			continue
-		}
-		overrides, ok := rawObject(settings.raw["skillOverrides"])
-		if !ok {
-			continue
-		}
-		value, ok := rawString(overrides[name])
-		if !ok {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "on":
-			state = domain.EnabledStateEnabled
-		case "off":
-			state = domain.EnabledStateDisabled
-		}
-	}
-	return state
 }
 
 func (s *discoveryState) addFileReadFinding(path string, kind fileKind) {
@@ -775,6 +901,7 @@ func (s *discoveryState) addMCPServers(ctx context.Context, path string, scope d
 			Scope:          scope,
 			Source:         path,
 			Enabled:        serverState,
+			Advertisement:  domain.AdvertisementStateUnknown,
 			Hash:           hashJSON(json.RawMessage(raw)),
 			MetadataTokens: unknownMeasurement(),
 			BodyTokens:     unknownMeasurement(),

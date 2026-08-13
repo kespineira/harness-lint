@@ -11,7 +11,6 @@ import (
 // a dependency and would risk accidentally retaining prompt-like content.
 type frontMatter struct {
 	values map[string]string
-	meta   []byte
 	body   []byte
 	has    bool
 	err    error
@@ -42,12 +41,6 @@ func parseFrontMatter(data []byte) frontMatter {
 		return result
 	}
 
-	metadataStart := len(lines[0])
-	metadataEnd := 0
-	for i := 1; i < closing; i++ {
-		metadataEnd += len(lines[i])
-	}
-	result.meta = []byte(text[metadataStart : metadataStart+metadataEnd])
 	bodyStart := 0
 	for i := 0; i <= closing; i++ {
 		bodyStart += len(lines[i])
@@ -112,4 +105,31 @@ func (f frontMatter) boolValue(key string) (bool, bool) {
 	default:
 		return false, false
 	}
+}
+
+// selectionDescription follows Claude's documented fallback: when
+// description is omitted, the first paragraph is used for skill selection.
+// It deliberately returns only that small selection field, never arbitrary
+// frontmatter or the full instruction body.
+func (f frontMatter) selectionDescription() string {
+	if description := f.value("description"); description != "" {
+		return description
+	}
+	return firstParagraph(f.body)
+}
+
+func firstParagraph(body []byte) string {
+	lines := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n")
+	paragraph := make([]string, 0, 4)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if len(paragraph) > 0 {
+				break
+			}
+			continue
+		}
+		paragraph = append(paragraph, line)
+	}
+	return strings.TrimSpace(strings.Join(paragraph, " "))
 }
