@@ -36,7 +36,17 @@ const (
 	KEEP   Classification = "KEEP"
 	REVIEW Classification = "REVIEW"
 	STALE  Classification = "STALE"
-	DEAD   Classification = "DEAD"
+	// DEAD remains source-compatible for a future completeness signal; the
+	// current analyzer never infers it from an empty event history.
+	DEAD Classification = "DEAD"
+)
+
+// EvidenceCoverage is intentionally expressed as wording rather than a
+// numeric score. The usage contract contains observations, but it does not
+// contain a completeness signal that could prove lifetime coverage.
+const (
+	coverageInsufficient = "lifetime activity coverage is insufficient"
+	coverageUnknown      = "lifetime activity coverage is unknown"
 )
 
 // Config controls policy boundaries used by Analyze. A zero Config is
@@ -111,21 +121,33 @@ type CapabilityEvidence struct {
 	EventCounts map[domain.EventType]int
 
 	// InvocationCount counts only invoked events. ActivityCount counts loaded
-	// plus invoked events and is used to distinguish a loaded-but-never-invoked
-	// definition from a dead one.
+	// plus invoked observations and is not a use count; advertised observations
+	// remain in EventCounts.
 	InvocationCount      int
 	ActivityCount        int
 	DistinctSessionCount int
 
-	// Last-used means the latest loaded or invoked activity time. Advertised
-	// observations do not establish use. Activity time uses a trustworthy source
-	// timestamp when present and observed/import time otherwise. LastUsedAge is
-	// clamped to zero for a future timestamp so callers never receive a
-	// misleading negative age.
-	HasLastUsed      bool
-	LastUsedAt       time.Time
-	LastUsedAge      time.Duration
+	// FirstUsedAt and LastUsedAt describe invocation-only use. Advertised and
+	// loaded observations do not establish use, so they do not contribute to
+	// these fields, the distinct-session count, staleness, or last-use age.
+	HasFirstUsed bool
+	FirstUsedAt  time.Time
+	HasLastUsed  bool
+	LastUsedAt   time.Time
+	LastUsedAge  time.Duration
+	// LastUsedInFuture is true when the latest invocation's effective activity
+	// timestamp is after analysis time; its age is then clamped to zero.
 	LastUsedInFuture bool
+
+	// EvidenceSources is the sorted, distinct set of evidence paths in all
+	// matching observations.
+	EvidenceSources []domain.Provenance
+	// EvidenceCoverage explains what the observations can and cannot establish;
+	// it never implies complete capture merely because hook evidence exists.
+	EvidenceCoverage string
+	// EvidenceConfidence describes confidence in the observed event facts only;
+	// it is deliberately separate from the unknown lifetime coverage wording.
+	EvidenceConfidence domain.Confidence
 	// MetadataTokens and BodyTokens retain adapter measurements independently;
 	// context summaries label their semantics by capability type. Neither
 	// measurement implies a loaded or invoked event.
@@ -278,14 +300,21 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 		domain.EventInvoked:    0,
 	}
 	sessions := make(map[string]struct{})
-	var lastUsed time.Time
+	provenanceSet := make(map[domain.Provenance]struct{})
+	var firstUsed, lastUsed time.Time
 	for _, event := range events {
 		eventCounts[event.EventType]++
-		if event.EventType != domain.EventLoaded && event.EventType != domain.EventInvoked {
+		provenanceSet[event.Provenance] = struct{}{}
+		if event.EventType != domain.EventInvoked {
 			continue
 		}
-		sessions[event.SessionID] = struct{}{}
 		activityAt := event.EffectiveActivityTime()
+		// Sessions and first/last use are invocation-only. Loaded evidence is
+		// retained separately and never promoted to use or staleness.
+		sessions[event.SessionID] = struct{}{}
+		if firstUsed.IsZero() || activityAt.Before(firstUsed) {
+			firstUsed = activityAt
+		}
 		if lastUsed.IsZero() || activityAt.After(lastUsed) {
 			lastUsed = activityAt
 		}
@@ -293,25 +322,23 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 
 	invocationCount := eventCounts[domain.EventInvoked]
 	activityCount := eventCounts[domain.EventLoaded] + invocationCount
+	sources := sortedProvenanceSources(provenanceSet)
 	evidence := CapabilityEvidence{
 		Capability:           capability,
 		EventCounts:          eventCounts,
 		InvocationCount:      invocationCount,
 		ActivityCount:        activityCount,
 		DistinctSessionCount: len(sessions),
+		EvidenceSources:      sources,
 		MetadataTokens:       capability.MetadataTokens,
 		BodyTokens:           capability.BodyTokens,
 		Confidence:           domain.ConfidenceObserved,
+		EvidenceConfidence:   domain.ConfidenceObserved,
 	}
-	if !lastUsed.IsZero() {
-		evidence.HasLastUsed = true
-		evidence.LastUsedAt = lastUsed
-		if lastUsed.After(now) {
-			evidence.LastUsedInFuture = true
-			evidence.LastUsedAge = 0
-		} else {
-			evidence.LastUsedAge = now.Sub(lastUsed)
-		}
+	setUseObservation(&evidence, firstUsed, lastUsed, now)
+	evidence.EvidenceCoverage = coverageWording(evidence)
+	if activityCount == 0 {
+		evidence.EvidenceConfidence = domain.ConfidenceUnknown
 	}
 
 	classification, confidence, basis, err := classify(evidence, config)
@@ -326,22 +353,79 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 
 func classify(evidence CapabilityEvidence, config Config) (Classification, domain.Confidence, string, error) {
 	if evidence.ActivityCount == 0 {
-		return DEAD, domain.ConfidenceObserved, "installed definition with no observed loaded or invoked events", nil
+		return REVIEW, domain.ConfidenceUnknown, evidence.EvidenceCoverage, nil
 	}
-	if !evidence.LastUsedInFuture && evidence.LastUsedAge > config.StaleAfter {
-		return STALE, domain.ConfidenceObserved, fmt.Sprintf("last loaded/invoked observation is %s older than the %s stale threshold", evidence.LastUsedAge, config.StaleAfter), nil
+	if evidence.InvocationCount > 0 && !evidence.LastUsedInFuture && evidence.LastUsedAge > config.StaleAfter {
+		return STALE, domain.ConfidenceObserved, fmt.Sprintf("last invocation is %s older than the %s stale threshold; %s", evidence.LastUsedAge, config.StaleAfter, evidence.EvidenceCoverage), nil
 	}
 	footprint, err := knownFootprint(evidence.MetadataTokens, evidence.BodyTokens)
 	if err != nil {
 		return Classification(""), domain.ConfidenceUnknown, "", err
 	}
 	if footprint.KnownCount > 0 && footprint.Value >= config.ReviewFootprintTokens && evidence.InvocationCount <= config.ReviewMaxUseCount {
-		return REVIEW, footprint.Confidence, fmt.Sprintf("%s with %d observed invocation(s)", footprint.Basis(), evidence.InvocationCount), nil
+		return REVIEW, footprint.Confidence, fmt.Sprintf("%s with %d observed invocation(s); %s", footprint.Basis(), evidence.InvocationCount, evidence.EvidenceCoverage), nil
+	}
+	if evidence.InvocationCount == 0 {
+		return REVIEW, domain.ConfidenceObserved, fmt.Sprintf("loaded activity observed but no invocation evidence; %s", evidence.EvidenceCoverage), nil
 	}
 	if evidence.LastUsedInFuture {
-		return KEEP, domain.ConfidenceObserved, "observed loaded/invoked activity has a future timestamp; age clamped to zero", nil
+		return KEEP, domain.ConfidenceObserved, fmt.Sprintf("observed invocation has a future timestamp; age clamped to zero; %s", evidence.EvidenceCoverage), nil
 	}
-	return KEEP, domain.ConfidenceObserved, "observed loaded/invoked activity is within the stale threshold", nil
+	return KEEP, domain.ConfidenceObserved, fmt.Sprintf("observed invocation is within the stale threshold; %s", evidence.EvidenceCoverage), nil
+}
+
+func sortedProvenanceSources(provenanceSet map[domain.Provenance]struct{}) []domain.Provenance {
+	result := make([]domain.Provenance, 0, len(provenanceSet))
+	for provenance := range provenanceSet {
+		result = append(result, provenance)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func setUseObservation(evidence *CapabilityEvidence, first, last, now time.Time) {
+	if first.IsZero() {
+		return
+	}
+	evidence.HasFirstUsed = true
+	evidence.FirstUsedAt = first
+	evidence.HasLastUsed = true
+	evidence.LastUsedAt = last
+	if last.After(now) {
+		evidence.LastUsedInFuture = true
+		evidence.LastUsedAge = 0
+	} else {
+		evidence.LastUsedAge = now.Sub(last)
+	}
+}
+
+func coverageWording(evidence CapabilityEvidence) string {
+	if evidence.ActivityCount == 0 {
+		if evidence.EventCounts[domain.EventAdvertised] > 0 {
+			return fmt.Sprintf("never observed; advertised evidence only from %s; %s", provenanceWording(evidence.EvidenceSources), coverageInsufficient)
+		}
+		return fmt.Sprintf("never observed; no loaded or invoked activity evidence; %s", coverageInsufficient)
+	}
+	if len(evidence.EvidenceSources) == 0 {
+		return "observed activity; " + coverageUnknown
+	}
+	if evidence.InvocationCount == 0 {
+		return fmt.Sprintf("observed loaded activity from %s; %s", provenanceWording(evidence.EvidenceSources), coverageUnknown)
+	}
+	return fmt.Sprintf("observed invocation activity from %s; %s", provenanceWording(evidence.EvidenceSources), coverageUnknown)
+}
+
+func provenanceWording(sources []domain.Provenance) string {
+	labels := make([]string, 0, len(sources))
+	for _, source := range sources {
+		switch source {
+		case domain.ProvenanceTranscript:
+			labels = append(labels, "transcript backfill/fallback")
+		default:
+			labels = append(labels, string(source))
+		}
+	}
+	return strings.Join(labels, ", ")
 }
 
 type footprintEvidence struct {

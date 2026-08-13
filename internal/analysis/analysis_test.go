@@ -9,9 +9,9 @@ import (
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
-func TestAnalyzeNeverUsedCapabilityIsDead(t *testing.T) {
+func TestAnalyzeNeverObservedCapabilityRequiresReview(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
-	capability := testCapability("never-used")
+	capability := testCapability("never-observed")
 
 	report, err := Analyze([]domain.Capability{capability}, nil, DefaultConfig(), now)
 	if err != nil {
@@ -21,14 +21,20 @@ func TestAnalyzeNeverUsedCapabilityIsDead(t *testing.T) {
 		t.Fatalf("capability evidence count = %d, want 1", len(report.Capabilities))
 	}
 	evidence := report.Capabilities[0]
-	if evidence.Classification != DEAD {
-		t.Fatalf("classification = %q, want %q", evidence.Classification, DEAD)
+	if evidence.Classification != REVIEW {
+		t.Fatalf("classification = %q, want %q", evidence.Classification, REVIEW)
 	}
 	if evidence.EventCounts[domain.EventAdvertised] != 0 || evidence.EventCounts[domain.EventLoaded] != 0 || evidence.EventCounts[domain.EventInvoked] != 0 {
 		t.Fatalf("event counts = %#v, want all zero", evidence.EventCounts)
 	}
-	if evidence.InvocationCount != 0 || evidence.DistinctSessionCount != 0 || evidence.HasLastUsed {
+	if evidence.InvocationCount != 0 || evidence.ActivityCount != 0 || evidence.DistinctSessionCount != 0 || evidence.HasFirstUsed || evidence.HasLastUsed {
 		t.Fatalf("unused evidence = %#v", evidence)
+	}
+	if !strings.Contains(evidence.Basis, "never observed") || !strings.Contains(evidence.Basis, "insufficient") {
+		t.Fatalf("never-observed basis = %q, want explicit insufficient lifetime evidence", evidence.Basis)
+	}
+	if evidence.EvidenceConfidence != domain.ConfidenceUnknown {
+		t.Fatalf("evidence confidence = %q, want unknown", evidence.EvidenceConfidence)
 	}
 }
 
@@ -82,7 +88,7 @@ func TestAnalyzeClassifiesStaleAtStrictBoundaryAndClampsFutureAge(t *testing.T) 
 	}
 }
 
-func TestAnalyzeUsesSourceTimestampForActivityButPreservesObservedAt(t *testing.T) {
+func TestAnalyzeUsesSourceTimestampForInvocationButPreservesObservedAt(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("source-time")
 	event := testEvent(now.Add(-time.Hour), capability.Name, domain.EventInvoked, "session")
@@ -129,15 +135,15 @@ func TestAnalyzePreservesEventTypesAndSessions(t *testing.T) {
 	if evidence.InvocationCount != 2 || evidence.ActivityCount != 3 {
 		t.Fatalf("invocation/activity counts = %d/%d, want 2/3", evidence.InvocationCount, evidence.ActivityCount)
 	}
-	if evidence.DistinctSessionCount != 3 {
-		t.Fatalf("distinct session count = %d, want 3", evidence.DistinctSessionCount)
+	if evidence.DistinctSessionCount != 2 {
+		t.Fatalf("distinct invocation session count = %d, want 2", evidence.DistinctSessionCount)
 	}
-	if !evidence.LastUsedAt.Equal(now.Add(-30 * time.Minute)) {
-		t.Fatalf("last-used timestamp = %s, want %s", evidence.LastUsedAt, now.Add(-30*time.Minute))
+	if !evidence.FirstUsedAt.Equal(now.Add(-time.Hour)) || !evidence.LastUsedAt.Equal(now.Add(-30*time.Minute)) {
+		t.Fatalf("first/last used timestamps = %s/%s, want %s/%s", evidence.FirstUsedAt, evidence.LastUsedAt, now.Add(-time.Hour), now.Add(-30*time.Minute))
 	}
 }
 
-func TestAnalyzeLoadedWithoutInvocationIsNotDead(t *testing.T) {
+func TestAnalyzeLoadedWithoutInvocationRequiresReviewWithoutCallingItUse(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("loaded-only")
 	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{testEvent(now.Add(-time.Hour), capability.Name, domain.EventLoaded, "session")}, DefaultConfig(), now)
@@ -145,8 +151,11 @@ func TestAnalyzeLoadedWithoutInvocationIsNotDead(t *testing.T) {
 		t.Fatalf("Analyze() error = %v", err)
 	}
 	evidence := report.Capabilities[0]
-	if evidence.Classification != KEEP || evidence.InvocationCount != 0 || evidence.EventCounts[domain.EventLoaded] != 1 {
+	if evidence.Classification != REVIEW || evidence.InvocationCount != 0 || evidence.ActivityCount != 1 || evidence.EventCounts[domain.EventLoaded] != 1 || evidence.DistinctSessionCount != 0 || evidence.HasLastUsed {
 		t.Fatalf("loaded-only evidence = %#v", evidence)
+	}
+	if !strings.Contains(evidence.Basis, "loaded activity") || strings.Contains(evidence.Basis, "use") {
+		t.Fatalf("loaded-only basis = %q, want loaded evidence without use wording", evidence.Basis)
 	}
 }
 
@@ -299,8 +308,11 @@ func TestAnalyzePreservesAdvertisementStatesAndOrdersDefinitionsDeterministicall
 		if evidence.Capability.Advertisement != wantStates[index] {
 			t.Fatalf("advertisement state at index %d = %q, want %q", index, evidence.Capability.Advertisement, wantStates[index])
 		}
-		if evidence.EventCounts[domain.EventLoaded] != 0 || evidence.EventCounts[domain.EventInvoked] != 0 || evidence.Classification != DEAD {
+		if evidence.EventCounts[domain.EventLoaded] != 0 || evidence.EventCounts[domain.EventInvoked] != 0 || evidence.Classification != REVIEW {
 			t.Fatalf("hidden/exposure-only evidence = %#v", evidence)
+		}
+		if !strings.Contains(evidence.Basis, "never observed") {
+			t.Fatalf("exposure-only basis = %q, want never observed", evidence.Basis)
 		}
 	}
 
@@ -523,6 +535,131 @@ func TestAnalyzeRejectsInvalidConfigInputAndTime(t *testing.T) {
 	}
 }
 
+func TestAnalyzeAggregatesDistinctEvidenceSourcesWithoutDeduplicating(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("mixed-evidence")
+	events := []domain.UsageEvent{
+		testEvent(now.Add(-4*time.Hour), capability.Name, domain.EventAdvertised, "advertised-session"),
+		testEventWithProvenance(now.Add(-3*time.Hour), capability.Name, domain.EventLoaded, "loaded-session", domain.ProvenanceTranscript),
+		testEventWithProvenance(now.Add(-2*time.Hour), capability.Name, domain.EventInvoked, "invoke-a", domain.ProvenanceHook),
+		testEventWithProvenance(now.Add(-time.Hour), capability.Name, domain.EventInvoked, "invoke-b", domain.ProvenanceTranscript),
+		testEventWithProvenance(now.Add(-30*time.Minute), capability.Name, domain.EventInvoked, "invoke-a", domain.ProvenanceImport),
+	}
+
+	report, err := Analyze([]domain.Capability{capability}, events, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.InvocationCount != 3 || evidence.ActivityCount != 4 {
+		t.Fatalf("invocation/activity counts = %d/%d, want 3/4", evidence.InvocationCount, evidence.ActivityCount)
+	}
+	if evidence.DistinctSessionCount != 2 {
+		t.Fatalf("distinct invocation sessions = %d, want 2", evidence.DistinctSessionCount)
+	}
+	wantSources := []domain.Provenance{domain.ProvenanceHook, domain.ProvenanceImport, domain.ProvenanceTranscript}
+	if !reflect.DeepEqual(evidence.EvidenceSources, wantSources) {
+		t.Fatalf("evidence sources = %#v, want sorted distinct %#v", evidence.EvidenceSources, wantSources)
+	}
+	if strings.Contains(evidence.EvidenceCoverage, "direct hook") || !strings.Contains(evidence.EvidenceCoverage, "transcript backfill/fallback") {
+		t.Fatalf("mixed evidence coverage = %q, want transcript fallback wording without direct-hook conflation", evidence.EvidenceCoverage)
+	}
+}
+
+func TestAnalyzeUsesEffectiveSourceTimeForLateTranscriptImport(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("late-transcript")
+	event := testEvent(now, capability.Name, domain.EventInvoked, "session")
+	sourceTime := now.Add(-48 * time.Hour)
+	event.SourceTimestamp = &sourceTime
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if !evidence.FirstUsedAt.Equal(sourceTime) || !evidence.LastUsedAt.Equal(sourceTime) {
+		t.Fatalf("first/last used = %s/%s, want source timestamp %s", evidence.FirstUsedAt, evidence.LastUsedAt, sourceTime)
+	}
+	if evidence.LastUsedAge != 48*time.Hour {
+		t.Fatalf("last-used age = %s, want 48h", evidence.LastUsedAge)
+	}
+}
+
+func TestAnalyzeUsesObservedAtWhenSourceTimeIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("observed-time")
+	observedAt := now.Add(-3 * time.Hour)
+	event := testEvent(observedAt, capability.Name, domain.EventInvoked, "session")
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if !evidence.FirstUsedAt.Equal(observedAt) || !evidence.LastUsedAt.Equal(observedAt) {
+		t.Fatalf("first/last used = %s/%s, want observed-at %s", evidence.FirstUsedAt, evidence.LastUsedAt, observedAt)
+	}
+}
+
+func TestAnalyzeAdvertisedOnlyIsNotUse(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("advertised-only")
+	event := testEvent(now.Add(-time.Hour), capability.Name, domain.EventAdvertised, "advertising-session")
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.EventCount(domain.EventAdvertised) != 1 || evidence.EventCount(domain.EventLoaded) != 0 || evidence.EventCount(domain.EventInvoked) != 0 {
+		t.Fatalf("advertised-only event counts = %#v", evidence.EventCounts)
+	}
+	if evidence.InvocationCount != 0 || evidence.ActivityCount != 0 || evidence.DistinctSessionCount != 0 || evidence.HasFirstUsed || evidence.HasLastUsed {
+		t.Fatalf("advertised-only usage evidence = %#v", evidence)
+	}
+	if evidence.Classification != REVIEW || !strings.Contains(evidence.Basis, "never observed") || !strings.Contains(evidence.Basis, "advertised evidence only") {
+		t.Fatalf("advertised-only classification/basis = %q/%q", evidence.Classification, evidence.Basis)
+	}
+}
+
+func TestAnalyzeLoadedOnlyDoesNotBecomeStaleFromLoadTime(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("loaded-old")
+	loaded := testEvent(now.Add(-2*DefaultStaleAfter), capability.Name, domain.EventLoaded, "load-session")
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{loaded}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.Classification != REVIEW {
+		t.Fatalf("loaded-only classification = %q, want REVIEW", evidence.Classification)
+	}
+	if evidence.HasLastUsed || evidence.LastUsedAge != 0 || evidence.DistinctSessionCount != 0 {
+		t.Fatalf("loaded-only use evidence = %#v, want invocation-only fields empty", evidence)
+	}
+}
+
+func TestAnalyzeCoverageConfidenceNeverClaimsCompleteCapture(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("hook-coverage")
+	event := testEvent(now.Add(-time.Hour), capability.Name, domain.EventInvoked, "session")
+	event.Provenance = domain.ProvenanceHook
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.EvidenceConfidence != domain.ConfidenceObserved {
+		t.Fatalf("evidence confidence = %q, want observed facts", evidence.EvidenceConfidence)
+	}
+	if !strings.Contains(evidence.EvidenceCoverage, "coverage is unknown") || strings.Contains(evidence.EvidenceCoverage, "complete") {
+		t.Fatalf("hook coverage = %q, want unknown lifetime coverage", evidence.EvidenceCoverage)
+	}
+}
+
 func testEvent(timestamp time.Time, capabilityName string, eventType domain.EventType, session string) domain.UsageEvent {
 	return domain.UsageEvent{
 		ObservedAt:       timestamp,
@@ -536,6 +673,12 @@ func testEvent(timestamp time.Time, capabilityName string, eventType domain.Even
 		InvocationOrigin: domain.InvocationOriginUnknown,
 		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
 	}
+}
+
+func testEventWithProvenance(timestamp time.Time, capabilityName string, eventType domain.EventType, session string, provenance domain.Provenance) domain.UsageEvent {
+	event := testEvent(timestamp, capabilityName, eventType, session)
+	event.Provenance = provenance
+	return event
 }
 
 func testCapability(name string) domain.Capability {
