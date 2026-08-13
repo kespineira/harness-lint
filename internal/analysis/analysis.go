@@ -19,9 +19,9 @@ const (
 	// to Analyze so the policy is explicit at the boundary.
 	DefaultStaleAfter = 60 * 24 * time.Hour
 
-	// DefaultReviewFootprintTokens is the advertised metadata-plus-body token
-	// footprint at which a low-use capability merits review. The threshold is
-	// intentionally coarse: it is a triage aid, not a cost score.
+	// DefaultReviewFootprintTokens is the known metadata/body footprint at which
+	// a low-use capability merits review. The threshold is intentionally coarse:
+	// it is a triage aid, not a cost score.
 	DefaultReviewFootprintTokens int64 = 1000
 
 	// DefaultReviewUseCount is the maximum observed invocation count that is
@@ -48,8 +48,9 @@ type Config struct {
 	// only an age older than the threshold is stale.
 	StaleAfter time.Duration
 
-	// ReviewFootprintTokens is compared with the sum of known advertised
-	// metadata and body values when at least one of those values is estimated.
+	// ReviewFootprintTokens is compared with the sum of known metadata and body
+	// values. Unknown values are excluded; context labels their semantics by
+	// capability type.
 	ReviewFootprintTokens int64
 
 	// ReviewMaxUseCount is the inclusive upper bound for low invocation use.
@@ -123,11 +124,14 @@ type CapabilityEvidence struct {
 	LastUsedAt       time.Time
 	LastUsedAge      time.Duration
 	LastUsedInFuture bool
-	MetadataTokens   domain.Measurement
-	BodyTokens       domain.Measurement
-	Classification   Classification
-	Confidence       domain.Confidence
-	Basis            string
+	// MetadataTokens and BodyTokens retain adapter measurements independently;
+	// context summaries label their semantics by capability type. Neither
+	// measurement implies a loaded or invoked event.
+	MetadataTokens domain.Measurement
+	BodyTokens     domain.Measurement
+	Classification Classification
+	Confidence     domain.Confidence
+	Basis          string
 }
 
 // EventCount returns one event type's count without exposing map lookup
@@ -143,9 +147,10 @@ type Report struct {
 	Duplicates   []DuplicateName
 }
 
-// MeasurementSummary is a grouped subtotal of one compatible measurement kind
-// (advertised metadata or advertised body). Value is only the sum of known
-// measurements. Unknown values are excluded and counted explicitly.
+// MeasurementSummary is a grouped subtotal of one compatible measurement kind.
+// Context groups label metadata and body semantics by capability type. Value
+// is only the sum of known measurements; unknown values are excluded and
+// counted explicitly.
 type MeasurementSummary struct {
 	Value          int64
 	Confidence     domain.Confidence
@@ -165,8 +170,10 @@ func (m MeasurementSummary) IsKnown() bool { return m.KnownCount > 0 }
 // IsEstimate reports whether any contributing known value was estimated.
 func (m MeasurementSummary) IsEstimate() bool { return m.Estimated }
 
-// ContextGroup is one runtime/category bucket. Metadata and body are kept as
-// separate compatible dimensions and are never summed together.
+// ContextGroup is one runtime/category bucket. Metadata and body remain
+// separate; their semantic labels are selected from capability type and
+// exposure evidence (for example, skills can have configured baseline
+// metadata, while instruction-file bodies are configured baseline content).
 type ContextGroup struct {
 	Runtime         domain.Runtime
 	CapabilityType  domain.CapabilityType
@@ -175,8 +182,10 @@ type ContextGroup struct {
 	BodyTokens      MeasurementSummary
 }
 
-// ContextSummary groups advertised footprint measurements by runtime and
-// capability category in deterministic order.
+// ContextSummary groups compatible metadata and body measurements by runtime
+// and capability category in deterministic order; basis labels explain whether
+// each dimension is configured baseline content, on-load content, or has
+// runtime-dependent loading semantics.
 type ContextSummary struct {
 	Groups []ContextGroup
 }
@@ -319,12 +328,12 @@ func classify(evidence CapabilityEvidence, config Config) (Classification, domai
 	if !evidence.LastUsedInFuture && evidence.LastUsedAge > config.StaleAfter {
 		return STALE, domain.ConfidenceObserved, fmt.Sprintf("last loaded/invoked observation is %s older than the %s stale threshold", evidence.LastUsedAge, config.StaleAfter), nil
 	}
-	footprint, estimated, err := estimatedFootprint(evidence.MetadataTokens, evidence.BodyTokens)
+	footprint, err := knownFootprint(evidence.MetadataTokens, evidence.BodyTokens)
 	if err != nil {
 		return Classification(""), domain.ConfidenceUnknown, "", err
 	}
-	if estimated && footprint >= config.ReviewFootprintTokens && evidence.InvocationCount <= config.ReviewMaxUseCount {
-		return REVIEW, domain.ConfidenceEstimated, fmt.Sprintf("estimated advertised metadata/body footprint is %d tokens with %d observed invocation(s)", footprint, evidence.InvocationCount), nil
+	if footprint.KnownCount > 0 && footprint.Value >= config.ReviewFootprintTokens && evidence.InvocationCount <= config.ReviewMaxUseCount {
+		return REVIEW, footprint.Confidence, fmt.Sprintf("%s with %d observed invocation(s)", footprint.Basis(), evidence.InvocationCount), nil
 	}
 	if evidence.LastUsedInFuture {
 		return KEEP, domain.ConfidenceObserved, "observed loaded/invoked activity has a future timestamp; age clamped to zero", nil
@@ -332,27 +341,87 @@ func classify(evidence CapabilityEvidence, config Config) (Classification, domai
 	return KEEP, domain.ConfidenceObserved, "observed loaded/invoked activity is within the stale threshold", nil
 }
 
-func estimatedFootprint(metadata, body domain.Measurement) (int64, bool, error) {
-	var total int64
-	estimated := false
-	for _, measurement := range []domain.Measurement{metadata, body} {
-		if measurement.Confidence == domain.ConfidenceUnknown {
-			continue
-		}
-		if measurement.Confidence == domain.ConfidenceEstimated {
-			estimated = true
-		}
-		if measurement.Value > maxInt64-total {
-			return 0, false, errors.New("advertised footprint overflows int64")
-		}
-		total += measurement.Value
-	}
-	return total, estimated, nil
+type footprintEvidence struct {
+	Value        int64
+	Confidence   domain.Confidence
+	KnownCount   int
+	UnknownCount int
+	Bases        []string
 }
 
-// SummarizeContext aggregates installed advertised measurements. It is
-// intentionally independent of event observations: an advertised footprint is
-// not evidence of loaded or invoked use.
+func knownFootprint(metadata, body domain.Measurement) (footprintEvidence, error) {
+	result := footprintEvidence{Confidence: domain.ConfidenceUnknown}
+	measurements := []struct {
+		label       string
+		measurement domain.Measurement
+	}{
+		{label: "metadata footprint", measurement: metadata},
+		{label: "body/content footprint", measurement: body},
+	}
+	for _, item := range measurements {
+		measurement := item.measurement
+		switch measurement.Confidence {
+		case domain.ConfidenceUnknown:
+			result.UnknownCount++
+			continue
+		case domain.ConfidenceExact, domain.ConfidenceObserved, domain.ConfidenceEstimated:
+			// Known measurement; confidence is reduced to the weakest known
+			// contributor below.
+		default:
+			return footprintEvidence{}, fmt.Errorf("invalid measurement confidence %q", measurement.Confidence)
+		}
+		if measurement.Value > maxInt64-result.Value {
+			return footprintEvidence{}, errors.New("known footprint overflows int64")
+		}
+		result.Value += measurement.Value
+		result.KnownCount++
+		if result.KnownCount == 1 || weakerConfidence(measurement.Confidence, result.Confidence) == measurement.Confidence {
+			result.Confidence = measurement.Confidence
+		}
+		if strings.TrimSpace(measurement.Basis) != "" {
+			result.Bases = append(result.Bases, item.label+": "+measurement.Basis)
+		}
+	}
+	sort.Strings(result.Bases)
+	return result, nil
+}
+
+func weakerConfidence(left, right domain.Confidence) domain.Confidence {
+	rank := func(confidence domain.Confidence) int {
+		switch confidence {
+		case domain.ConfidenceExact:
+			return 0
+		case domain.ConfidenceObserved:
+			return 1
+		case domain.ConfidenceEstimated:
+			return 2
+		default:
+			return 3
+		}
+	}
+	if rank(left) >= rank(right) {
+		return left
+	}
+	return right
+}
+
+func (f footprintEvidence) Basis() string {
+	parts := []string{fmt.Sprintf("metadata plus body/content footprint is %d known token(s)", f.Value)}
+	if f.KnownCount > 0 {
+		parts = append(parts, fmt.Sprintf("weakest known confidence: %s", f.Confidence))
+	}
+	if f.UnknownCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d unknown measurement(s) excluded", f.UnknownCount))
+	}
+	if len(f.Bases) > 0 {
+		parts = append(parts, "bases: "+strings.Join(f.Bases, ", "))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// SummarizeContext aggregates installed configured baseline and on-load
+// measurements. It is intentionally independent of event observations:
+// neither exposure measurement is evidence of loaded or invoked use.
 func SummarizeContext(capabilities []domain.Capability) (ContextSummary, error) {
 	ordered := append([]domain.Capability(nil), capabilities...)
 	for index, capability := range ordered {
@@ -397,11 +466,15 @@ func SummarizeContext(capabilities []domain.Capability) (ContextSummary, error) 
 	result := ContextSummary{Groups: make([]ContextGroup, 0, len(keys))}
 	for _, key := range keys {
 		group := groups[key]
-		metadata, err := aggregateMeasurements(group.metadata)
+		metadataLabel := "metadata footprint"
+		if key.typ == domain.CapabilitySkill {
+			metadataLabel = "configured baseline exposure for Skill metadata"
+		}
+		metadata, err := aggregateMeasurements(group.metadata, metadataLabel)
 		if err != nil {
 			return ContextSummary{}, fmt.Errorf("aggregate %s/%s metadata measurements: %w", key.runtime, key.typ, err)
 		}
-		body, err := aggregateMeasurements(group.body)
+		body, err := aggregateMeasurements(group.body, bodyContextLabel(key.typ))
 		if err != nil {
 			return ContextSummary{}, fmt.Errorf("aggregate %s/%s body measurements: %w", key.runtime, key.typ, err)
 		}
@@ -416,7 +489,18 @@ func SummarizeContext(capabilities []domain.Capability) (ContextSummary, error) 
 	return result, nil
 }
 
-func aggregateMeasurements(measurements []domain.Measurement) (MeasurementSummary, error) {
+func bodyContextLabel(capabilityType domain.CapabilityType) string {
+	switch capabilityType {
+	case domain.CapabilityInstructionFile:
+		return "configured baseline instruction content"
+	case domain.CapabilitySkill:
+		return "on-load body footprint"
+	default:
+		return "body/content footprint (loading semantics runtime-dependent)"
+	}
+}
+
+func aggregateMeasurements(measurements []domain.Measurement, label string) (MeasurementSummary, error) {
 	result := MeasurementSummary{Complete: true}
 	bases := make(map[string]struct{})
 	for _, measurement := range measurements {
@@ -461,10 +545,10 @@ func aggregateMeasurements(measurements []domain.Measurement) (MeasurementSummar
 	}
 
 	if result.KnownCount == 0 {
-		result.Basis = fmt.Sprintf("no known measurements; %d unknown measurement(s) excluded", result.UnknownCount)
+		result.Basis = fmt.Sprintf("%s: no known measurements; %d unknown measurement(s) excluded", label, result.UnknownCount)
 		return result, nil
 	}
-	basisParts := []string{fmt.Sprintf("sum of %d compatible known measurement(s)", result.KnownCount)}
+	basisParts := []string{fmt.Sprintf("%s: sum of %d compatible known measurement(s)", label, result.KnownCount)}
 	if result.EstimatedCount > 0 {
 		basisParts = append(basisParts, "includes estimated measurements")
 	}
@@ -569,6 +653,9 @@ func capabilityLess(left, right domain.Capability) bool {
 	}
 	if left.Enabled != right.Enabled {
 		return left.Enabled < right.Enabled
+	}
+	if left.Advertisement != right.Advertisement {
+		return left.Advertisement < right.Advertisement
 	}
 	if left.Hash != right.Hash {
 		return left.Hash < right.Hash

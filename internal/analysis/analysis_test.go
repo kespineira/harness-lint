@@ -151,7 +151,7 @@ func TestAnalyzeReviewUsesConfigurableEstimatedFootprintAndLowInvocationUse(t *t
 	}
 }
 
-func TestAnalyzeExactFootprintDoesNotTriggerEstimatedReview(t *testing.T) {
+func TestAnalyzeExactFootprintTriggersReviewWithoutEstimatedConfidence(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("large-exact")
 	capability.MetadataTokens = domain.Measurement{Value: 2000, Confidence: domain.ConfidenceExact, Basis: "manifest"}
@@ -163,11 +163,14 @@ func TestAnalyzeExactFootprintDoesNotTriggerEstimatedReview(t *testing.T) {
 		t.Fatalf("Analyze() error = %v", err)
 	}
 	evidence := report.Capabilities[0]
-	if evidence.Classification != KEEP {
-		t.Fatalf("classification = %q, want %q for exact-only footprint", evidence.Classification, KEEP)
+	if evidence.Classification != REVIEW {
+		t.Fatalf("classification = %q, want %q for exact-only footprint", evidence.Classification, REVIEW)
 	}
-	if evidence.Confidence != domain.ConfidenceObserved {
-		t.Fatalf("classification confidence = %q, want observed", evidence.Confidence)
+	if evidence.Confidence != domain.ConfidenceExact {
+		t.Fatalf("classification confidence = %q, want exact", evidence.Confidence)
+	}
+	if strings.Contains(evidence.Basis, "estimated") {
+		t.Fatalf("exact-only review basis mislabeled as estimated: %q", evidence.Basis)
 	}
 }
 
@@ -247,6 +250,46 @@ func TestAnalyzeReportsDuplicateDefinitionsAndDeterministicOrdering(t *testing.T
 	}
 	if !reflect.DeepEqual(report, reversed) {
 		t.Fatalf("analysis is input-order dependent:\nfirst: %#v\nsecond: %#v", report, reversed)
+	}
+}
+
+func TestAnalyzePreservesAdvertisementStatesAndOrdersDefinitionsDeterministically(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	base := testCapability("visibility")
+	fully := base
+	fully.Advertisement = domain.AdvertisementStateFullyAdvertised
+	nameOnly := base
+	nameOnly.Advertisement = domain.AdvertisementStateNameOnly
+	notAdvertised := base
+	notAdvertised.Advertisement = domain.AdvertisementStateNotAdvertised
+
+	report, err := Analyze([]domain.Capability{notAdvertised, fully, nameOnly}, nil, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	wantStates := []domain.AdvertisementState{
+		domain.AdvertisementStateFullyAdvertised,
+		domain.AdvertisementStateNameOnly,
+		domain.AdvertisementStateNotAdvertised,
+	}
+	if len(report.Capabilities) != len(wantStates) {
+		t.Fatalf("capability evidence count = %d, want %d", len(report.Capabilities), len(wantStates))
+	}
+	for index, evidence := range report.Capabilities {
+		if evidence.Capability.Advertisement != wantStates[index] {
+			t.Fatalf("advertisement state at index %d = %q, want %q", index, evidence.Capability.Advertisement, wantStates[index])
+		}
+		if evidence.EventCounts[domain.EventLoaded] != 0 || evidence.EventCounts[domain.EventInvoked] != 0 || evidence.Classification != DEAD {
+			t.Fatalf("hidden/exposure-only evidence = %#v", evidence)
+		}
+	}
+
+	reversed, err := Analyze([]domain.Capability{nameOnly, fully, notAdvertised}, nil, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze(reversed) error = %v", err)
+	}
+	if !reflect.DeepEqual(report, reversed) {
+		t.Fatalf("advertisement ordering depends on input order:\nfirst: %#v\nsecond: %#v", report, reversed)
 	}
 }
 
@@ -330,11 +373,73 @@ func TestSummarizeContextAggregatesKnownValuesAndRetainsUncertainty(t *testing.T
 	if group.MetadataTokens.Confidence != domain.ConfidenceUnknown || !group.MetadataTokens.Estimated || group.MetadataTokens.Complete {
 		t.Fatalf("metadata uncertainty = %#v", group.MetadataTokens)
 	}
-	if !strings.Contains(group.MetadataTokens.Basis, "estimated") || !strings.Contains(group.MetadataTokens.Basis, "unknown") {
-		t.Fatalf("metadata basis = %q, want estimate and unknown labels", group.MetadataTokens.Basis)
+	if !strings.Contains(group.MetadataTokens.Basis, "configured baseline exposure for Skill metadata") || !strings.Contains(group.MetadataTokens.Basis, "estimated") || !strings.Contains(group.MetadataTokens.Basis, "unknown") {
+		t.Fatalf("metadata basis = %q, want Skill baseline, estimate, and unknown labels", group.MetadataTokens.Basis)
 	}
 	if group.BodyTokens.Value != 12 || group.BodyTokens.KnownCount != 2 || group.BodyTokens.UnknownCount != 1 {
 		t.Fatalf("body aggregate = %#v, want known sum 12 and one unknown", group.BodyTokens)
+	}
+	if !strings.Contains(group.BodyTokens.Basis, "on-load body footprint") || strings.Contains(group.BodyTokens.Basis, "advertised") {
+		t.Fatalf("body basis = %q, want separate on-load wording without advertised label", group.BodyTokens.Basis)
+	}
+}
+
+func TestSummarizeContextLabelsBaselineAndBodySemanticsByTypeAndExposure(t *testing.T) {
+	skill := testCapability("skill")
+	skill.Advertisement = domain.AdvertisementStateFullyAdvertised
+	skill.MetadataTokens = domain.Measurement{Value: 10, Confidence: domain.ConfidenceExact, Basis: "configured metadata"}
+	skill.BodyTokens = domain.Measurement{Value: 20, Confidence: domain.ConfidenceEstimated, Basis: "on-load estimate"}
+
+	nameOnlySkill := testCapability("name-only-skill")
+	nameOnlySkill.Advertisement = domain.AdvertisementStateNameOnly
+	nameOnlySkill.MetadataTokens = domain.Measurement{Value: 5, Confidence: domain.ConfidenceEstimated, Basis: "name estimate"}
+	nameOnlySkill.BodyTokens = domain.Measurement{Confidence: domain.ConfidenceUnknown}
+
+	hiddenSkill := testCapability("hidden-skill")
+	hiddenSkill.Advertisement = domain.AdvertisementStateNotAdvertised
+	hiddenSkill.MetadataTokens = domain.Measurement{Confidence: domain.ConfidenceUnknown}
+	hiddenSkill.BodyTokens = domain.Measurement{Confidence: domain.ConfidenceUnknown}
+
+	instructions := testCapability("instructions")
+	instructions.Type = domain.CapabilityInstructionFile
+	instructions.MetadataTokens = domain.Measurement{Confidence: domain.ConfidenceUnknown}
+	instructions.BodyTokens = domain.Measurement{Value: 40, Confidence: domain.ConfidenceExact, Basis: "instruction content"}
+
+	other := testCapability("other")
+	other.Type = domain.CapabilityCommand
+	other.MetadataTokens = domain.Measurement{Value: 30, Confidence: domain.ConfidenceExact, Basis: "configured metadata"}
+	other.BodyTokens = domain.Measurement{Confidence: domain.ConfidenceUnknown}
+
+	context, err := SummarizeContext([]domain.Capability{instructions, hiddenSkill, nameOnlySkill, other, skill})
+	if err != nil {
+		t.Fatalf("SummarizeContext() error = %v", err)
+	}
+	var skillGroup, otherGroup, instructionGroup *ContextGroup
+	for index := range context.Groups {
+		group := &context.Groups[index]
+		switch {
+		case group.Runtime == domain.RuntimeCodex && group.CapabilityType == domain.CapabilitySkill:
+			skillGroup = group
+		case group.Runtime == domain.RuntimeCodex && group.CapabilityType == domain.CapabilityCommand:
+			otherGroup = group
+		case group.CapabilityType == domain.CapabilityInstructionFile:
+			instructionGroup = group
+		}
+	}
+	if skillGroup == nil || !strings.Contains(skillGroup.MetadataTokens.Basis, "configured baseline exposure") || !strings.Contains(skillGroup.BodyTokens.Basis, "on-load body footprint") {
+		t.Fatalf("fully advertised skill context = %#v, want baseline metadata and on-load body labels", skillGroup)
+	}
+	if skillGroup.CapabilityCount != 3 || skillGroup.MetadataTokens.Value != 15 || skillGroup.MetadataTokens.KnownCount != 2 || skillGroup.MetadataTokens.UnknownCount != 1 || skillGroup.MetadataTokens.Confidence != domain.ConfidenceUnknown || !skillGroup.MetadataTokens.Estimated {
+		t.Fatalf("mixed skill metadata context = %#v, want all three exposure states with known/estimated/unknown subtotal", skillGroup)
+	}
+	if skillGroup.BodyTokens.Value != 20 || skillGroup.BodyTokens.KnownCount != 1 || skillGroup.BodyTokens.UnknownCount != 2 {
+		t.Fatalf("mixed skill body context = %#v, want on-load subtotal plus two unknown values", skillGroup.BodyTokens)
+	}
+	if otherGroup == nil || strings.Contains(otherGroup.MetadataTokens.Basis, "configured baseline exposure") || !strings.Contains(otherGroup.MetadataTokens.Basis, "metadata footprint") || !strings.Contains(otherGroup.BodyTokens.Basis, "loading semantics runtime-dependent") {
+		t.Fatalf("other capability context = %#v, want neutral metadata and runtime-dependent body labels", otherGroup)
+	}
+	if instructionGroup == nil || !strings.Contains(instructionGroup.BodyTokens.Basis, "configured baseline instruction content") || strings.Contains(instructionGroup.BodyTokens.Basis, "on-load body footprint") {
+		t.Fatalf("instruction-file body context = %#v, want configured baseline instruction wording", instructionGroup)
 	}
 }
 
@@ -418,6 +523,7 @@ func testCapability(name string) domain.Capability {
 		Scope:          domain.ScopeProject,
 		Source:         "project",
 		Enabled:        domain.EnabledStateEnabled,
+		Advertisement:  domain.AdvertisementStateUnknown,
 		MetadataTokens: domain.Measurement{Confidence: domain.ConfidenceUnknown},
 		BodyTokens:     domain.Measurement{Confidence: domain.ConfidenceUnknown},
 	}
