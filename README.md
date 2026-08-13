@@ -501,20 +501,23 @@ go vet ./...
 go build -trimpath ./cmd/harness-lint
 ```
 
-The following practical smokes exercise every command without writing a
-persistent database (each `:memory:` invocation is independent):
+The following practical smokes exercise every command in a fresh temporary
+tree (each `:memory:` invocation is independent):
 
 ```sh
-go run ./cmd/harness-lint --help
-go run ./cmd/harness-lint hooks --help
-go run ./cmd/harness-lint hooks status --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
-go run ./cmd/harness-lint hooks install --dry-run --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
-go run ./cmd/harness-lint hooks uninstall --dry-run --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
-go run ./cmd/harness-lint scan --db :memory: --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
-go run ./cmd/harness-lint report --db :memory: --now 2026-08-13T15:00:00Z
-go run ./cmd/harness-lint context --db :memory: --now 2026-08-13T15:00:00Z
-go run ./cmd/harness-lint stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
-go run ./cmd/harness-lint doctor --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
+m2_smoke_root="$(mktemp -d)"
+mkdir -p "$m2_smoke_root/home" "$m2_smoke_root/project"
+go build -trimpath -o "$m2_smoke_root/harness-lint" ./cmd/harness-lint
+PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" --help
+PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks --help
+PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks status --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
+PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks install --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
+PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks uninstall --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
+"$m2_smoke_root/harness-lint" scan --db :memory: --home "$m2_smoke_root/home" --project "$m2_smoke_root/project" --now 2026-08-13T15:00:00Z
+"$m2_smoke_root/harness-lint" report --db :memory: --now 2026-08-13T15:00:00Z
+"$m2_smoke_root/harness-lint" context --db :memory: --now 2026-08-13T15:00:00Z
+"$m2_smoke_root/harness-lint" stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
+"$m2_smoke_root/harness-lint" doctor --home "$m2_smoke_root/home" --project "$m2_smoke_root/project" --now 2026-08-13T15:00:00Z
 ```
 
 Use a fresh temporary directory and put the built binary on that test
