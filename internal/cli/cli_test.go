@@ -454,3 +454,10 @@ func TestExecuteHelpFlagsSucceedForGlobalAndEveryCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanTextReplacesControlCharacters(t *testing.T) {
+	got := cleanText("a\nb\tc\x00d\x1b")
+	if got != "a b c d" {
+		t.Fatalf("cleanText() = %q, want control characters replaced with spaces", got)
+	}
+}
