@@ -11,8 +11,10 @@ import (
 )
 
 // Adapter discovers installed inventory and imports metadata-only usage. The
-// since boundary is inclusive; adapters should normalize returned timestamps
-// to UTC and must not return prompt, response, conversation, or tool payloads.
+// since boundary is inclusive; adapters must set ObservedAt to local
+// receive/import time, may set SourceTimestamp only for trustworthy source
+// occurrence times, and must not return prompt, response, conversation, or
+// tool payloads.
 type Adapter interface {
 	Runtime() domain.Runtime
 	Discover(ctx context.Context) (domain.Discovery, error)

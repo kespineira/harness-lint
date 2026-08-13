@@ -404,6 +404,12 @@ func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 		if err := event.Validate(); err != nil {
 			t.Fatalf("invalid imported event: %v", err)
 		}
+		if event.Provenance != domain.ProvenanceTranscript && event.Provenance != domain.ProvenanceImport {
+			t.Fatalf("unexpected Claude event provenance: %#v", event)
+		}
+		if event.SchemaVersion != domain.CurrentUsageEventSchemaVersion || event.ObservedAt.IsZero() {
+			t.Fatalf("Claude event contract fields = %#v", event)
+		}
 		seen[string(event.CapabilityType)+":"+event.CapabilityName] = event
 		if len(event.SessionID) != 64 || len(event.ProjectID) != 64 {
 			t.Fatalf("identifiers are not SHA-256 hashes: %#v", event)
@@ -437,7 +443,7 @@ func TestImportUsageTranscriptHookPrivacyAndSinceInclusiveUTC(t *testing.T) {
 	if len(allEvents) != 6 {
 		t.Fatalf("all event count = %d, want one additional pre-boundary event", len(allEvents))
 	}
-	if !allEvents[0].Timestamp.Before(clock) {
+	if !allEvents[0].EffectiveActivityTime().Before(clock) {
 		t.Fatalf("all events are not sorted with pre-boundary event first: %#v", allEvents)
 	}
 }

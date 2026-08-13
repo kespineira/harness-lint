@@ -1,6 +1,6 @@
 // Package store provides the daemonless SQLite persistence layer for the
-// runtime-neutral domain. SessionID and ProjectID are intentionally opaque:
-// callers must pre-normalize or hash them before insertion.
+// runtime-neutral domain. SessionID and ProjectID are intentionally opaque;
+// the usage-event write boundary normalizes them before persistence.
 package store
 
 import (
@@ -357,8 +357,10 @@ func (s *Store) listCapabilities(ctx context.Context, query string, args ...any)
 	return result, nil
 }
 
-// InsertUsageEvents idempotently inserts metadata-only events by fingerprint.
-// Blank fingerprints are derived from the event's canonical metadata.
+// InsertUsageEvents idempotently inserts metadata-only events by their safe
+// fingerprint. Stable source identities deduplicate direct delivery retries;
+// events without one retain observation/source timing in their conservative
+// fallback fingerprint. Every batch is one small SQLite transaction.
 func (s *Store) InsertUsageEvents(ctx context.Context, events []domain.UsageEvent) error {
 	if s.isClosed() {
 		return errors.New("store is closed")
@@ -369,17 +371,22 @@ func (s *Store) InsertUsageEvents(ctx context.Context, events []domain.UsageEven
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, event := range events {
-		if err := event.Validate(); err != nil {
+		normalized, err := domain.NormalizeUsageEvent(event)
+		if err != nil {
 			return fmt.Errorf("validate usage event: %w", err)
 		}
-		fingerprint := event.Fingerprint
-		if strings.TrimSpace(fingerprint) == "" {
-			fingerprint, err = domain.FingerprintForUsageEvent(event)
-			if err != nil {
-				return fmt.Errorf("fingerprint usage event: %w", err)
-			}
+		fingerprint, err := domain.FingerprintForUsageEvent(normalized)
+		if err != nil {
+			return fmt.Errorf("fingerprint usage event: %w", err)
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO usage_events(timestamp, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO NOTHING`, event.Timestamp.UTC().Format(time.RFC3339Nano), event.Runtime, event.SessionID, event.ProjectID, event.CapabilityType, event.CapabilityName, event.EventType, fingerprint)
+		var sourceTimestamp any
+		if normalized.SourceTimestamp != nil {
+			sourceTimestamp = normalized.SourceTimestamp.Format(time.RFC3339Nano)
+		}
+		// timestamp is the legacy v4 column. Keep it populated with effective
+		// activity time for old readers while the explicit fields below remain
+		// authoritative for the current contract.
+		_, err = tx.ExecContext(ctx, `INSERT INTO usage_events(timestamp, observed_at, source_timestamp, provenance, schema_version, invocation_origin, source_identity, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO NOTHING`, normalized.EffectiveActivityTime().Format(time.RFC3339Nano), normalized.ObservedAt.Format(time.RFC3339Nano), sourceTimestamp, normalized.Provenance, normalized.SchemaVersion, normalized.InvocationOrigin, normalized.SourceIdentity, normalized.Runtime, normalized.SessionID, normalized.ProjectID, normalized.CapabilityType, normalized.CapabilityName, normalized.EventType, fingerprint)
 		if err != nil {
 			return fmt.Errorf("insert usage event: %w", err)
 		}
@@ -390,18 +397,20 @@ func (s *Store) InsertUsageEvents(ctx context.Context, events []domain.UsageEven
 	return nil
 }
 
-// ListUsageEvents returns events ordered by timestamp and fingerprint.
+// ListUsageEvents returns events ordered by effective activity time and
+// fingerprint. since applies to source occurrence time when available and to
+// observed/import time otherwise.
 func (s *Store) ListUsageEvents(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
-	query := `SELECT timestamp, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint FROM usage_events`
+	query := `SELECT observed_at, source_timestamp, provenance, schema_version, invocation_origin, source_identity, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint FROM usage_events`
 	args := []any{}
 	if !since.IsZero() {
-		query += ` WHERE timestamp >= ?`
+		query += ` WHERE COALESCE(source_timestamp, observed_at) >= ?`
 		args = append(args, since.UTC().Format(time.RFC3339Nano))
 	}
-	query += ` ORDER BY timestamp, fingerprint`
+	query += ` ORDER BY COALESCE(source_timestamp, observed_at), fingerprint`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list usage events: %w", err)
@@ -410,13 +419,23 @@ func (s *Store) ListUsageEvents(ctx context.Context, since time.Time) ([]domain.
 	var result []domain.UsageEvent
 	for rows.Next() {
 		var event domain.UsageEvent
-		var timestamp string
-		if err := rows.Scan(&timestamp, &event.Runtime, &event.SessionID, &event.ProjectID, &event.CapabilityType, &event.CapabilityName, &event.EventType, &event.Fingerprint); err != nil {
+		var observedAt, sourceTimestamp sql.NullString
+		if err := rows.Scan(&observedAt, &sourceTimestamp, &event.Provenance, &event.SchemaVersion, &event.InvocationOrigin, &event.SourceIdentity, &event.Runtime, &event.SessionID, &event.ProjectID, &event.CapabilityType, &event.CapabilityName, &event.EventType, &event.Fingerprint); err != nil {
 			return nil, fmt.Errorf("scan usage event: %w", err)
 		}
-		event.Timestamp, err = time.Parse(time.RFC3339Nano, timestamp)
+		if !observedAt.Valid || observedAt.String == "" {
+			return nil, errors.New("usage event observed_at is empty")
+		}
+		event.ObservedAt, err = time.Parse(time.RFC3339Nano, observedAt.String)
 		if err != nil {
-			return nil, fmt.Errorf("parse usage timestamp: %w", err)
+			return nil, fmt.Errorf("parse usage observed_at: %w", err)
+		}
+		if sourceTimestamp.Valid && sourceTimestamp.String != "" {
+			parsed, parseErr := time.Parse(time.RFC3339Nano, sourceTimestamp.String)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse usage source_timestamp: %w", parseErr)
+			}
+			event.SourceTimestamp = &parsed
 		}
 		result = append(result, event)
 	}
@@ -424,7 +443,8 @@ func (s *Store) ListUsageEvents(ctx context.Context, since time.Time) ([]domain.
 		return nil, fmt.Errorf("iterate usage events: %w", err)
 	}
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].Timestamp.Before(result[j].Timestamp) || (result[i].Timestamp.Equal(result[j].Timestamp) && result[i].Fingerprint < result[j].Fingerprint)
+		left, right := result[i].EffectiveActivityTime(), result[j].EffectiveActivityTime()
+		return left.Before(right) || (left.Equal(right) && result[i].Fingerprint < result[j].Fingerprint)
 	})
 	return result, nil
 }

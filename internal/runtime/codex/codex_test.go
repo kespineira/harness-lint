@@ -309,8 +309,14 @@ func TestImportUsagePrivacyExplicitSignalsAndInclusiveSince(t *testing.T) {
 		t.Fatalf("event count = %d, want 4 (inclusive since, explicit signals only)", len(events))
 	}
 	for _, event := range events {
-		if event.Timestamp.Before(since) || event.Timestamp.Location() != time.UTC {
-			t.Fatalf("event timestamp = %s, expected UTC at/after since", event.Timestamp)
+		if event.EffectiveActivityTime().Before(since) || event.EffectiveActivityTime().Location() != time.UTC {
+			t.Fatalf("event activity time = %s, expected UTC at/after since", event.EffectiveActivityTime())
+		}
+		if event.Provenance != domain.ProvenanceTranscript && event.Provenance != domain.ProvenanceImport {
+			t.Fatalf("unexpected Codex event provenance: %#v", event)
+		}
+		if event.SchemaVersion != domain.CurrentUsageEventSchemaVersion || event.ObservedAt.IsZero() {
+			t.Fatalf("Codex event contract fields = %#v", event)
 		}
 		if event.SessionID == "raw-session" || event.ProjectID == "raw-project" || strings.Contains(event.SessionID, "secret") || strings.Contains(event.ProjectID, "secret") {
 			t.Fatalf("raw identifier leaked in usage event: %#v", event)

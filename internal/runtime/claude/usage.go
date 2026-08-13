@@ -15,14 +15,19 @@ import (
 )
 
 // ImportUsage imports only observed tool identities from Claude transcript
-// JSONL and injected PostToolUse-shaped hook JSON. It intentionally ignores
-// prompts, responses, source snippets, tool outputs, and model output.
+// JSONL and file-captured PostToolUse-shaped JSON. Transcript evidence is
+// labeled transcript; file captures are labeled import because a file cannot
+// prove that the record was delivered directly by a hook.
 func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
 	if a == nil {
 		return nil, errors.New("claude adapter is nil")
 	}
 	if err := contextError(ctx); err != nil {
 		return nil, err
+	}
+	observedAt := a.observationTime()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
 	}
 	cutoff := since.UTC()
 	transcriptFiles, err := collectDataFiles(ctx, a.transcriptRoots, false)
@@ -39,13 +44,13 @@ func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.Us
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
-		parseTranscriptFile(ctx, path, cutoff, a.projectFallback(), byFingerprint)
+		parseTranscriptFile(ctx, path, cutoff, a.projectFallback(), observedAt, byFingerprint)
 	}
 	for _, path := range hookFiles {
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
-		parseHookFile(ctx, path, cutoff, byFingerprint)
+		parseHookFile(ctx, path, cutoff, observedAt, byFingerprint)
 	}
 
 	result := make([]domain.UsageEvent, 0, len(byFingerprint))
@@ -53,8 +58,9 @@ func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.Us
 		result = append(result, event)
 	}
 	sort.SliceStable(result, func(i, j int) bool {
-		if !result[i].Timestamp.Equal(result[j].Timestamp) {
-			return result[i].Timestamp.Before(result[j].Timestamp)
+		left, right := result[i].EffectiveActivityTime(), result[j].EffectiveActivityTime()
+		if !left.Equal(right) {
+			return left.Before(right)
 		}
 		if result[i].Fingerprint != result[j].Fingerprint {
 			return result[i].Fingerprint < result[j].Fingerprint
@@ -133,6 +139,7 @@ func collectDataFiles(ctx context.Context, roots []string, includeJSON bool) ([]
 type transcriptLine struct {
 	Type       string          `json:"type"`
 	Timestamp  string          `json:"timestamp"`
+	ToolUseID  string          `json:"tool_use_id"`
 	SessionID  string          `json:"session_id"`
 	SessionID2 string          `json:"sessionId"`
 	CWD        string          `json:"cwd"`
@@ -145,13 +152,14 @@ type transcriptLine struct {
 
 type transcriptMsg struct {
 	Timestamp  string          `json:"timestamp"`
+	ToolUseID  string          `json:"tool_use_id"`
 	SessionID  string          `json:"session_id"`
 	SessionID2 string          `json:"sessionId"`
 	CWD        string          `json:"cwd"`
 	Content    json.RawMessage `json:"content"`
 }
 
-func parseTranscriptFile(ctx context.Context, path string, since time.Time, projectFallback string, result map[string]domain.UsageEvent) {
+func parseTranscriptFile(ctx context.Context, path string, since time.Time, projectFallback string, observedAt time.Time, result map[string]domain.UsageEvent) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -190,15 +198,15 @@ func parseTranscriptFile(ctx context.Context, path string, since time.Time, proj
 		if project == "" {
 			continue
 		}
-		visit := func(name string, input json.RawMessage) {
+		visit := func(name string, input json.RawMessage, sourceIdentity string) {
 			capabilityType, capabilityName, ok := classifyTool(name, input)
 			if !ok {
 				return
 			}
-			addUsageEvent(result, timestamp, session, project, capabilityType, capabilityName)
+			addUsageEvent(result, observedAt, timestamp, session, project, capabilityType, capabilityName, domain.ProvenanceTranscript, sourceIdentity)
 		}
 		if line.Type == "tool_use" && line.Name != "" {
-			visit(line.Name, line.Input)
+			visit(line.Name, line.Input, firstNonEmpty(line.ToolUseID, line.Message.ToolUseID))
 		}
 		if line.Type == "assistant" {
 			scanToolUses(line.Message.Content, visit)
@@ -211,6 +219,7 @@ type hookLine struct {
 	HookEventName string          `json:"hook_event_name"`
 	Timestamp     string          `json:"timestamp"`
 	EventTime     string          `json:"event_timestamp"`
+	ToolUseID     string          `json:"tool_use_id"`
 	SessionID     string          `json:"session_id"`
 	CWD           string          `json:"cwd"`
 	Transcript    string          `json:"transcript_path"`
@@ -222,9 +231,10 @@ type hookLine struct {
 type hookToolCall struct {
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
+	ToolUseID string          `json:"tool_use_id"`
 }
 
-func parseHookFile(ctx context.Context, path string, since time.Time, result map[string]domain.UsageEvent) {
+func parseHookFile(ctx context.Context, path string, since time.Time, observedAt time.Time, result map[string]domain.UsageEvent) {
 	file, err := os.Open(path)
 	if err != nil {
 		return
@@ -233,7 +243,7 @@ func parseHookFile(ctx context.Context, path string, since time.Time, result map
 	if strings.EqualFold(filepath.Ext(path), ".json") {
 		var line hookLine
 		if err := json.NewDecoder(file).Decode(&line); err == nil {
-			processHookLine(ctx, line, path, since, result)
+			processHookLine(ctx, line, path, since, observedAt, result)
 		}
 		return
 	}
@@ -247,11 +257,11 @@ func parseHookFile(ctx context.Context, path string, since time.Time, result map
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
 		}
-		processHookLine(ctx, line, path, since, result)
+		processHookLine(ctx, line, path, since, observedAt, result)
 	}
 }
 
-func processHookLine(ctx context.Context, line hookLine, path string, since time.Time, result map[string]domain.UsageEvent) {
+func processHookLine(ctx context.Context, line hookLine, path string, since time.Time, observedAt time.Time, result map[string]domain.UsageEvent) {
 	if err := contextError(ctx); err != nil {
 		return
 	}
@@ -277,17 +287,17 @@ func processHookLine(ctx context.Context, line hookLine, path string, since time
 		return
 	}
 	if line.ToolName != "" {
-		addClassifiedUsage(result, timestamp, session, project, line.ToolName, line.ToolInput)
+		addClassifiedUsage(result, observedAt, timestamp, session, project, line.ToolName, line.ToolInput, domain.ProvenanceImport, line.ToolUseID)
 	}
 	for _, call := range line.ToolCalls {
 		if call.ToolName == "" {
 			continue
 		}
-		addClassifiedUsage(result, timestamp, session, project, call.ToolName, call.ToolInput)
+		addClassifiedUsage(result, observedAt, timestamp, session, project, call.ToolName, call.ToolInput, domain.ProvenanceImport, firstNonEmpty(call.ToolUseID, line.ToolUseID))
 	}
 }
 
-func scanToolUses(raw json.RawMessage, visit func(string, json.RawMessage)) {
+func scanToolUses(raw json.RawMessage, visit func(string, json.RawMessage, string)) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return
 	}
@@ -301,7 +311,7 @@ func scanToolUses(raw json.RawMessage, visit func(string, json.RawMessage)) {
 	scanToolBlock(raw, visit)
 }
 
-func scanToolBlock(raw json.RawMessage, visit func(string, json.RawMessage)) {
+func scanToolBlock(raw json.RawMessage, visit func(string, json.RawMessage, string)) {
 	var object map[string]json.RawMessage
 	if json.Unmarshal(raw, &object) != nil {
 		return
@@ -310,8 +320,17 @@ func scanToolBlock(raw json.RawMessage, visit func(string, json.RawMessage)) {
 	_ = json.Unmarshal(object["type"], &typ)
 	_ = json.Unmarshal(object["name"], &name)
 	if typ == "tool_use" && name != "" {
-		visit(name, object["input"])
+		visit(name, object["input"], firstNonEmptyRaw(object, "tool_use_id", "toolUseId"))
 	}
+}
+
+func firstNonEmptyRaw(object map[string]json.RawMessage, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := rawString(object[key]); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func classifyTool(name string, input json.RawMessage) (domain.CapabilityType, string, bool) {
@@ -358,23 +377,29 @@ func inputIdentity(raw json.RawMessage, keys ...string) string {
 	return ""
 }
 
-func addClassifiedUsage(result map[string]domain.UsageEvent, timestamp time.Time, session, project, toolName string, input json.RawMessage) {
+func addClassifiedUsage(result map[string]domain.UsageEvent, observedAt, sourceTimestamp time.Time, session, project, toolName string, input json.RawMessage, provenance domain.Provenance, sourceIdentity string) {
 	capabilityType, capabilityName, ok := classifyTool(toolName, input)
 	if !ok {
 		return
 	}
-	addUsageEvent(result, timestamp, session, project, capabilityType, capabilityName)
+	addUsageEvent(result, observedAt, sourceTimestamp, session, project, capabilityType, capabilityName, provenance, sourceIdentity)
 }
 
-func addUsageEvent(result map[string]domain.UsageEvent, timestamp time.Time, session, project string, capabilityType domain.CapabilityType, capabilityName string) {
+func addUsageEvent(result map[string]domain.UsageEvent, observedAt, sourceTimestamp time.Time, session, project string, capabilityType domain.CapabilityType, capabilityName string, provenance domain.Provenance, sourceIdentity string) {
+	sourceTimestamp = sourceTimestamp.UTC()
 	event := domain.UsageEvent{
-		Timestamp:      timestamp.UTC(),
-		Runtime:        domain.RuntimeClaudeCode,
-		SessionID:      hashIdentifier(session),
-		ProjectID:      hashIdentifier(project),
-		CapabilityType: capabilityType,
-		CapabilityName: capabilityName,
-		EventType:      domain.EventInvoked,
+		ObservedAt:       observedAt.UTC(),
+		SourceTimestamp:  &sourceTimestamp,
+		Runtime:          domain.RuntimeClaudeCode,
+		SessionID:        hashIdentifier(session),
+		ProjectID:        hashIdentifier(project),
+		CapabilityType:   capabilityType,
+		CapabilityName:   capabilityName,
+		EventType:        domain.EventInvoked,
+		Provenance:       provenance,
+		InvocationOrigin: domain.InvocationOriginUnknown,
+		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+		SourceIdentity:   strings.TrimSpace(sourceIdentity),
 	}
 	fingerprint, err := domain.FingerprintForUsageEvent(event)
 	if err != nil {

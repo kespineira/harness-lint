@@ -173,14 +173,17 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 	}
 	event := func(name string, timestamp time.Time, eventType domain.EventType, fingerprint string) domain.UsageEvent {
 		return domain.UsageEvent{
-			Timestamp:      timestamp,
-			Runtime:        domain.RuntimeCodex,
-			SessionID:      "session-" + name,
-			ProjectID:      "project",
-			CapabilityType: domain.CapabilitySkill,
-			CapabilityName: name,
-			EventType:      eventType,
-			Fingerprint:    fingerprint,
+			ObservedAt:       timestamp,
+			Runtime:          domain.RuntimeCodex,
+			SessionID:        "session-" + name,
+			ProjectID:        "project",
+			CapabilityType:   domain.CapabilitySkill,
+			CapabilityName:   name,
+			EventType:        eventType,
+			Provenance:       domain.ProvenanceImport,
+			InvocationOrigin: domain.InvocationOriginUnknown,
+			SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+			Fingerprint:      fingerprint,
 		}
 	}
 	events := []domain.UsageEvent{

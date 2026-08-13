@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -106,6 +107,72 @@ func (t EventType) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// Provenance identifies the evidence path that produced a usage event. The
+// values are deliberately extensible so a future producer can add a new
+// evidence path without changing the event shape.
+type Provenance string
+
+const (
+	ProvenanceHook       Provenance = "hook"
+	ProvenanceTranscript Provenance = "transcript"
+	ProvenanceImport     Provenance = "import"
+)
+
+func (p Provenance) Valid() bool {
+	switch p {
+	case ProvenanceHook, ProvenanceTranscript, ProvenanceImport:
+		return true
+	default:
+		return false
+	}
+}
+
+// InvocationOrigin records how an invocation was selected. Unknown is the
+// honest value when an evidence source cannot distinguish model selection from
+// an explicit user request.
+type InvocationOrigin string
+
+const (
+	InvocationOriginUnknown       InvocationOrigin = "unknown"
+	InvocationOriginModelSelected InvocationOrigin = "model_selected"
+	InvocationOriginUserExplicit  InvocationOrigin = "user_explicit"
+)
+
+func (o InvocationOrigin) Valid() bool {
+	switch o {
+	case InvocationOriginUnknown, InvocationOriginModelSelected, InvocationOriginUserExplicit:
+		return true
+	default:
+		return false
+	}
+}
+
+// CurrentUsageEventSchemaVersion is the schema version of the normalized
+// ingestion contract. It is separate from the SQLite schema version so an
+// event can declare the contract it was produced against.
+const CurrentUsageEventSchemaVersion = 1
+
+// UsageEventSchemaVersion is a concise alias for callers that do not need to
+// distinguish the current value from the event type's name.
+const UsageEventSchemaVersion = CurrentUsageEventSchemaVersion
+
+// NormalizeSourceIdentity returns the one-way hash of an opaque, safe runtime
+// identity used for delivery deduplication. Empty identities remain empty so
+// callers can deliberately use the conservative fallback fingerprint.
+func NormalizeSourceIdentity(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) == sha256.Size*2 {
+		if _, err := hex.DecodeString(value); err == nil {
+			return strings.ToLower(value)
+		}
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // Confidence describes how a measurement was obtained.
@@ -331,24 +398,32 @@ func (d Discovery) Validate() error {
 	return nil
 }
 
-// UsageEvent is metadata-only usage imported from a runtime. SessionID and
-// ProjectID must be pre-normalized stable identifiers or one-way hashes before
-// they reach this package; raw paths and conversation data are not accepted by
-// the store's data model.
+// UsageEvent is a metadata-only usage observation imported from a runtime.
+// ObservedAt is always the local receive/import time. SourceTimestamp is only
+// populated when the source declares a trustworthy occurrence time; callers
+// must never substitute it for ObservedAt.
 type UsageEvent struct {
-	Timestamp      time.Time
-	Runtime        Runtime
-	SessionID      string
-	ProjectID      string
-	CapabilityType CapabilityType
-	CapabilityName string
-	EventType      EventType
-	Fingerprint    string
+	ObservedAt       time.Time
+	SourceTimestamp  *time.Time
+	Runtime          Runtime
+	SessionID        string
+	ProjectID        string
+	CapabilityType   CapabilityType
+	CapabilityName   string
+	EventType        EventType
+	Provenance       Provenance
+	InvocationOrigin InvocationOrigin
+	SchemaVersion    int
+	SourceIdentity   string
+	Fingerprint      string
 }
 
 func (e UsageEvent) Validate() error {
-	if e.Timestamp.IsZero() {
-		return errors.New("usage event timestamp is required")
+	if e.ObservedAt.IsZero() {
+		return errors.New("usage event observed-at time is required")
+	}
+	if e.SourceTimestamp != nil && e.SourceTimestamp.IsZero() {
+		return errors.New("usage event source timestamp cannot be zero")
 	}
 	if !e.Runtime.Valid() {
 		return fmt.Errorf("invalid runtime %q", e.Runtime)
@@ -365,20 +440,119 @@ func (e UsageEvent) Validate() error {
 	if !e.EventType.Valid() {
 		return fmt.Errorf("invalid event type %q", e.EventType)
 	}
+	if !e.Provenance.Valid() {
+		return fmt.Errorf("invalid usage provenance %q", e.Provenance)
+	}
+	if !e.InvocationOrigin.Valid() {
+		return fmt.Errorf("invalid invocation origin %q", e.InvocationOrigin)
+	}
+	if e.SchemaVersion <= 0 {
+		return errors.New("usage event schema version must be positive")
+	}
 	return nil
 }
 
-// FingerprintForUsageEvent returns a stable identity derived only from the
-// metadata fields that define an event. A supplied fingerprint is preserved by
-// Store, but adapters can use this function to create one deterministically.
-func FingerprintForUsageEvent(e UsageEvent) (string, error) {
+// EffectiveActivityTime returns the single timestamp used by stale/history
+// analysis: a trustworthy source occurrence time when present, otherwise the
+// local observed time. It never mutates either timestamp.
+func (e UsageEvent) EffectiveActivityTime() time.Time {
+	if e.SourceTimestamp != nil && !e.SourceTimestamp.IsZero() {
+		return e.SourceTimestamp.UTC()
+	}
+	return e.ObservedAt.UTC()
+}
+
+// NormalizeIdentifier returns a stable one-way representation suitable for
+// persistence. Existing SHA-256 hex values are treated as already normalized;
+// all other values are hashed after trimming whitespace.
+func NormalizeIdentifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("identifier is required")
+	}
+	if len(value) == sha256.Size*2 {
+		if _, err := hex.DecodeString(value); err == nil {
+			return strings.ToLower(value), nil
+		}
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// NormalizeUsageEvent returns the persistence-safe form of an event. Session
+// and project identifiers are one-way hashed here as a defensive boundary even
+// though runtime adapters already normalize them before constructing events.
+func NormalizeUsageEvent(e UsageEvent) (UsageEvent, error) {
 	if err := e.Validate(); err != nil {
+		return UsageEvent{}, err
+	}
+	var err error
+	e.ObservedAt = e.ObservedAt.UTC()
+	if e.SourceTimestamp != nil {
+		sourceTimestamp := e.SourceTimestamp.UTC()
+		e.SourceTimestamp = &sourceTimestamp
+	}
+	e.SessionID, err = NormalizeIdentifier(e.SessionID)
+	if err != nil {
+		return UsageEvent{}, fmt.Errorf("normalize usage session identifier: %w", err)
+	}
+	e.ProjectID, err = NormalizeIdentifier(e.ProjectID)
+	if err != nil {
+		return UsageEvent{}, fmt.Errorf("normalize usage project identifier: %w", err)
+	}
+	e.SourceIdentity = NormalizeSourceIdentity(e.SourceIdentity)
+	return e, nil
+}
+
+// FingerprintForUsageEvent returns a stable identity derived only from safe
+// event metadata. Stable source identities drive deduplication; without one,
+// a trustworthy source timestamp anchors rescans, otherwise local observation
+// time anchors the conservative fallback so repeated calls are not collapsed
+// merely because their runtime, session, and capability match. Prompts,
+// responses, tool payloads, commands, file contents, and raw paths are never
+// fingerprint inputs.
+func FingerprintForUsageEvent(e UsageEvent) (string, error) {
+	normalized, err := NormalizeUsageEvent(e)
+	if err != nil {
 		return "", err
 	}
-	canonical := strings.Join([]string{
-		e.Timestamp.UTC().Format(time.RFC3339Nano), string(e.Runtime), e.SessionID,
-		e.ProjectID, string(e.CapabilityType), e.CapabilityName, string(e.EventType),
-	}, "\x00")
+	canonicalParts := []string{
+		"harness-lint-usage-event",
+		strconv.Itoa(normalized.SchemaVersion),
+		string(normalized.Runtime),
+		string(normalized.CapabilityType),
+		normalized.CapabilityName,
+		string(normalized.EventType),
+	}
+	if normalized.SourceIdentity != "" {
+		// Provenance is deliberately omitted here: a transcript and a direct
+		// delivery capture with the same stable runtime identity describe the
+		// same delivery and must not inflate counts.
+		canonicalParts = append(canonicalParts, "source", normalized.SourceIdentity, normalized.SessionID, normalized.ProjectID)
+	} else if normalized.SourceTimestamp != nil && !normalized.SourceTimestamp.IsZero() {
+		// A trustworthy source time is enough to identify a transcript event
+		// across rescans with different local observation times. Keep the
+		// provenance and invocation origin in scope for conservative fallback
+		// behavior when the source provides no stable delivery identity.
+		canonicalParts = append(canonicalParts,
+			"fallback-source",
+			normalized.SourceTimestamp.Format(time.RFC3339Nano),
+			normalized.SessionID,
+			normalized.ProjectID,
+			string(normalized.Provenance),
+			string(normalized.InvocationOrigin),
+		)
+	} else {
+		canonicalParts = append(canonicalParts,
+			"fallback-observed",
+			normalized.ObservedAt.Format(time.RFC3339Nano),
+			normalized.SessionID,
+			normalized.ProjectID,
+			string(normalized.Provenance),
+			string(normalized.InvocationOrigin),
+		)
+	}
+	canonical := strings.Join(canonicalParts, "\x00")
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:]), nil
 }

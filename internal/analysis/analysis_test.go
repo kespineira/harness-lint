@@ -82,6 +82,26 @@ func TestAnalyzeClassifiesStaleAtStrictBoundaryAndClampsFutureAge(t *testing.T) 
 	}
 }
 
+func TestAnalyzeUsesSourceTimestampForActivityButPreservesObservedAt(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("source-time")
+	event := testEvent(now.Add(-time.Hour), capability.Name, domain.EventInvoked, "session")
+	source := now.Add(-2 * time.Hour)
+	event.SourceTimestamp = &source
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if !evidence.LastUsedAt.Equal(source) {
+		t.Fatalf("last-used activity time = %s, want source time %s", evidence.LastUsedAt, source)
+	}
+	if !event.ObservedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("analysis mutated observed-at time: %s", event.ObservedAt)
+	}
+}
+
 func TestAnalyzePreservesEventTypesAndSessions(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("events")
@@ -505,13 +525,16 @@ func TestAnalyzeRejectsInvalidConfigInputAndTime(t *testing.T) {
 
 func testEvent(timestamp time.Time, capabilityName string, eventType domain.EventType, session string) domain.UsageEvent {
 	return domain.UsageEvent{
-		Timestamp:      timestamp,
-		Runtime:        domain.RuntimeCodex,
-		SessionID:      session,
-		ProjectID:      "project",
-		CapabilityType: domain.CapabilitySkill,
-		CapabilityName: capabilityName,
-		EventType:      eventType,
+		ObservedAt:       timestamp,
+		Runtime:          domain.RuntimeCodex,
+		SessionID:        session,
+		ProjectID:        "project",
+		CapabilityType:   domain.CapabilitySkill,
+		CapabilityName:   capabilityName,
+		EventType:        eventType,
+		Provenance:       domain.ProvenanceImport,
+		InvocationOrigin: domain.InvocationOriginUnknown,
+		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
 	}
 }
 

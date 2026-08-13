@@ -25,25 +25,44 @@ type usageContext struct {
 }
 
 type usageCandidate struct {
-	typ       domain.CapabilityType
-	name      string
-	eventType domain.EventType
-	timestamp time.Time
-	context   usageContext
+	typ            domain.CapabilityType
+	name           string
+	eventType      domain.EventType
+	timestamp      time.Time
+	context        usageContext
+	sourceIdentity string
 }
 
 func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
-	roots := append([]string(nil), a.options.transcripts...)
-	roots = append(roots, a.options.hookEventPaths...)
-	files, err := transcriptFiles(roots)
+	transcriptPaths, err := transcriptFiles(a.options.transcripts)
 	if err != nil {
 		return nil, err
 	}
+	hookPaths, err := transcriptFiles(a.options.hookEventPaths)
+	if err != nil {
+		return nil, err
+	}
+	observedAt := a.options.now().UTC()
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
 	var result []domain.UsageEvent
 	seen := make(map[string]struct{})
+	if err := a.importUsageFiles(ctx, transcriptPaths, since, observedAt, domain.ProvenanceTranscript, &result, seen); err != nil {
+		return nil, err
+	}
+	// HookEventPaths are file captures/backfills. Their shape may look like a
+	// PostToolUse event, but the file alone cannot prove direct hook delivery.
+	if err := a.importUsageFiles(ctx, hookPaths, since, observedAt, domain.ProvenanceImport, &result, seen); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (a *Adapter) importUsageFiles(ctx context.Context, files []string, since, observedAt time.Time, provenance domain.Provenance, result *[]domain.UsageEvent, seen map[string]struct{}) error {
 	for _, path := range files {
 		if err := contextErr(ctx); err != nil {
-			return nil, err
+			return err
 		}
 		fallbackSession := transcriptSessionIdentifier(path)
 		fallbackProject := a.options.projectRoot
@@ -61,14 +80,20 @@ func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([
 				if !ok || (!since.IsZero() && candidate.timestamp.Before(since.UTC())) {
 					continue
 				}
+				sourceTimestamp := candidate.timestamp.UTC()
 				event := domain.UsageEvent{
-					Timestamp:      candidate.timestamp.UTC(),
-					Runtime:        domain.RuntimeCodex,
-					SessionID:      hashIdentifier(candidate.context.session),
-					ProjectID:      hashIdentifier(candidate.context.project),
-					CapabilityType: candidate.typ,
-					CapabilityName: candidate.name,
-					EventType:      candidate.eventType,
+					ObservedAt:       observedAt.UTC(),
+					SourceTimestamp:  &sourceTimestamp,
+					Runtime:          domain.RuntimeCodex,
+					SessionID:        hashIdentifier(candidate.context.session),
+					ProjectID:        hashIdentifier(candidate.context.project),
+					CapabilityType:   candidate.typ,
+					CapabilityName:   candidate.name,
+					EventType:        candidate.eventType,
+					Provenance:       provenance,
+					InvocationOrigin: domain.InvocationOriginUnknown,
+					SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+					SourceIdentity:   strings.TrimSpace(candidate.sourceIdentity),
 				}
 				fingerprint, err := domain.FingerprintForUsageEvent(event)
 				if err != nil {
@@ -79,15 +104,15 @@ func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([
 				}
 				seen[fingerprint] = struct{}{}
 				event.Fingerprint = fingerprint
-				result = append(result, event)
+				*result = append(*result, event)
 			}
 			return nil
 		}
 		if err := decodeTranscriptFile(ctx, path, visit); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return result, nil
+	return nil
 }
 
 func transcriptSessionIdentifier(path string) string {
@@ -291,14 +316,14 @@ func usageCandidateFromRecord(value any, inherited usageContext) (usageCandidate
 		if !nameOK {
 			return usageCandidate{}, false
 		}
-		return newToolCandidate(name, timestamp, inherited), true
+		return newToolCandidate(name, timestamp, inherited, firstStableIdentity(record, payload)), true
 	}
 	if marker == "function_call" || marker == "custom_tool_call" || marker == "dynamic_tool_call" {
 		name, nameOK := directToolName(record)
 		if !nameOK {
 			return usageCandidate{}, false
 		}
-		return newToolCandidate(name, timestamp, inherited), true
+		return newToolCandidate(name, timestamp, inherited, firstStableIdentity(record)), true
 	}
 	hookEvent := strings.ToLower(strings.TrimSpace(stringFieldAny(record, "hook_event_name", "hookEventName")))
 	if hookEvent != "posttooluse" && hookEvent != "post_tool_use" {
@@ -308,7 +333,7 @@ func usageCandidateFromRecord(value any, inherited usageContext) (usageCandidate
 	if !nameOK {
 		return usageCandidate{}, false
 	}
-	return newToolCandidate(name, timestamp, inherited), true
+	return newToolCandidate(name, timestamp, inherited, firstStableIdentity(record)), true
 }
 
 func ambiguousUsageRecord(record map[string]any) bool {
@@ -343,17 +368,28 @@ func postToolName(record map[string]any) (string, bool) {
 	return "", false
 }
 
-func newToolCandidate(name string, timestamp time.Time, context usageContext) usageCandidate {
+func firstStableIdentity(records ...map[string]any) string {
+	keys := []string{"tool_use_id", "toolUseId"}
+	for _, record := range records {
+		if value, found := identifierField(record, keys...); found {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func newToolCandidate(name string, timestamp time.Time, context usageContext, sourceIdentity string) usageCandidate {
 	typ := domain.CapabilityTool
 	if isMCPToolIdentity(name) {
 		typ = domain.CapabilityMCPTool
 	}
 	return usageCandidate{
-		typ:       typ,
-		name:      name,
-		eventType: domain.EventInvoked,
-		timestamp: timestamp,
-		context:   context,
+		typ:            typ,
+		name:           name,
+		eventType:      domain.EventInvoked,
+		timestamp:      timestamp,
+		context:        context,
+		sourceIdentity: strings.TrimSpace(sourceIdentity),
 	}
 }
 

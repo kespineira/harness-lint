@@ -134,8 +134,8 @@ func (a *Adapter) Discover(ctx context.Context) (domain.Discovery, error) {
 }
 
 // ImportUsage imports explicit tool usage signals from configured Codex-session
-// and PostToolUse-shaped JSONL/JSON files. The since boundary is inclusive and
-// all timestamps are normalized to UTC before fingerprinting.
+// and file-captured PostToolUse-shaped JSONL/JSON files. The since boundary is
+// inclusive and all timestamps are normalized to UTC before fingerprinting.
 func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
 	if err := contextErr(ctx); err != nil {
 		return nil, err
@@ -148,10 +148,11 @@ func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.Us
 		return nil, err
 	}
 	sort.SliceStable(events, func(i, j int) bool {
-		if events[i].Timestamp.Equal(events[j].Timestamp) {
+		left, right := events[i].EffectiveActivityTime(), events[j].EffectiveActivityTime()
+		if left.Equal(right) {
 			return events[i].Fingerprint < events[j].Fingerprint
 		}
-		return events[i].Timestamp.Before(events[j].Timestamp)
+		return left.Before(right)
 	})
 	return events, nil
 }

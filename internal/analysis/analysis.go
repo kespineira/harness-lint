@@ -117,9 +117,11 @@ type CapabilityEvidence struct {
 	ActivityCount        int
 	DistinctSessionCount int
 
-	// Last-used means the latest loaded or invoked observation. Advertised
-	// observations do not establish use. LastUsedAge is clamped to zero for a
-	// future timestamp so callers never receive a misleading negative age.
+	// Last-used means the latest loaded or invoked activity time. Advertised
+	// observations do not establish use. Activity time uses a trustworthy source
+	// timestamp when present and observed/import time otherwise. LastUsedAge is
+	// clamped to zero for a future timestamp so callers never receive a
+	// misleading negative age.
 	HasLastUsed      bool
 	LastUsedAt       time.Time
 	LastUsedAge      time.Duration
@@ -283,8 +285,9 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 			continue
 		}
 		sessions[event.SessionID] = struct{}{}
-		if lastUsed.IsZero() || event.Timestamp.After(lastUsed) {
-			lastUsed = event.Timestamp.UTC()
+		activityAt := event.EffectiveActivityTime()
+		if lastUsed.IsZero() || activityAt.After(lastUsed) {
+			lastUsed = activityAt
 		}
 	}
 
@@ -685,7 +688,7 @@ func capabilityLess(left, right domain.Capability) bool {
 }
 
 func eventLess(left, right domain.UsageEvent) bool {
-	leftTimestamp, rightTimestamp := left.Timestamp.UTC(), right.Timestamp.UTC()
+	leftTimestamp, rightTimestamp := left.EffectiveActivityTime(), right.EffectiveActivityTime()
 	if !leftTimestamp.Equal(rightTimestamp) {
 		return leftTimestamp.Before(rightTimestamp)
 	}

@@ -3,10 +3,14 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -27,8 +31,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "4" {
-		t.Fatalf("schema version = %q, want 4", version)
+	if version != "5" {
+		t.Fatalf("schema version = %q, want 5", version)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -251,17 +255,279 @@ func TestOpenMigratesV2CapabilityAdvertisementToUnknownWithoutDataLoss(t *testin
 		t.Fatalf("ListUsageEvents() after migration: %v", err)
 	}
 	wantEvent := domain.UsageEvent{
-		Timestamp:      usageTimestamp,
-		Runtime:        domain.RuntimeCodex,
-		SessionID:      "v2-session",
-		ProjectID:      "v2-project",
-		CapabilityType: domain.CapabilityTool,
-		CapabilityName: "terminal",
-		EventType:      domain.EventInvoked,
-		Fingerprint:    "v2-event",
+		ObservedAt:       usageTimestamp,
+		Runtime:          domain.RuntimeCodex,
+		SessionID:        "v2-session",
+		ProjectID:        "v2-project",
+		CapabilityType:   domain.CapabilityTool,
+		CapabilityName:   "terminal",
+		EventType:        domain.EventInvoked,
+		Provenance:       domain.ProvenanceImport,
+		InvocationOrigin: domain.InvocationOriginUnknown,
+		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+		SourceTimestamp:  &usageTimestamp,
+		Fingerprint:      "v2-event",
 	}
 	if len(events) != 1 || !reflect.DeepEqual(events[0], wantEvent) {
 		t.Fatalf("migrated usage events = %#v, want %#v", events, []domain.UsageEvent{wantEvent})
+	}
+}
+
+func TestOpenUpgradesRepresentativeV4DatabasePreservingUsageHistory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v4.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	for _, name := range []string{"001_initial.sql", "002_capability_corrections.sql", "003_capability_advertisement.sql", "004_inventory_scans.sql"} {
+		migration, readErr := migrations.ReadFile("migrations/" + name)
+		if readErr != nil {
+			t.Fatalf("read migration %s: %v", name, readErr)
+		}
+		if _, execErr := db.ExecContext(ctx, string(migration)); execErr != nil {
+			t.Fatalf("apply migration %s: %v", name, execErr)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('version', '4')`); err != nil {
+		t.Fatalf("seed v4 schema version: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO capabilities(runtime, capability_type, name, scope, source, enabled_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen, advertisement_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex", "tool", "terminal", "project", "v4-source", "enabled", "v4-hash", 1, "observed", "v4 metadata", 2, "estimated", "v4 body", "2026-08-13T10:00:00Z", "2026-08-13T10:00:00Z", "fully_advertised"); err != nil {
+		t.Fatalf("seed v4 capability: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO usage_events(timestamp, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"2026-08-13T10:15:00Z", "codex", "v4-session-hash", "v4-project-hash", "tool", "terminal", "invoked", "v4-event"); err != nil {
+		t.Fatalf("seed v4 usage event: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seeded v4 database: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() v4 migration error = %v", err)
+	}
+	defer s.Close()
+	var version string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
+		t.Fatalf("read upgraded schema version: %v", err)
+	}
+	if version != "5" {
+		t.Fatalf("upgraded schema version = %q, want 5", version)
+	}
+
+	capabilities, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after v4 upgrade: %v", err)
+	}
+	if len(capabilities) != 1 || capabilities[0].Name != "terminal" || capabilities[0].Hash != "v4-hash" {
+		t.Fatalf("upgraded capabilities = %#v, want preserved v4 row", capabilities)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents() after v4 upgrade: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("upgraded event count = %d, want 1", len(events))
+	}
+	event := events[0]
+	legacyTimestamp := time.Date(2026, 8, 13, 10, 15, 0, 0, time.UTC)
+	if !event.ObservedAt.Equal(legacyTimestamp) || event.SourceTimestamp == nil || !event.SourceTimestamp.Equal(legacyTimestamp) {
+		t.Fatalf("upgraded event timestamps = observed %s/source %v, want legacy timestamp preserved as source and observed surrogate", event.ObservedAt, event.SourceTimestamp)
+	}
+	if event.Provenance != domain.ProvenanceImport || event.SchemaVersion != domain.CurrentUsageEventSchemaVersion || event.Fingerprint != "v4-event" {
+		t.Fatalf("upgraded event provenance/schema/fingerprint = %#v/%d/%q", event.Provenance, event.SchemaVersion, event.Fingerprint)
+	}
+}
+
+func TestUsageEventObservedAtIsRequiredAndSourceTimestampOptional(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	missingObserved := testUsageEvent(time.Time{}, "missing-observed", domain.EventInvoked)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{missingObserved}); err == nil || !strings.Contains(err.Error(), "observed-at") {
+		t.Fatalf("missing observed_at error = %v, want mandatory observed-at validation", err)
+	}
+
+	event := testUsageEvent(time.Date(2026, 8, 13, 15, 0, 0, 0, time.FixedZone("CEST", 2*60*60)), "optional-source", domain.EventInvoked)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
+		t.Fatalf("InsertUsageEvents() without source timestamp: %v", err)
+	}
+	got, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(got) != 1 || got[0].SourceTimestamp != nil || !got[0].ObservedAt.Equal(event.ObservedAt.UTC()) {
+		t.Fatalf("optional source timestamp round trip = %#v, want observed only", got)
+	}
+	if got[0].SessionID == event.SessionID || got[0].ProjectID == event.ProjectID || len(got[0].SessionID) != 64 || len(got[0].ProjectID) != 64 {
+		t.Fatalf("persisted identifiers = %q/%q, want one-way hashed values", got[0].SessionID, got[0].ProjectID)
+	}
+}
+
+func TestStableDeliveryIdentityDeduplicatesRetriesButRetainsLegitimateInvocations(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	observed := time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC)
+	first := testUsageEvent(observed, "terminal", domain.EventInvoked)
+	rawIdentity := "tool-use-1"
+	first.SourceIdentity = rawIdentity
+	retry := first
+	retry.ObservedAt = observed.Add(time.Second)
+	retry.SourceIdentity = domain.NormalizeSourceIdentity(rawIdentity)
+	second := first
+	second.SourceIdentity = "tool-use-2"
+	second.ObservedAt = observed.Add(2 * time.Second)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{first, retry, second}); err != nil {
+		t.Fatalf("InsertUsageEvents(): %v", err)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("event count = %d, want retry deduped and second call retained", len(events))
+	}
+	identities := map[string]bool{}
+	for _, event := range events {
+		identities[event.SourceIdentity] = true
+	}
+	firstIdentity := domain.NormalizeSourceIdentity(rawIdentity)
+	secondIdentity := domain.NormalizeSourceIdentity("tool-use-2")
+	if !identities[firstIdentity] || !identities[secondIdentity] {
+		t.Fatalf("retained source identities = %#v, want both calls", identities)
+	}
+	expectedFingerprint, err := domain.FingerprintForUsageEvent(first)
+	if err != nil {
+		t.Fatalf("expected fingerprint: %v", err)
+	}
+	normalizedFirst, err := domain.NormalizeUsageEvent(first)
+	if err != nil {
+		t.Fatalf("normalize first event: %v", err)
+	}
+	normalizedFingerprint, err := domain.FingerprintForUsageEvent(normalizedFirst)
+	if err != nil {
+		t.Fatalf("normalized fingerprint: %v", err)
+	}
+	if expectedFingerprint != normalizedFingerprint || events[0].Fingerprint != expectedFingerprint || events[0].SourceIdentity != firstIdentity {
+		t.Fatalf("persisted identity/fingerprint changed across normalization: event=%#v expected=%q/%q normalized=%q", events[0], firstIdentity, expectedFingerprint, normalizedFingerprint)
+	}
+}
+
+func TestFallbackUsageFingerprintIsConservativeAndTranscriptRescansDeduplicate(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	first := testUsageEvent(time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC), "terminal", domain.EventInvoked)
+	first.Provenance = domain.ProvenanceTranscript
+	firstSource := first.ObservedAt.Add(-time.Second)
+	first.SourceTimestamp = &firstSource
+	second := first
+	second.ObservedAt = first.ObservedAt.Add(time.Second)
+	secondSource := firstSource.Add(time.Second)
+	second.SourceTimestamp = &secondSource
+	rescan := first
+	rescan.ObservedAt = first.ObservedAt.Add(time.Hour)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{first, rescan, second}); err != nil {
+		t.Fatalf("InsertUsageEvents(): %v", err)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("fallback event count = %d, want one transcript rescan deduplicated and one distinct call", len(events))
+	}
+}
+
+func TestConcurrentUsageInsertsSerializeWithSQLiteWriterConfiguration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "concurrent.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(): %v", err)
+	}
+	defer s.Close()
+
+	const workers = 8
+	errs := make(chan error, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			event := testUsageEvent(time.Date(2026, 8, 13, 15, 0, 0, index, time.UTC), "terminal", domain.EventInvoked)
+			event.SourceIdentity = "concurrent-" + strconv.Itoa(index)
+			errs <- s.InsertUsageEvents(ctx, []domain.UsageEvent{event})
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent InsertUsageEvents() error = %v", err)
+		}
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(events) != workers {
+		t.Fatalf("concurrent event count = %d, want %d", len(events), workers)
+	}
+}
+
+func TestUsagePersistenceDoesNotContainRepresentativePayloadStrings(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	event := testUsageEvent(time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC), "terminal", domain.EventInvoked)
+	event.SessionID = "representative prompt: delete everything"
+	event.ProjectID = "/private/raw/project/tool-input"
+	event.SourceIdentity = "stable-delivery-id"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
+		t.Fatalf("InsertUsageEvents(): %v", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT * FROM usage_events`)
+	if err != nil {
+		t.Fatalf("query persisted usage event: %v", err)
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		rows.Close()
+		t.Fatalf("usage columns: %v", err)
+	}
+	values := make([]any, len(columns))
+	destinations := make([]any, len(columns))
+	for index := range values {
+		destinations[index] = &values[index]
+	}
+	if !rows.Next() {
+		rows.Close()
+		t.Fatal("persisted usage event missing")
+	}
+	if err := rows.Scan(destinations...); err != nil {
+		rows.Close()
+		t.Fatalf("scan persisted usage event: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close usage rows: %v", err)
+	}
+	for index, value := range values {
+		textValue := fmt.Sprint(value)
+		for _, forbidden := range []string{"representative prompt", "delete everything", "/private/raw/project", "tool-input"} {
+			if strings.Contains(textValue, forbidden) {
+				t.Fatalf("column %q contains forbidden payload %q: %q", columns[index], forbidden, textValue)
+			}
+		}
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		t.Fatalf("marshal persisted values: %v", err)
+	}
+	for _, forbidden := range []string{"representative prompt", "delete everything", "/private/raw/project", "tool-input"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("database query result contains forbidden payload %q: %s", forbidden, encoded)
+		}
 	}
 }
 
@@ -705,7 +971,7 @@ func TestUsageInsertIsIdempotentUTCAndDeterministicallyOrdered(t *testing.T) {
 	first := testUsageEvent(twoHoursLaterCEST, "terminal", domain.EventInvoked)
 	second := testUsageEvent(base.Add(time.Hour), "filesystem", domain.EventLoaded)
 	duplicate := first
-	duplicate.Timestamp = first.Timestamp.UTC()
+	duplicate.ObservedAt = first.ObservedAt.UTC()
 
 	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{first, second, duplicate}); err != nil {
 		t.Fatalf("InsertUsageEvents(): %v", err)
@@ -717,20 +983,20 @@ func TestUsageInsertIsIdempotentUTCAndDeterministicallyOrdered(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("event count = %d, want 2", len(events))
 	}
-	if !events[0].Timestamp.Equal(second.Timestamp) || events[0].CapabilityName != second.CapabilityName {
-		t.Fatalf("first event = %#v, want %q at %s", events[0], second.CapabilityName, second.Timestamp)
+	if !events[0].ObservedAt.Equal(second.ObservedAt) || events[0].CapabilityName != second.CapabilityName {
+		t.Fatalf("first event = %#v, want %q at %s", events[0], second.CapabilityName, second.ObservedAt)
 	}
-	if !events[1].Timestamp.Equal(first.Timestamp) || events[1].CapabilityName != first.CapabilityName {
-		t.Fatalf("second event = %#v, want %q at %s", events[1], first.CapabilityName, first.Timestamp)
+	if !events[1].ObservedAt.Equal(first.ObservedAt) || events[1].CapabilityName != first.CapabilityName {
+		t.Fatalf("second event = %#v, want %q at %s", events[1], first.CapabilityName, first.ObservedAt)
 	}
-	if events[0].Timestamp.Location() != time.UTC || events[1].Timestamp.Location() != time.UTC {
-		t.Fatalf("timestamps must be UTC: %v, %v", events[0].Timestamp.Location(), events[1].Timestamp.Location())
+	if events[0].ObservedAt.Location() != time.UTC || events[1].ObservedAt.Location() != time.UTC {
+		t.Fatalf("observed times must be UTC: %v, %v", events[0].ObservedAt.Location(), events[1].ObservedAt.Location())
 	}
 	if events[0].Fingerprint == "" || events[1].Fingerprint == "" || events[0].Fingerprint == events[1].Fingerprint {
 		t.Fatalf("fingerprints = %q and %q, want distinct non-empty values", events[0].Fingerprint, events[1].Fingerprint)
 	}
 
-	filtered, err := s.ListUsageEvents(ctx, first.Timestamp)
+	filtered, err := s.ListUsageEvents(ctx, first.EffectiveActivityTime())
 	if err != nil {
 		t.Fatalf("ListUsageEvents(since): %v", err)
 	}
@@ -834,13 +1100,16 @@ func testCapability(name string, firstSeen, lastSeen time.Time) domain.Capabilit
 
 func testUsageEvent(timestamp time.Time, capabilityName string, eventType domain.EventType) domain.UsageEvent {
 	return domain.UsageEvent{
-		Timestamp:      timestamp,
-		Runtime:        domain.RuntimeCodex,
-		SessionID:      "session-hash",
-		ProjectID:      "project-hash",
-		CapabilityType: domain.CapabilityTool,
-		CapabilityName: capabilityName,
-		EventType:      eventType,
+		ObservedAt:       timestamp,
+		Runtime:          domain.RuntimeCodex,
+		SessionID:        "session-hash",
+		ProjectID:        "project-hash",
+		CapabilityType:   domain.CapabilityTool,
+		CapabilityName:   capabilityName,
+		EventType:        eventType,
+		Provenance:       domain.ProvenanceImport,
+		InvocationOrigin: domain.InvocationOriginUnknown,
+		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
 	}
 }
 
