@@ -145,9 +145,11 @@ type CapabilityEvidence struct {
 	// EvidenceCoverage explains what the observations can and cannot establish;
 	// it never implies complete capture merely because hook evidence exists.
 	EvidenceCoverage string
-	// EvidenceConfidence describes confidence in the observed event facts only;
-	// it is deliberately separate from the unknown lifetime coverage wording.
-	EvidenceConfidence domain.Confidence
+	// CoverageConfidence describes lifetime observation coverage. The usage
+	// contract has no completeness signal, so this remains unknown even when
+	// observations exist. Classification Confidence remains separate and
+	// describes confidence in the policy finding where justified.
+	CoverageConfidence domain.Confidence
 	// MetadataTokens and BodyTokens retain adapter measurements independently;
 	// context summaries label their semantics by capability type. Neither
 	// measurement implies a loaded or invoked event.
@@ -333,13 +335,10 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 		MetadataTokens:       capability.MetadataTokens,
 		BodyTokens:           capability.BodyTokens,
 		Confidence:           domain.ConfidenceObserved,
-		EvidenceConfidence:   domain.ConfidenceObserved,
+		CoverageConfidence:   domain.ConfidenceUnknown,
 	}
 	setUseObservation(&evidence, firstUsed, lastUsed, now)
 	evidence.EvidenceCoverage = coverageWording(evidence)
-	if activityCount == 0 {
-		evidence.EvidenceConfidence = domain.ConfidenceUnknown
-	}
 
 	classification, confidence, basis, err := classify(evidence, config)
 	if err != nil {

@@ -204,7 +204,7 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 		t.Fatalf("stale error = %v\nstderr=%s", err, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"name=dead status=DEAD", "name=stale status=STALE", "name=boundary status=KEEP", "name=review status=REVIEW", "name=keep status=KEEP", "evidence="} {
+	for _, want := range []string{"name=dead status=REVIEW", "evidence=never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient", "name=stale status=STALE", "name=boundary status=KEEP", "name=review status=REVIEW", "name=keep status=REVIEW", "evidence="} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stale output = %q, missing %q", output, want)
 		}

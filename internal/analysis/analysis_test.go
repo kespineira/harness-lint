@@ -33,8 +33,8 @@ func TestAnalyzeNeverObservedCapabilityRequiresReview(t *testing.T) {
 	if !strings.Contains(evidence.Basis, "never observed") || !strings.Contains(evidence.Basis, "insufficient") {
 		t.Fatalf("never-observed basis = %q, want explicit insufficient lifetime evidence", evidence.Basis)
 	}
-	if evidence.EvidenceConfidence != domain.ConfidenceUnknown {
-		t.Fatalf("evidence confidence = %q, want unknown", evidence.EvidenceConfidence)
+	if evidence.CoverageConfidence != domain.ConfidenceUnknown {
+		t.Fatalf("coverage confidence = %q, want unknown", evidence.CoverageConfidence)
 	}
 }
 
@@ -564,6 +564,12 @@ func TestAnalyzeAggregatesDistinctEvidenceSourcesWithoutDeduplicating(t *testing
 	if strings.Contains(evidence.EvidenceCoverage, "direct hook") || !strings.Contains(evidence.EvidenceCoverage, "transcript backfill/fallback") {
 		t.Fatalf("mixed evidence coverage = %q, want transcript fallback wording without direct-hook conflation", evidence.EvidenceCoverage)
 	}
+	if evidence.CoverageConfidence != domain.ConfidenceUnknown {
+		t.Fatalf("mixed evidence coverage confidence = %q, want unknown without a completeness signal", evidence.CoverageConfidence)
+	}
+	if evidence.Confidence != domain.ConfidenceObserved {
+		t.Fatalf("mixed evidence classification confidence = %q, want observed", evidence.Confidence)
+	}
 }
 
 func TestAnalyzeUsesEffectiveSourceTimeForLateTranscriptImport(t *testing.T) {
@@ -652,8 +658,11 @@ func TestAnalyzeCoverageConfidenceNeverClaimsCompleteCapture(t *testing.T) {
 		t.Fatalf("Analyze() error = %v", err)
 	}
 	evidence := report.Capabilities[0]
-	if evidence.EvidenceConfidence != domain.ConfidenceObserved {
-		t.Fatalf("evidence confidence = %q, want observed facts", evidence.EvidenceConfidence)
+	if evidence.CoverageConfidence != domain.ConfidenceUnknown {
+		t.Fatalf("coverage confidence = %q, want unknown lifetime coverage", evidence.CoverageConfidence)
+	}
+	if evidence.Confidence != domain.ConfidenceObserved {
+		t.Fatalf("classification confidence = %q, want observed facts", evidence.Confidence)
 	}
 	if !strings.Contains(evidence.EvidenceCoverage, "coverage is unknown") || strings.Contains(evidence.EvidenceCoverage, "complete") {
 		t.Fatalf("hook coverage = %q, want unknown lifetime coverage", evidence.EvidenceCoverage)
