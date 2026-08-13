@@ -7,12 +7,15 @@ harness can see, records metadata-only usage observations, and produces
 deterministic reports about exposure, activity, stale definitions, and
 configuration findings. The MVP supports Claude Code and Codex.
 
-It is an analyzer, not a harness manager. It does not install, enable,
-disable, rewrite, or delete skills, agents, MCP configuration, hooks, or
-instruction files. It does not execute configured MCP commands or hooks,
-contact an MCP endpoint, start a daemon, run a server, send data to a cloud
-service, or perform destructive actions. A scan writes only its own local
-SQLite state; the runtime configuration and source files are read-only.
+Usage can come from a directly installed metadata-only command hook (the
+preferred source) or from best-effort transcript/file imports used as
+backfill and verification. Hook management is opt-in and limited to the
+owned entries in the two supported runtime configuration files; it does not
+manage skills, agents, MCP configuration, or instruction files. The tool does
+not execute configured MCP commands or hooks, contact an MCP endpoint, start
+a daemon, run a server, send data to a cloud service, or perform destructive
+actions. A scan writes only its own local SQLite state, while hook install and
+uninstall make narrowly scoped, safe configuration edits described below.
 
 ## Install and build
 
@@ -71,16 +74,18 @@ database.
 
 ## Commands and flags
 
-The implemented commands are `scan`, `report`, `context`, `stale`, and
-`doctor`. Run `harness-lint <command> --help` for the same options shown by
-the binary. The relevant command forms are:
+The implemented commands are `scan`, `report`, `context`, `stale`, `doctor`,
+`hooks`, and `ingest`. Run `harness-lint <command> --help` for the same
+options shown by the binary. The relevant command forms are:
 
 ```text
 harness-lint scan    [--db PATH] [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--hook-capture PATH]... [--since RFC3339] [--now RFC3339]
-harness-lint report  [--db PATH] [--days N] [--now RFC3339]
+harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint context [--db PATH] [--days N] [--now RFC3339]
-harness-lint stale   [--db PATH] [--days N] [--now RFC3339]
+harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks   <status|install|uninstall> [claude|codex] [--json] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint ingest  --runtime <claude|codex> [--event EVENT] [--managed-by harness-lint-hooks/v1] [--db PATH] < one JSON document on stdin
 ```
 
 Flag meanings:
@@ -101,6 +106,28 @@ Flag meanings:
   must be positive when analyzing a stored report.
 - `--now RFC3339` sets the observation/analysis clock, useful for reproducible
   reports and tests.
+
+The hook commands are a small machine-facing API. They are normally invoked
+by an operator during setup or diagnosis, while `ingest` is normally invoked
+by an installed runtime hook and is intentionally quiet on success:
+
+```sh
+harness-lint hooks status [claude|codex] [--json]
+harness-lint hooks install [claude|codex] [--dry-run]
+harness-lint hooks uninstall [claude|codex] [--dry-run]
+harness-lint ingest --runtime claude|codex [--event EVENT] [--managed-by harness-lint-hooks/v1] --db PATH < hook-payload.json
+```
+
+`hooks status` reads Claude `$HOME/.claude/settings.json` and Codex
+`$HOME/.codex/hooks.json` (or the corresponding root flags), reports the
+owned event entries, and diagnoses whether the stable `harness-lint` name is
+resolvable on `PATH`. `hooks install` and `hooks uninstall` target the
+runtime-specific configuration root; neither accepts `--db`, and neither
+starts a configured command. `--dry-run` is a flag on install or uninstall:
+it prints the planned changes and does not create directories, backups, or
+files. `ingest` receives exactly one JSON document, normalizes only the
+documented metadata needed for one event, and writes only the local SQLite
+event; users should not call it with prompts, tool results, or other data.
 
 Command responsibilities:
 
@@ -129,8 +156,8 @@ scan runtime=codex capabilities=0 events=0 findings=0 inventory=recorded
 
 $ harness-lint report --db :memory: --now 2026-08-13T15:00:00Z
 report as-of=2026-08-13T15:00:00Z stale-days=60
-runtime=claude-code installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 never-used=0 usage-events=0
-runtime=codex installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 never-used=0 usage-events=0
+runtime=claude-code installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 no-activity-observed=0 usage-events=0
+runtime=codex installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 no-activity-observed=0 usage-events=0
 no current capabilities
 
 $ harness-lint context --db :memory: --now 2026-08-13T15:00:00Z
@@ -146,12 +173,88 @@ runtime=claude-code capabilities=0 findings=0
 runtime=codex capabilities=0 findings=0
 ```
 
+## Direct hook capture and transcript fallback
+
+Direct command-hook capture is the preferred usage source because the runtime
+delivers one event at the point where the tool call is observed. The generated
+hook only forwards a bounded JSON document to the quiet `ingest` receiver; it
+does not run `scan`, read transcripts, start a daemon, use the network, or
+gate the agent on report generation. The handler is asynchronous (`async: true`
+with the manager's ten-second timeout), so the runtime remains responsible for
+its own hook scheduling and failure behavior; `harness-lint` does not make the
+hook a synchronous policy gate.
+
+Transcript and file-capture imports are fallback, backfill, and verification
+paths. They are useful when hooks were not installed, when a delivery was
+missed, or when comparing direct evidence with historical records. A path
+passed through repeatable `--hook-capture` is classified as `import`, not as
+proof that a live hook delivered the document. Transcript formats are parsed
+best-effort and only records with explicit, usable tool identity and a
+timestamp become events. The analyzer never tails a live transcript and does
+not infer usage from arbitrary prompts, messages, responses, or neighboring
+records.
+
+The normalized event contract keeps two clocks separate:
+
+- `observed_at` is always the local receive/import time recorded by
+  `harness-lint`.
+- `source_timestamp` is optional and is populated only when a transcript or
+  other source explicitly supplies a timestamp that the adapter recognizes.
+  Current direct Claude and Codex hook payloads use local `observed_at` and
+  leave `source_timestamp` empty; undocumented timestamp-looking fields are
+  ignored.
+
+Every event also records `provenance` (`hook`, `transcript`, or `import`), a
+schema version, and an invocation origin when the source proves one. A stable
+runtime delivery identity (for example, the scoped `tool_use_id`, kept only
+as a one-way hash) is the first deduplication key. If it is unavailable, a
+recognized source timestamp is used; otherwise the local observed time is the
+conservative fallback. Provenance is not allowed to make the same stable
+delivery count twice, while a legitimate second call with a distinct delivery
+identity remains a second invocation.
+
+### Claude Code
+
+The installed Claude entries cover `PostToolUse`, `PostToolUseFailure`, and
+`UserPromptExpansion`. `PostToolUse` and `PostToolUseFailure` prove a tool
+invocation; the same `tool_use_id` is intentionally deduplicated across a
+success/failure retry. A `PostToolUse` with `tool_name=Skill` and a usable
+`tool_input.skill` identifies a Skill, while `Agent`/`Task` uses
+`tool_input.subagent_type`; MCP tool names and other built-in tool names are
+retained only as capability metadata.
+
+For an explicit slash command, `UserPromptExpansion` with
+`expansion_type=slash_command` and `command_name` is recorded as a
+user-explicit `command`. The payload does not provide a proven Skill identity
+on this path, so the adapter does not invent one: explicit Skill identity is
+captured through the `Skill` `PostToolUse` path. Other expansion types,
+subagent lifecycle events, and unsupported hook events are not counted as
+invocations. Hook input, tool arguments, and tool results are consumed only
+to validate shape or select a documented identity and are discarded.
+
+### Codex
+
+The installed Codex entry covers only proven `PostToolUse` semantics. The
+adapter records the documented tool name, recognizes `spawn_agent`/`Agent` as
+the `spawn_agent` agent identity, and recognizes valid MCP tool names. It does
+not manufacture Claude-style Skill events or claim Skill parity where Codex
+hook input does not prove it. Other Codex lifecycle or prompt events are
+ignored by direct ingestion; transcript import remains the historical
+fallback.
+
+Codex user-level hooks may also be present inline in `config.toml`. Status
+reports that condition separately and includes the runtime trust-review
+limitation: writing `hooks.json` cannot grant the trust/review decision needed
+by the Codex UI. The manager preserves inline configuration and does not try
+to enable or execute it.
+
 With inventory and observations, `report`/`stale` add lines in this form;
 values are evidence, not a runtime billing calculation:
 
 ```text
-runtime=codex installed=1 advertised=0 loaded=0 invoked=1 configured-advertised=1 used-last-30d=1 never-used=0 usage-events=1
-  runtime=codex type=skill name=lint status=KEEP advertised=0 loaded=0 invoked=1 exposure=fully_advertised used-last-30d=yes last-used=2026-08-13T14:30:00Z evidence=observed loaded/invoked activity is within the stale threshold source=/path/to/SKILL.md
+runtime=codex installed=1 advertised=0 loaded=0 invoked=1 configured-advertised=1 used-last-30d=1 no-activity-observed=0 usage-events=1
+capabilities:
+  runtime=codex type=skill name=lint status=KEEP advertised=0 loaded=0 invocation-uses=1 distinct-sessions=1 exposure=fully_advertised used-last-30d=yes evidence-sources=hook confidence=observed coverage-confidence=unknown
 runtime=codex type=skill capabilities=1
   configured baseline exposure: metadata=42 tokens (estimated) (according to Advertisement); body=not included (Skill body is on-load only)
   on-load footprint estimate: body=18 tokens (estimated); metadata=not measured (unknown)
@@ -195,16 +298,49 @@ Usage import is deliberately narrower than inventory. Claude Code reads
 best-effort JSONL transcript records below the configured Claude projects
 root. Codex reads best-effort JSON/JSONL records below its sessions root.
 Both adapters also accept explicitly supplied `--hook-capture` JSON/JSONL
-files or directories. Only explicit, timestamped tool-use signals are
-imported; arbitrary prompt/message/response content does not become usage.
+files or directories. Only explicit, timestamped transcript/import tool-use
+signals are imported; arbitrary prompt/message/response content does not
+become usage. Direct hook stdin is handled by `ingest` instead, and uses the
+local receive clock because the current documented hook payloads do not prove
+a source occurrence timestamp.
 
-Current limitations are runtime-specific: transcript schemas and formats are
-best-effort and may change, malformed or unsupported records can be skipped,
-and a hook capture must contain an explicit timestamp plus usable metadata.
-Timestamp-less hook records are ignored; `harness-lint` does not tail a live
-hook or install one. Runtime configuration can prove configured exposure, but
-loaded/invoked evidence appears only when a matching transcript or capture
-signal is observable.
+Runtime configuration can prove configured exposure, but loaded/invoked
+evidence appears only when a matching direct hook, transcript, or file-capture
+signal is observable. An empty or failed discovery does not prove that a
+capability was unused.
+
+## Hook installation safety and relocation
+
+The manager owns only entries bearing its exact versioned shape and marker:
+`harness-lint ingest --runtime ... --managed-by harness-lint-hooks/v1`. It
+does not remove lookalike commands, older markers, handlers under a user
+matcher, or unrelated fields. Installation merges the owned event groups with
+existing JSON, preserves unrelated hooks and field order, creates private
+configuration directories as needed, and refuses malformed JSON, symlinked or
+unsafe paths, and unresolved binaries before mutation.
+
+The generated command stores the stable executable name `harness-lint`, not
+the absolute path returned by `PATH` lookup. This keeps a copied or relocated
+binary usable after a normal `PATH` change, but it means the runtime that
+launches the hook must be able to resolve that name. `hooks status --json`
+reports `binary.resolved`, `binary.resolved_path` for diagnostics, and a safe
+error when the executable is missing; install refuses to proceed while it is
+unresolved. A user who relocates the binary should update the runtime process'
+`PATH` and rerun status rather than editing the generated command.
+
+Existing configuration is copied to the next unused `.bak` path before an
+update. New content is written to a private temporary file, synced, and
+atomically renamed into place while retaining the existing file mode. The
+operation is idempotent: a second install makes no change and does not create
+another backup. Uninstall removes only exact current-version entries, leaves
+unrelated hooks and configuration in place, and is a no-op when no owned entry
+is present. Dry-run performs inspection and prints a plan without creating a
+directory, backup, temporary file, or configuration.
+
+Claude and Codex configuration locations are independent of the SQLite state:
+`$HOME/.claude/settings.json` and `$HOME/.codex/hooks.json`, respectively.
+Use `--claude-config` or `--codex-home` for isolated roots; status, install,
+and uninstall never use `--db`.
 
 ## Official runtime references
 
@@ -224,17 +360,21 @@ interpretation remain best-effort:
 
 ## Privacy and measurement contract
 
-The SQLite schema is metadata-only. It can contain runtime, capability type
-and name, scope, source path, enabled/advertisement state, content hashes,
-measurement provenance, UTC timestamps, fingerprints, and one-way SHA-256
-session/project identifiers. Files are read transiently to extract metadata,
-hashes, and measurements, then discarded.
+The SQLite schema is metadata-only. Retained fields can include runtime,
+capability type and name, scope, source path, enabled/advertisement state,
+content hashes, measurement values and provenance, UTC `observed_at` and
+optional `source_timestamp`, `provenance`, `schema_version`, invocation
+origin, fingerprints, and one-way SHA-256 session/project/source identities.
+Files are read transiently to extract metadata, hashes, and measurements, then
+discarded. The local database is not uploaded or shared by the CLI.
 
-It never persists prompts, responses, source-code text, tool arguments or
-inputs, tool outputs, MCP configuration payloads/endpoints/command arguments,
-or model output. MCP server/tool names are capability metadata only; exchanged
-MCP data is not stored. The local database is not uploaded or shared by the
-CLI.
+The database and JSON reports prohibit prompts, responses, source-code text,
+tool arguments or inputs, tool outputs, MCP configuration payloads/endpoints/
+command arguments, and model output. MCP server/tool names are capability
+metadata only; exchanged MCP data is not stored. The hook receiver also
+avoids echoing malformed stdin in errors. Hook configuration files remain
+runtime-owned files: the safe manager preserves unrelated JSON fields and
+handlers but does not copy their contents into SQLite or reports.
 
 Token-looking measurements are advertised-size evidence, not a tokenizer or
 runtime bill. `harness-lint` never claims an exact runtime token cost. Every
@@ -256,12 +396,69 @@ never invoked, or observed in usage without appearing in the current
 inventory. Such unmatched events are printed as `usage-only` rather than
 invented inventory.
 
+## JSON contracts and examples
+
+`report --json` and `stale --json` emit versioned objects with
+`schema_version`, `generated_at`, `stale_after_days`, `runtimes`,
+`capabilities`, and (for `report`) `usage_only` and `findings`. Arrays are
+present as `[]` when empty. A privacy-safe abbreviated report looks like:
+
+```json
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "stale_after_days": 60,
+  "runtimes": [{"runtime":"codex","installed":1,"advertised":0,"loaded":0,"invoked":1,"configured_advertised":1,"invoked_last_30d":1,"no_activity_observed":0,"usage_events":1}],
+  "capabilities": [{"runtime":"codex","type":"skill","name":"lint","scope":"user","enabled":"enabled","advertisement":"fully_advertised","status":"KEEP","confidence":"observed","coverage_confidence":"unknown","evidence_sources":["hook"],"invocation_count":1,"distinct_sessions":1}],
+  "usage_only": [],
+  "findings": []
+}
+```
+
+`hooks status --json` emits `schema_version`, `generated_at`, and one runtime
+object per selected runtime. Each object includes `status`, `config_path`,
+`managed_entries`, `binary` (`name`, `resolved`, optional diagnostic path or
+error), `inline_hooks`, `trust_review`, and `warnings`. A missing executable
+is represented as `binary.resolved: false`; its diagnostic path is not used
+as the installed command. `ingest` emits no JSON or human output on success;
+its input is one runtime-specific hook document and its output is the local
+SQLite event.
+
+## State, migrations, and upgrades
+
+The default state file is
+`<os.UserConfigDir()>/harness-lint/harness-lint.db` (normally
+`~/Library/Application Support/harness-lint/harness-lint.db` on macOS or
+`$XDG_CONFIG_HOME/harness-lint/harness-lint.db` / `~/.config/harness-lint/harness-lint.db`
+on Linux). `--config-dir PATH` selects the base for that default, and
+`--db PATH` selects an exact SQLite file; `--db :memory:` is process-local and
+disappears on exit. Runtime hook configuration is separate under the Claude
+and Codex roots described above; changing `--home` does not move the
+database.
+
+SQLite migrations are embedded, numbered, and forward-only. Opening an older
+database applies the missing migrations in order. The usage-observation
+migration retains the legacy `timestamp` column for old readers, carries it
+forward as the best available source/observed value, and makes the explicit
+`observed_at`, optional `source_timestamp`, provenance, schema version,
+invocation origin, and source identity columns authoritative for current
+readers. There is no automatic downgrade or remote migration service; copy a
+state file before an operational upgrade when rollback of local state matters.
+
+The MVP has no automatic event retention or pruning policy. Reports describe
+the evidence still present in the local database and do not claim complete
+lifetime history. `no_activity_observed` and phrases such as `never observed`
+mean that no matching event is present in the ingested evidence for the
+current inventory; they do not prove that a user or model never used the
+capability. A missing, malformed, unsupported, or uninstalled source can make
+coverage incomplete.
+
 ## Architecture / MVP decisions
 
 ```text
-Claude Code files/transcripts ─┐
-                               ├─ runtime adapters ── metadata snapshots/events
-Codex files/transcripts ───────┘                         │
+Claude Code hooks/files/transcripts ─┐
+                                     ├─ runtime adapters ── metadata snapshots/events
+Codex hooks/files/transcripts ───────┘                         │
                                                         ▼
                                       SQLite inventory + usage history
                                                         │
@@ -280,8 +477,10 @@ Codex files/transcripts ───────┘                         │
 - Analysis is deterministic: it validates inputs, separates advertised,
   loaded, and invoked evidence, propagates confidence, detects duplicates,
   and applies explicit stale/review policy without opaque scores.
-- The CLI is read-only against harness sources and writes only its own local
-  state. Command lookup is used only to report whether a configured executable
+- Scan, report, context, stale, doctor, and ingest are read-only against
+  harness sources and write only local state or output. The opt-in hook
+  manager is the sole configuration writer and edits only its exact owned
+  entries. Command lookup is used only to report whether the stable executable
   appears resolvable; no configured command is started.
 
 The project is macOS-first and Linux-compatible. It uses Go filesystem paths,
@@ -295,9 +494,11 @@ Run the repository checks:
 
 ```sh
 git diff --check
-go test ./...
+gofmt -l .
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
-go build ./cmd/harness-lint
+go build -trimpath ./cmd/harness-lint
 ```
 
 The following practical smokes exercise every command without writing a
@@ -305,12 +506,20 @@ persistent database (each `:memory:` invocation is independent):
 
 ```sh
 go run ./cmd/harness-lint --help
+go run ./cmd/harness-lint hooks --help
+go run ./cmd/harness-lint hooks status --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
+go run ./cmd/harness-lint hooks install --dry-run --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
+go run ./cmd/harness-lint hooks uninstall --dry-run --home /tmp/no-home --codex-home /tmp/no-home/.codex --claude-config /tmp/no-home/.claude
 go run ./cmd/harness-lint scan --db :memory: --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
 go run ./cmd/harness-lint report --db :memory: --now 2026-08-13T15:00:00Z
 go run ./cmd/harness-lint context --db :memory: --now 2026-08-13T15:00:00Z
 go run ./cmd/harness-lint stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
 go run ./cmd/harness-lint doctor --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
 ```
+
+Use a fresh temporary directory and put the built binary on that test
+process's `PATH` for an actual install/uninstall smoke. Never aim those
+commands at live Claude or Codex configuration during automated verification.
 
 ## License
 
