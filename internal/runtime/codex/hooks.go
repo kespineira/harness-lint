@@ -20,9 +20,9 @@ const (
 )
 
 // codexPostToolUsePayload is intentionally a narrow projection of the
-// documented Codex PostToolUse payload. tool_input and tool_response are not
-// decoded at all: their presence proves that a call occurred, but their
-// contents are not usage metadata and must not cross this boundary.
+// documented Codex PostToolUse payload. tool_input, tool_response, timestamp,
+// and source_timestamp are not decoded at all: their presence does not add
+// usage metadata and their contents must not cross this boundary.
 type codexPostToolUsePayload struct {
 	SessionID     string `json:"session_id"`
 	CWD           string `json:"cwd"`
@@ -30,16 +30,12 @@ type codexPostToolUsePayload struct {
 	ToolName      string `json:"tool_name"`
 	ToolUseID     string `json:"tool_use_id"`
 	HookEventName string `json:"hook_event_name"`
-	// Codex does not require a source timestamp in the documented hook
-	// contract. If a producer supplies this optional field, retain it only as
-	// a valid SourceTimestamp; otherwise the normalized event keeps it nil.
-	SourceTime json.RawMessage `json:"timestamp"`
 }
 
 // ParseHookStdin parses one Codex command-hook payload from stdin and returns
 // one metadata-only usage observation. observedAt is supplied by the caller
-// at local receive time; it is required even when the payload has no optional
-// source timestamp.
+// at local receive time; Codex hook payloads do not expose a source occurrence
+// timestamp, so normalized events always leave SourceTimestamp nil.
 //
 // Codex PostToolUse is the only hook event normalized as an invocation. Other
 // lifecycle events either describe session/turn state or user prompt content,
@@ -64,7 +60,8 @@ func ParseHookStdin(input io.Reader, observedAt time.Time) (domain.UsageEvent, e
 
 // ParseHookPayload parses one documented Codex PostToolUse JSON payload. It is
 // useful for callers that already read stdin and for deterministic fixture
-// tests; use ParseHookStdin at a CLI boundary.
+// tests; use ParseHookStdin at a CLI boundary. Undocumented timestamp fields
+// are tolerated as unknown fields and intentionally ignored.
 func ParseHookPayload(payload []byte, observedAt time.Time) (domain.UsageEvent, error) {
 	if observedAt.IsZero() {
 		return domain.UsageEvent{}, errors.New("parse Codex hook payload: observed-at time is required")
@@ -101,14 +98,10 @@ func ParseHookPayload(payload []byte, observedAt time.Time) (domain.UsageEvent, 
 		return domain.UsageEvent{}, errors.New("parse Codex hook payload: tool_name is required")
 	}
 
-	sourceTimestamp, err := hookSourceTimestamp(decoded.SourceTime)
-	if err != nil {
-		return domain.UsageEvent{}, err
-	}
 	capabilityType, capabilityName := classifyHookTool(toolName)
 	event := domain.UsageEvent{
 		ObservedAt:       observedAt.UTC(),
-		SourceTimestamp:  sourceTimestamp,
+		SourceTimestamp:  nil,
 		Runtime:          domain.RuntimeCodex,
 		SessionID:        hashIdentifier(session),
 		ProjectID:        hashIdentifier(project),
@@ -157,24 +150,6 @@ func (a *Adapter) ParseHookPayload(payload []byte) (domain.UsageEvent, error) {
 		return domain.UsageEvent{}, errors.New("parse Codex hook payload: adapter clock is not configured")
 	}
 	return ParseHookPayload(payload, a.options.now())
-}
-
-func hookSourceTimestamp(raw json.RawMessage) (*time.Time, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil
-	}
-	var value any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return nil, errors.New("parse Codex hook payload: timestamp is invalid")
-	}
-	timestamp, ok := parseJSONTime(value)
-	if !ok {
-		return nil, errors.New("parse Codex hook payload: timestamp is invalid")
-	}
-	timestamp = timestamp.UTC()
-	return &timestamp, nil
 }
 
 func classifyHookTool(toolName string) (domain.CapabilityType, string) {

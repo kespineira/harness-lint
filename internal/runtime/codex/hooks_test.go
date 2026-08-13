@@ -21,11 +21,10 @@ func TestParseHookVersionedFixtures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		fixture             string
-		wantType            domain.CapabilityType
-		wantName            string
-		wantSourceTimestamp bool
-		wantSourceIdentity  bool
+		fixture            string
+		wantType           domain.CapabilityType
+		wantName           string
+		wantSourceIdentity bool
 	}{
 		{fixture: "valid_builtin.json", wantType: domain.CapabilityTool, wantName: "Bash", wantSourceIdentity: true},
 		{fixture: "valid_mcp.json", wantType: domain.CapabilityMCPTool, wantName: "mcp__filesystem__read_file", wantSourceIdentity: true},
@@ -33,8 +32,7 @@ func TestParseHookVersionedFixtures(t *testing.T) {
 		{fixture: "skill_not_proven.json", wantType: domain.CapabilityTool, wantName: "Skill", wantSourceIdentity: true},
 		{fixture: "missing_optional.json", wantType: domain.CapabilityTool, wantName: "update_plan"},
 		{fixture: "extra_fields.json", wantType: domain.CapabilityTool, wantName: "update_plan", wantSourceIdentity: true},
-		{fixture: "with_source_timestamp.json", wantType: domain.CapabilityTool, wantName: "apply_patch", wantSourceTimestamp: true, wantSourceIdentity: true},
-		{fixture: "no_source_timestamp.json", wantType: domain.CapabilityTool, wantName: "Read", wantSourceIdentity: true},
+		{fixture: "undocumented_timestamp_ignored.json", wantType: domain.CapabilityTool, wantName: "apply_patch", wantSourceIdentity: true},
 	}
 	for _, test := range tests {
 		t.Run(test.fixture, func(t *testing.T) {
@@ -49,8 +47,8 @@ func TestParseHookVersionedFixtures(t *testing.T) {
 			if event.ObservedAt.IsZero() || !event.ObservedAt.Equal(hookFixtureObservedAt.UTC()) {
 				t.Fatalf("ObservedAt = %s, want injected UTC time %s", event.ObservedAt, hookFixtureObservedAt.UTC())
 			}
-			if test.wantSourceTimestamp && event.SourceTimestamp != nil && event.SourceTimestamp.Equal(event.ObservedAt) {
-				t.Fatalf("SourceTimestamp replaced/inherited ObservedAt: %s", event.SourceTimestamp)
+			if event.SourceTimestamp != nil {
+				t.Fatalf("SourceTimestamp = %s, want nil for direct Codex hooks", event.SourceTimestamp)
 			}
 			if event.Runtime != domain.RuntimeCodex || event.EventType != domain.EventInvoked || event.Provenance != domain.ProvenanceHook {
 				t.Fatalf("contract fields = %#v, want Codex invoked direct-hook event", event)
@@ -61,9 +59,6 @@ func TestParseHookVersionedFixtures(t *testing.T) {
 			if event.CapabilityType != test.wantType || event.CapabilityName != test.wantName {
 				t.Fatalf("capability = %s/%q, want %s/%q", event.CapabilityType, event.CapabilityName, test.wantType, test.wantName)
 			}
-			if (event.SourceTimestamp != nil) != test.wantSourceTimestamp {
-				t.Fatalf("SourceTimestamp present = %t, want %t", event.SourceTimestamp != nil, test.wantSourceTimestamp)
-			}
 			if (event.SourceIdentity != "") != test.wantSourceIdentity {
 				t.Fatalf("SourceIdentity present = %t, want %t", event.SourceIdentity != "", test.wantSourceIdentity)
 			}
@@ -71,6 +66,20 @@ func TestParseHookVersionedFixtures(t *testing.T) {
 			assertSHA256Hex(t, event.ProjectID)
 			assertSHA256Hex(t, event.Fingerprint)
 		})
+	}
+}
+
+func TestParseHookIgnoresUndocumentedTimestampFields(t *testing.T) {
+	payload := readHookFixture(t, "undocumented_timestamp_ignored.json")
+	event, err := ParseHookPayload(payload, hookFixtureObservedAt)
+	if err != nil {
+		t.Fatalf("ParseHookPayload() with undocumented timestamp fields error = %v", err)
+	}
+	if event.SourceTimestamp != nil {
+		t.Fatalf("SourceTimestamp = %s, want nil", event.SourceTimestamp)
+	}
+	if !event.ObservedAt.Equal(hookFixtureObservedAt.UTC()) {
+		t.Fatalf("ObservedAt = %s, want caller-supplied receive time %s", event.ObservedAt, hookFixtureObservedAt.UTC())
 	}
 }
 
