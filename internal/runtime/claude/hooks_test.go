@@ -81,8 +81,8 @@ func TestParseHookPayloadDirectCapabilitiesAndOrigins(t *testing.T) {
 			sentinels:  []string{"SENTINEL_AGENT_PROMPT", "SENTINEL_AGENT_RESPONSE"},
 		},
 		{
-			fixture:    "v1-user-prompt-expansion-skill-explicit.json",
-			wantType:   domain.CapabilitySkill,
+			fixture:    "v1-user-prompt-expansion-slash-command-explicit.json",
+			wantType:   domain.CapabilityCommand,
 			wantName:   "fixture-review",
 			wantOrigin: domain.InvocationOriginUserExplicit,
 			sentinels:  []string{"SENTINEL_COMMAND_ARGS", "SENTINEL_EXPLICIT_PROMPT"},
@@ -137,7 +137,7 @@ func TestParseHookPayloadFailureAndRetryDeduplication(t *testing.T) {
 	assertSafeHookEvent(t, failure, "SENTINEL_DEDUP_COMMAND", "SENTINEL_DEDUP_ERROR")
 }
 
-func TestParseHookPayloadOptionalTimestampAndUnknownFields(t *testing.T) {
+func TestParseHookPayloadIgnoresUndocumentedTimestampsAndUnknownFields(t *testing.T) {
 	observedAt := parseFixtureObservedAt(t)
 	missing, err := ParseHookPayload(readHookFixture(t, "v1-missing-optional-fields.json"), observedAt)
 	if err != nil {
@@ -150,16 +150,17 @@ func TestParseHookPayloadOptionalTimestampAndUnknownFields(t *testing.T) {
 		t.Fatalf("missing-source ObservedAt = %s, want %s", missing.ObservedAt, observedAt)
 	}
 
-	withTimestamp, err := ParseHookPayload(readHookFixture(t, "v1-source-timestamp.json"), observedAt)
+	withUndocumentedTimestamps, err := ParseHookPayload(readHookFixture(t, "v1-undocumented-timestamps-ignored.json"), observedAt)
 	if err != nil {
-		t.Fatalf("source timestamp parse error = %v", err)
+		t.Fatalf("undocumented timestamp parse error = %v", err)
 	}
-	if withTimestamp.SourceTimestamp == nil || !withTimestamp.SourceTimestamp.Equal(parseFixtureSourceTimestamp(t)) {
-		t.Fatalf("source timestamp = %v, want fixture timestamp", withTimestamp.SourceTimestamp)
+	if withUndocumentedTimestamps.SourceTimestamp != nil {
+		t.Fatalf("undocumented source timestamp = %v, want nil", withUndocumentedTimestamps.SourceTimestamp)
 	}
-	if !withTimestamp.ObservedAt.Equal(observedAt) {
-		t.Fatalf("ObservedAt = %s, want injected %s", withTimestamp.ObservedAt, observedAt)
+	if !withUndocumentedTimestamps.ObservedAt.Equal(observedAt) {
+		t.Fatalf("ObservedAt = %s, want injected %s", withUndocumentedTimestamps.ObservedAt, observedAt)
 	}
+	assertSafeHookEvent(t, withUndocumentedTimestamps, "SENTINEL_TIMESTAMP_RESPONSE")
 
 	extra, err := ParseHookInput(strings.NewReader(string(readHookFixture(t, "v1-unknown-extra-fields.json"))), observedAt)
 	if err != nil {
@@ -201,7 +202,7 @@ func TestParseHookPayloadRejectsMalformedEmptyWrongUnknownAndSubagentEvents(t *t
 }
 
 func TestParseHookPayloadRequiresObservedAt(t *testing.T) {
-	_, err := ParseHookPayload(readHookFixture(t, "v1-source-timestamp.json"), time.Time{})
+	_, err := ParseHookPayload(readHookFixture(t, "v1-undocumented-timestamps-ignored.json"), time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "observed-at") {
 		t.Fatalf("zero observed time error = %v, want required observed-at error", err)
 	}
@@ -241,15 +242,6 @@ func parseFixtureObservedAt(t *testing.T) time.Time {
 	parsed, err := time.Parse(time.RFC3339Nano, fixtureObservedAt)
 	if err != nil {
 		t.Fatalf("parse fixture observed time: %v", err)
-	}
-	return parsed
-}
-
-func parseFixtureSourceTimestamp(t *testing.T) time.Time {
-	t.Helper()
-	parsed, err := time.Parse(time.RFC3339Nano, "2026-08-14T09:59:59.987654Z")
-	if err != nil {
-		t.Fatalf("parse fixture source time: %v", err)
 	}
 	return parsed
 }

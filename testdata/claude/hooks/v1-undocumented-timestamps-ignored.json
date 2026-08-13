@@ -3,6 +3,7 @@
   "cwd": "/fixture/project",
   "hook_event_name": "PostToolUse",
   "timestamp": "2026-08-14T09:59:59.987654Z",
+  "event_timestamp": "2026-08-14T09:59:58.123456Z",
   "tool_name": "Read",
   "tool_use_id": "toolu_fixture_timestamp",
   "tool_response": "SENTINEL_TIMESTAMP_RESPONSE"

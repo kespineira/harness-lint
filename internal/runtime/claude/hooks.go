@@ -55,7 +55,6 @@ type directHookPayload struct {
 	cwd           string
 	toolName      string
 	toolUseID     string
-	timestamp     string
 	expansionType string
 	commandName   string
 	toolInput     directToolInput
@@ -127,15 +126,6 @@ func decodeDirectHookPayload(input io.Reader) (directHookPayload, error) {
 			payload.toolName, err = decodeHookString(decoder, key)
 		case "tool_use_id":
 			payload.toolUseID, err = decodeHookString(decoder, key)
-		case "timestamp", "event_timestamp":
-			// The current hooks reference does not define a timestamp field.
-			// Some capture wrappers attach one, so accept only a strict RFC3339
-			// value as optional source metadata and never use it as ObservedAt.
-			value, decodeErr := decodeHookString(decoder, key)
-			if decodeErr == nil && payload.timestamp == "" {
-				payload.timestamp = value
-			}
-			err = decodeErr
 		case "expansion_type":
 			payload.expansionType, err = decodeHookString(decoder, key)
 		case "command_name":
@@ -145,6 +135,12 @@ func decodeDirectHookPayload(input io.Reader) (directHookPayload, error) {
 		case "tool_response":
 			// PostToolUse documents tool_response, but it is result content,
 			// not identity evidence. Consume it structurally and retain none.
+			err = skipJSONValue(decoder)
+		case "timestamp", "event_timestamp":
+			// Neither timestamp nor event_timestamp is documented by the
+			// current Claude hooks reference. Consume these unknown fields but
+			// never infer a source occurrence time from them: direct hook
+			// events always leave SourceTimestamp nil.
 			err = skipJSONValue(decoder)
 		default:
 			err = skipJSONValue(decoder)
@@ -297,14 +293,9 @@ func normalizeDirectHookPayload(payload directHookPayload, observedAt time.Time)
 	if err != nil {
 		return domain.UsageEvent{}, err
 	}
-	var sourceTimestamp *time.Time
-	if timestamp := parseEventTime(payload.timestamp); !timestamp.IsZero() {
-		sourceTimestamp = &timestamp
-	}
-
 	event := domain.UsageEvent{
 		ObservedAt:       observedAt.UTC(),
-		SourceTimestamp:  sourceTimestamp,
+		SourceTimestamp:  nil,
 		Runtime:          domain.RuntimeClaudeCode,
 		SessionID:        hashIdentifier(payload.sessionID),
 		ProjectID:        hashIdentifier(payload.cwd),
@@ -348,16 +339,16 @@ func classifyDirectHookPayload(payload directHookPayload) (domain.CapabilityType
 			claudeToolUseSourceIdentity(payload.sessionID, payload.toolUseID), nil
 	case "UserPromptExpansion":
 		// The documented slash_command variant covers both skills and
-		// custom commands; Claude's skills documentation says custom
-		// commands are merged into skills. mcp_prompt is intentionally
-		// outside this direct Skill/custom-command proof path.
+		// custom commands, and exposes no discriminator. Normalize it as a
+		// command rather than inventing a Skill classification. mcp_prompt
+		// is intentionally outside this direct slash-command path.
 		if payload.expansionType != "slash_command" {
 			return domain.CapabilityUnknown, "", domain.InvocationOriginUnknown, "", ErrUnsupportedHookEvent
 		}
 		if payload.commandName == "" {
 			return domain.CapabilityUnknown, "", domain.InvocationOriginUnknown, "", fmt.Errorf("%w: command_name is required", ErrMalformedHookPayload)
 		}
-		return domain.CapabilitySkill, payload.commandName, domain.InvocationOriginUserExplicit, "", nil
+		return domain.CapabilityCommand, payload.commandName, domain.InvocationOriginUserExplicit, "", nil
 	default:
 		// SubagentStart supplies a documented agent_id, but counting it as
 		// invocation would double count the Agent PostToolUse path; Stop is
