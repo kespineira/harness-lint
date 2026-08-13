@@ -34,22 +34,35 @@ func (r Runtime) Valid() bool {
 	}
 }
 
-// CapabilityType classifies an installed or observed capability.
+// CapabilityType classifies an installed or observed capability. MCP servers
+// and MCP tools intentionally have separate values because they have distinct
+// discovery and usage semantics.
 type CapabilityType string
 
 const (
-	CapabilityUnknown CapabilityType = "unknown"
-	CapabilitySkill   CapabilityType = "skill"
-	CapabilityMCP     CapabilityType = "mcp"
-	CapabilityTool    CapabilityType = "tool"
-	CapabilityAgent   CapabilityType = "agent"
+	CapabilityUnknown         CapabilityType = "unknown"
+	CapabilitySkill           CapabilityType = "skill"
+	CapabilityMCPServer       CapabilityType = "mcp_server"
+	CapabilityMCPTool         CapabilityType = "mcp_tool"
+	CapabilityAgent           CapabilityType = "agent"
+	CapabilityTool            CapabilityType = "tool"
+	CapabilityHook            CapabilityType = "hook"
+	CapabilityInstructionFile CapabilityType = "instruction_file"
+
+	// Commands and plugins remain distinct inventory categories because some
+	// runtimes expose them as installed definitions rather than tools.
 	CapabilityCommand CapabilityType = "command"
 	CapabilityPlugin  CapabilityType = "plugin"
+
+	// CapabilityMCP is retained as a source-compatible alias for the old
+	// unsplit value. It now means an MCP server; the persisted value is still
+	// mcp_server, so MCP servers and tools cannot be collapsed.
+	CapabilityMCP CapabilityType = CapabilityMCPServer
 )
 
 func (t CapabilityType) Valid() bool {
 	switch t {
-	case CapabilitySkill, CapabilityMCP, CapabilityTool, CapabilityAgent, CapabilityCommand, CapabilityPlugin:
+	case CapabilitySkill, CapabilityMCPServer, CapabilityMCPTool, CapabilityAgent, CapabilityTool, CapabilityHook, CapabilityInstructionFile, CapabilityCommand, CapabilityPlugin:
 		return true
 	default:
 		return false
@@ -114,8 +127,9 @@ func (c Confidence) Valid() bool {
 	}
 }
 
-// Measurement carries every context/token quantity together with its
-// provenance. Unknown measurements use Value zero and ConfidenceUnknown.
+// Measurement carries an advertised token quantity together with its
+// provenance. It does not represent an exact runtime context cost. Unknown
+// measurements use Value zero and ConfidenceUnknown.
 type Measurement struct {
 	Value      int64
 	Confidence Confidence
@@ -147,20 +161,44 @@ func (m Measurement) Valid() bool {
 	return m.Validate() == nil
 }
 
+// EnabledState describes whether a capability is enabled in its source
+// configuration. Unknown is distinct from disabled and is persisted as such.
+type EnabledState string
+
+const (
+	EnabledStateEnabled  EnabledState = "enabled"
+	EnabledStateDisabled EnabledState = "disabled"
+	EnabledStateUnknown  EnabledState = "unknown"
+
+	// Short aliases follow the naming convention used by the other domain
+	// enums and keep call sites concise without changing the wire values.
+	EnabledEnabled  = EnabledStateEnabled
+	EnabledDisabled = EnabledStateDisabled
+	EnabledUnknown  = EnabledStateUnknown
+)
+
+func (s EnabledState) Valid() bool {
+	switch s {
+	case EnabledStateEnabled, EnabledStateDisabled, EnabledStateUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Capability is an installed inventory item discovered by an adapter.
 type Capability struct {
-	Runtime      Runtime
-	Type         CapabilityType
-	Name         string
-	Scope        Scope
-	Source       string
-	Enabled      bool
-	Hash         string
-	Context      Measurement
-	InputTokens  Measurement
-	OutputTokens Measurement
-	FirstSeen    time.Time
-	LastSeen     time.Time
+	Runtime        Runtime
+	Type           CapabilityType
+	Name           string
+	Scope          Scope
+	Source         string
+	Enabled        EnabledState
+	Hash           string
+	MetadataTokens Measurement
+	BodyTokens     Measurement
+	FirstSeen      time.Time
+	LastSeen       time.Time
 }
 
 func (c Capability) Validate() error {
@@ -176,13 +214,15 @@ func (c Capability) Validate() error {
 	if !c.Scope.Valid() {
 		return fmt.Errorf("invalid scope %q", c.Scope)
 	}
+	if !c.Enabled.Valid() {
+		return fmt.Errorf("invalid enabled state %q", c.Enabled)
+	}
 	measurements := []struct {
 		name  string
 		value Measurement
 	}{
-		{name: "context", value: c.Context},
-		{name: "input tokens", value: c.InputTokens},
-		{name: "output tokens", value: c.OutputTokens},
+		{name: "advertised metadata tokens", value: c.MetadataTokens},
+		{name: "advertised body tokens", value: c.BodyTokens},
 	}
 	for _, measurement := range measurements {
 		if err := measurement.value.Validate(); err != nil {

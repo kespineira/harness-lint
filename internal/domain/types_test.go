@@ -17,7 +17,14 @@ func TestEnumValidation(t *testing.T) {
 		{name: "runtime known", valid: func() bool { return RuntimeCodex.Valid() }, want: true},
 		{name: "runtime unknown", valid: func() bool { return RuntimeUnknown.Valid() }, want: false},
 		{name: "runtime arbitrary", valid: func() bool { return Runtime("other").Valid() }, want: false},
-		{name: "capability type known", valid: func() bool { return CapabilityTool.Valid() }, want: true},
+		{name: "capability type skill", valid: func() bool { return CapabilitySkill.Valid() }, want: true},
+		{name: "capability type mcp server", valid: func() bool { return CapabilityMCPServer.Valid() }, want: true},
+		{name: "capability type mcp tool", valid: func() bool { return CapabilityMCPTool.Valid() }, want: true},
+		{name: "capability type agent", valid: func() bool { return CapabilityAgent.Valid() }, want: true},
+		{name: "capability type tool", valid: func() bool { return CapabilityTool.Valid() }, want: true},
+		{name: "capability type hook", valid: func() bool { return CapabilityHook.Valid() }, want: true},
+		{name: "capability type instruction file", valid: func() bool { return CapabilityInstructionFile.Valid() }, want: true},
+		{name: "capability type legacy mcp value", valid: func() bool { return CapabilityType("mcp").Valid() }, want: false},
 		{name: "capability type unknown", valid: func() bool { return CapabilityUnknown.Valid() }, want: false},
 		{name: "scope known", valid: func() bool { return ScopeProject.Valid() }, want: true},
 		{name: "scope unknown", valid: func() bool { return ScopeUnknown.Valid() }, want: false},
@@ -25,6 +32,10 @@ func TestEnumValidation(t *testing.T) {
 		{name: "event type unknown", valid: func() bool { return EventType("installed").Valid() }, want: false},
 		{name: "confidence known", valid: func() bool { return ConfidenceEstimated.Valid() }, want: true},
 		{name: "confidence unknown", valid: func() bool { return Confidence("guess").Valid() }, want: false},
+		{name: "enabled state enabled", valid: func() bool { return EnabledStateEnabled.Valid() }, want: true},
+		{name: "enabled state disabled", valid: func() bool { return EnabledStateDisabled.Valid() }, want: true},
+		{name: "enabled state unknown", valid: func() bool { return EnabledStateUnknown.Valid() }, want: true},
+		{name: "enabled state arbitrary", valid: func() bool { return EnabledState("maybe").Valid() }, want: false},
 	}
 
 	for _, test := range tests {
@@ -33,6 +44,9 @@ func TestEnumValidation(t *testing.T) {
 				t.Fatalf("Valid() = %v, want %v", got, test.want)
 			}
 		})
+	}
+	if CapabilityMCPServer == CapabilityMCPTool {
+		t.Fatal("MCP server and MCP tool capability types must remain distinct")
 	}
 }
 
@@ -91,15 +105,15 @@ func TestCapabilityValidation(t *testing.T) {
 
 	firstSeen := time.Date(2026, 8, 13, 12, 0, 0, 0, time.FixedZone("CEST", 2*60*60))
 	capability := Capability{
-		Runtime:      RuntimeCodex,
-		Type:         CapabilitySkill,
-		Name:         "lint",
-		Scope:        ScopeProject,
-		Context:      Measurement{Value: 100, Confidence: ConfidenceObserved, Basis: "session metadata"},
-		InputTokens:  Measurement{Value: 20, Confidence: ConfidenceExact, Basis: "request metadata"},
-		OutputTokens: Measurement{Value: 30, Confidence: ConfidenceEstimated, Basis: "tokenizer estimate"},
-		FirstSeen:    firstSeen,
-		LastSeen:     firstSeen.Add(time.Minute),
+		Runtime:        RuntimeCodex,
+		Type:           CapabilitySkill,
+		Name:           "lint",
+		Scope:          ScopeProject,
+		Enabled:        EnabledStateUnknown,
+		MetadataTokens: Measurement{Value: 20, Confidence: ConfidenceObserved, Basis: "advertised metadata"},
+		BodyTokens:     Measurement{Value: 30, Confidence: ConfidenceEstimated, Basis: "advertised body estimate"},
+		FirstSeen:      firstSeen,
+		LastSeen:       firstSeen.Add(time.Minute),
 	}
 	if err := capability.Validate(); err != nil {
 		t.Fatalf("valid capability rejected: %v", err)
@@ -111,25 +125,48 @@ func TestCapabilityValidation(t *testing.T) {
 	}
 }
 
+func TestAdvertisedMeasurementsCanBePopulatedIndependently(t *testing.T) {
+	t.Parallel()
+	base := Capability{
+		Runtime: RuntimeCodex,
+		Type:    CapabilitySkill,
+		Name:    "lint",
+		Scope:   ScopeProject,
+		Enabled: EnabledStateUnknown,
+	}
+	metadataOnly := base
+	metadataOnly.MetadataTokens = Measurement{Value: 12, Confidence: ConfidenceObserved, Basis: "advertised metadata"}
+	metadataOnly.BodyTokens = Measurement{Confidence: ConfidenceUnknown}
+	if err := metadataOnly.Validate(); err != nil {
+		t.Fatalf("metadata-only advertised measurement rejected: %v", err)
+	}
+	bodyOnly := base
+	bodyOnly.MetadataTokens = Measurement{Confidence: ConfidenceUnknown}
+	bodyOnly.BodyTokens = Measurement{Value: 34, Confidence: ConfidenceExact, Basis: "advertised body"}
+	if err := bodyOnly.Validate(); err != nil {
+		t.Fatalf("body-only advertised measurement rejected: %v", err)
+	}
+}
+
 func TestFindingAndDiscoveryValidation(t *testing.T) {
 	t.Parallel()
 
 	discovery := Discovery{
 		Capabilities: []Capability{{
-			Runtime:      RuntimeClaude,
-			Type:         CapabilityMCP,
-			Name:         "filesystem",
-			Scope:        ScopeUser,
-			Context:      Measurement{Confidence: ConfidenceUnknown},
-			InputTokens:  Measurement{Confidence: ConfidenceUnknown},
-			OutputTokens: Measurement{Confidence: ConfidenceUnknown},
+			Runtime:        RuntimeClaude,
+			Type:           CapabilityMCPServer,
+			Name:           "filesystem",
+			Scope:          ScopeUser,
+			Enabled:        EnabledStateUnknown,
+			MetadataTokens: Measurement{Confidence: ConfidenceUnknown},
+			BodyTokens:     Measurement{Confidence: ConfidenceUnknown},
 		}},
 		Findings: []Finding{{
 			Runtime:        RuntimeClaude,
 			Code:           "config-unreadable",
 			Message:        "configuration could not be read",
 			Severity:       SeverityWarning,
-			CapabilityType: CapabilityMCP,
+			CapabilityType: CapabilityMCPServer,
 			CapabilityName: "filesystem",
 			Confidence:     ConfidenceObserved,
 		}},

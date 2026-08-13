@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/domain"
@@ -26,8 +27,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "1" {
-		t.Fatalf("schema version = %q, want 1", version)
+	if version != "2" {
+		t.Fatalf("schema version = %q, want 2", version)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -63,6 +64,120 @@ func TestOpenRejectsUnsupportedSchemaVersion(t *testing.T) {
 	}
 }
 
+func TestLoadMigrationsSortsNumberedFilesWithoutSuffixAssumptions(t *testing.T) {
+	fsys := fstest.MapFS{
+		"migrations/002_add_indexes.sql": &fstest.MapFile{Data: []byte("second")},
+		"migrations/001_bootstrap.sql":   &fstest.MapFile{Data: []byte("first")},
+		"migrations/003-final.sql":       &fstest.MapFile{Data: []byte("third")},
+	}
+
+	got, err := loadMigrations(fsys)
+	if err != nil {
+		t.Fatalf("loadMigrations() error = %v", err)
+	}
+	if len(got) != 3 || got[0].version != 1 || got[1].version != 2 || got[2].version != 3 {
+		t.Fatalf("migration versions = %#v, want [1 2 3]", got)
+	}
+	if string(got[0].sql) != "first" || string(got[1].sql) != "second" || string(got[2].sql) != "third" {
+		t.Fatalf("migration order/content = %#v", got)
+	}
+}
+
+func TestLoadMigrationsRejectsInvalidNumbering(t *testing.T) {
+	tests := []struct {
+		name string
+		fs   fstest.MapFS
+		want string
+	}{
+		{
+			name: "gap",
+			fs: fstest.MapFS{
+				"migrations/001_bootstrap.sql": &fstest.MapFile{Data: []byte("first")},
+				"migrations/003_later.sql":     &fstest.MapFile{Data: []byte("third")},
+			},
+			want: "numbering gap",
+		},
+		{
+			name: "duplicate",
+			fs: fstest.MapFS{
+				"migrations/001_bootstrap.sql":   &fstest.MapFile{Data: []byte("first")},
+				"migrations/001_replacement.sql": &fstest.MapFile{Data: []byte("duplicate")},
+			},
+			want: "duplicate migration version",
+		},
+		{
+			name: "unnumbered",
+			fs: fstest.MapFS{
+				"migrations/bootstrap.sql": &fstest.MapFile{Data: []byte("first")},
+			},
+			want: "must start with a numeric version",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := loadMigrations(test.fs); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("loadMigrations() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenMigratesLegacyCapabilityShape(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	initial, err := migrations.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatalf("read initial migration: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, string(initial)); err != nil {
+		t.Fatalf("apply initial migration: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('version', '1')`); err != nil {
+		t.Fatalf("seed legacy schema version: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO capabilities(runtime, capability_type, name, scope, source, enabled, hash, context_value, context_confidence, context_basis, input_tokens_value, input_tokens_confidence, input_tokens_basis, output_tokens_value, output_tokens_confidence, output_tokens_basis, first_seen, last_seen) VALUES ('codex', 'mcp', 'filesystem', 'user', '/config/mcp.json', 0, 'legacy-hash', 100, 'exact', 'old context', 20, 'observed', 'old input', 30, 'estimated', 'old output', '2026-08-13T10:00:00Z', '2026-08-13T10:00:00Z')`); err != nil {
+		t.Fatalf("seed legacy capability: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO usage_events(timestamp, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES ('2026-08-13T10:00:00Z', 'codex', 'session-hash', 'project-hash', 'mcp', 'filesystem', 'loaded', 'legacy-event')`); err != nil {
+		t.Fatalf("seed legacy usage event: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() migration error = %v", err)
+	}
+	defer s.Close()
+	capabilities, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after migration: %v", err)
+	}
+	if len(capabilities) != 1 {
+		t.Fatalf("migrated capability count = %d, want 1", len(capabilities))
+	}
+	capability := capabilities[0]
+	if capability.Type != domain.CapabilityMCPServer || capability.Enabled != domain.EnabledStateDisabled || capability.Source != "/config/mcp.json" {
+		t.Fatalf("migrated capability identity/state = %#v", capability)
+	}
+	if capability.MetadataTokens != (domain.Measurement{Confidence: domain.ConfidenceUnknown}) || capability.BodyTokens != (domain.Measurement{Confidence: domain.ConfidenceUnknown}) {
+		t.Fatalf("legacy runtime measurements must not be relabeled as advertised sizes: %#v", capability)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents() after migration: %v", err)
+	}
+	if len(events) != 1 || events[0].CapabilityType != domain.CapabilityMCPServer {
+		t.Fatalf("migrated usage events = %#v", events)
+	}
+}
+
 func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -73,10 +188,9 @@ func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 		t.Fatalf("first upsert: %v", err)
 	}
 	updated := first
-	updated.Source = "new-source"
-	updated.Enabled = false
+	updated.Enabled = domain.EnabledStateDisabled
 	updated.Hash = "new-hash"
-	updated.Context = domain.Measurement{Value: 999, Confidence: domain.ConfidenceExact, Basis: "latest scan"}
+	updated.MetadataTokens = domain.Measurement{Value: 999, Confidence: domain.ConfidenceExact, Basis: "latest advertised metadata"}
 	if err := s.UpsertCapabilities(ctx, []domain.Capability{updated}); err != nil {
 		t.Fatalf("idempotent upsert: %v", err)
 	}
@@ -89,7 +203,6 @@ func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 	withoutObservation := earlier
 	withoutObservation.FirstSeen = time.Time{}
 	withoutObservation.LastSeen = time.Time{}
-	withoutObservation.Source = "latest-without-timestamps"
 	if err := s.UpsertCapabilities(ctx, []domain.Capability{withoutObservation}); err != nil {
 		t.Fatalf("zero timestamp upsert: %v", err)
 	}
@@ -105,12 +218,85 @@ func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 	if got.Source != withoutObservation.Source || got.Enabled != withoutObservation.Enabled || got.Hash != withoutObservation.Hash {
 		t.Fatalf("latest mutable fields = %#v, want source/enabled/hash from latest upsert", got)
 	}
-	if got.Context != withoutObservation.Context {
-		t.Fatalf("latest context = %#v, want %#v", got.Context, withoutObservation.Context)
+	if got.MetadataTokens != withoutObservation.MetadataTokens || got.BodyTokens != withoutObservation.BodyTokens {
+		t.Fatalf("latest advertised measurements = %#v/%#v, want %#v/%#v", got.MetadataTokens, got.BodyTokens, withoutObservation.MetadataTokens, withoutObservation.BodyTokens)
 	}
 	if !got.FirstSeen.Equal(base) || !got.LastSeen.Equal(base.Add(3*time.Hour)) {
 		t.Fatalf("seen range = %s..%s, want %s..%s", got.FirstSeen, got.LastSeen, base, base.Add(3*time.Hour))
 	}
+}
+
+func TestCapabilitiesWithDifferentSourcesCoexist(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := testCapability("same-name", time.Time{}, time.Time{})
+	first := base
+	first.Source = "/project/skills/a/same-name"
+	second := base
+	second.Source = "/project/skills/b/same-name"
+	second.Type = domain.CapabilitySkill
+	second.Enabled = domain.EnabledStateUnknown
+
+	if err := s.UpsertCapabilities(ctx, []domain.Capability{first, second}); err != nil {
+		t.Fatalf("upsert capabilities with duplicate names: %v", err)
+	}
+	capabilities, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities(): %v", err)
+	}
+	if len(capabilities) != 2 {
+		t.Fatalf("capability count = %d, want 2 for distinct sources: %#v", len(capabilities), capabilities)
+	}
+	if capabilities[0].Source != first.Source || capabilities[1].Source != second.Source {
+		t.Fatalf("capabilities ordered by source = %#v, want %q then %q", capabilities, first.Source, second.Source)
+	}
+	if capabilities[0].Enabled != first.Enabled || capabilities[1].Enabled != second.Enabled {
+		t.Fatalf("enabled states were not preserved: %#v", capabilities)
+	}
+}
+
+func TestCapabilityEnabledStatesPersistLosslessly(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	states := []domain.EnabledState{
+		domain.EnabledStateEnabled,
+		domain.EnabledStateDisabled,
+		domain.EnabledStateUnknown,
+	}
+	capabilities := make([]domain.Capability, 0, len(states))
+	wantBySource := make(map[string]domain.EnabledState, len(states))
+	for _, state := range states {
+		name := stateName(state)
+		capability := testCapability("state-"+name, time.Time{}, time.Time{})
+		capability.Source = "/project/skills/" + name
+		capability.Enabled = state
+		capabilities = append(capabilities, capability)
+		wantBySource[capability.Source] = state
+	}
+	if err := s.UpsertCapabilities(ctx, capabilities); err != nil {
+		t.Fatalf("upsert enabled states: %v", err)
+	}
+	got, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities(): %v", err)
+	}
+	if len(got) != len(states) {
+		t.Fatalf("capability count = %d, want %d", len(got), len(states))
+	}
+	for _, capability := range got {
+		if !capability.Enabled.Valid() {
+			t.Fatalf("invalid persisted enabled state: %#v", capability)
+		}
+	}
+	for _, capability := range got {
+		if capability.Enabled != wantBySource[capability.Source] {
+			t.Fatalf("persisted enabled state for %q = %q, want %q", capability.Source, capability.Enabled, wantBySource[capability.Source])
+		}
+	}
+}
+
+func stateName(state domain.EnabledState) string {
+	return strings.ReplaceAll(string(state), "-", "_")
 }
 
 func TestCapabilityUpsertRollsBackOnValidationError(t *testing.T) {
@@ -252,18 +438,17 @@ func openTestStore(t *testing.T) *Store {
 
 func testCapability(name string, firstSeen, lastSeen time.Time) domain.Capability {
 	return domain.Capability{
-		Runtime:      domain.RuntimeCodex,
-		Type:         domain.CapabilitySkill,
-		Name:         name,
-		Scope:        domain.ScopeProject,
-		Source:       "test-source",
-		Enabled:      true,
-		Hash:         "test-hash",
-		Context:      domain.Measurement{Value: 100, Confidence: domain.ConfidenceObserved, Basis: "test observation"},
-		InputTokens:  domain.Measurement{Value: 20, Confidence: domain.ConfidenceExact, Basis: "request metadata"},
-		OutputTokens: domain.Measurement{Value: 30, Confidence: domain.ConfidenceEstimated, Basis: "tokenizer"},
-		FirstSeen:    firstSeen,
-		LastSeen:     lastSeen,
+		Runtime:        domain.RuntimeCodex,
+		Type:           domain.CapabilitySkill,
+		Name:           name,
+		Scope:          domain.ScopeProject,
+		Source:         "test-source",
+		Enabled:        domain.EnabledStateEnabled,
+		Hash:           "test-hash",
+		MetadataTokens: domain.Measurement{Value: 20, Confidence: domain.ConfidenceExact, Basis: "advertised metadata"},
+		BodyTokens:     domain.Measurement{Value: 30, Confidence: domain.ConfidenceEstimated, Basis: "advertised body"},
+		FirstSeen:      firstSeen,
+		LastSeen:       lastSeen,
 	}
 }
 
