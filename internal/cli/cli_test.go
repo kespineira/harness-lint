@@ -442,7 +442,7 @@ func TestExecuteRejectsUnknownCommandsAndInvalidFlags(t *testing.T) {
 
 func TestExecuteHelpFlagsSucceedForGlobalAndEveryCommand(t *testing.T) {
 	args := [][]string{{"--help"}, {"-h"}}
-	for _, command := range []string{"scan", "report", "context", "stale", "doctor"} {
+	for _, command := range []string{"scan", "report", "context", "stale", "doctor", "ingest", "hooks"} {
 		args = append(args, []string{command, "--help"}, []string{command, "-h"})
 	}
 	for _, testArgs := range args {

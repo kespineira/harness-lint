@@ -1,7 +1,7 @@
-// Package cli implements the small, local, read-only harness-lint command
-// line application. It intentionally keeps argument parsing, orchestration,
-// and presentation at the edge; adapters, analysis, and persistence remain
-// independently testable packages.
+// Package cli implements the small, local harness-lint command line
+// application. It intentionally keeps argument parsing, orchestration, and
+// presentation at the edge; adapters, analysis, persistence, and hook
+// configuration management remain independently testable packages.
 package cli
 
 import (
@@ -29,10 +29,9 @@ func Execute(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 }
 
 // ExecuteWithOptions is Execute with injected home, current directory, clock,
-// and executable lookup values. stdin is reserved for future metadata-only
-// input sources and is intentionally not read by the current commands.
+// and executable lookup values. The ingest command consumes only its one
+// metadata-only JSON document from stdin; other commands leave stdin alone.
 func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	_ = stdin
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -57,17 +56,40 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		return nil
 	}
 
-	parsed, err := parseFlags(command, commandArgs, stderr)
+	nested, parseArgs, err := parseCommandArgs(command, commandArgs)
 	if err != nil {
 		return err
 	}
-	config, err := resolveConfig(options, parsed)
+	parsed, err := parseFlags(command, parseArgs, stderr)
+	if err != nil {
+		return err
+	}
+	parsed.hooksAction = nested.hooksAction
+	parsed.hooksRuntime = nested.hooksRuntime
+	if err := validateCommandFlags(command, parsed); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	if command == "ingest" {
+		config, err := resolveIngestConfig(options, parsed)
+		if err != nil {
+			return err
+		}
+		return runIngest(ctx, config, parsed, stdin)
+	}
+	var config commandConfig
+	if command == "hooks" {
+		config, err = resolveHooksConfig(options, parsed)
+	} else {
+		config, err = resolveConfig(options, parsed)
+	}
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
 	switch command {
+	case "hooks":
+		return runHooks(ctx, config, parsed, stdout)
 	case "scan":
 		return runScan(ctx, config, stdout)
 	case "report":

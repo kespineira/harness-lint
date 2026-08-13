@@ -14,6 +14,8 @@ import (
 const defaultStaleDays = 60
 
 var supportedCommands = map[string]struct{}{
+	"ingest":  {},
+	"hooks":   {},
 	"scan":    {},
 	"report":  {},
 	"context": {},
@@ -48,9 +50,22 @@ type parsedFlags struct {
 	claudeConfig string
 	claudeSet    bool
 	nowText      string
+	nowSet       bool
 	sinceText    string
 	days         int
 	hooks        []string
+	runtime      string
+	runtimeSet   bool
+	event        string
+	eventSet     bool
+	managedBy    string
+	managedSet   bool
+	dryRun       bool
+	dryRunSet    bool
+	json         bool
+	jsonSet      bool
+	hooksAction  string
+	hooksRuntime string
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, error) {
@@ -58,7 +73,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: harness-lint %s [options]\n", command)
-		fmt.Fprintln(stderr, "commands: scan, report, context, stale, doctor")
+		fmt.Fprintln(stderr, "commands: scan, report, context, stale, doctor, ingest, hooks")
 	}
 	var result parsedFlags
 	fs.StringVar(&result.dbPath, "db", "", "SQLite database path")
@@ -70,6 +85,11 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.StringVar(&result.nowText, "now", "", "observation time in RFC3339 form")
 	fs.StringVar(&result.sinceText, "since", "", "inclusive usage-import boundary in RFC3339 form")
 	fs.IntVar(&result.days, "days", defaultStaleDays, "stale threshold in days")
+	fs.StringVar(&result.runtime, "runtime", "", "runtime (claude, claude-code, or codex)")
+	fs.StringVar(&result.event, "event", "", "documented runtime hook event name")
+	fs.StringVar(&result.managedBy, "managed-by", "", "managed hook ownership marker")
+	fs.BoolVar(&result.dryRun, "dry-run", false, "show hook changes without writing configuration")
+	fs.BoolVar(&result.json, "json", false, "render hook status as stable JSON")
 	var hooks stringListFlag
 	fs.Var(&hooks, "hook-capture", "repeatable metadata-only hook capture path")
 
@@ -94,12 +114,129 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.codexSet = true
 		case "claude-config":
 			result.claudeSet = true
+		case "runtime":
+			result.runtimeSet = true
+		case "event":
+			result.eventSet = true
+		case "managed-by":
+			result.managedSet = true
+		case "now":
+			result.nowSet = true
+		case "dry-run":
+			result.dryRunSet = true
+		case "json":
+			result.jsonSet = true
 		}
 	})
 	if result.days < 0 {
 		return parsedFlags{}, errors.New("--days cannot be negative")
 	}
 	return result, nil
+}
+
+// parseCommandArgs extracts the nested hooks action and optional runtime before
+// flag parsing. The standard flag package stops at the first positional
+// argument, while the public hooks syntax intentionally places those
+// positionals next to options.
+func parseCommandArgs(command string, args []string) (parsedFlags, []string, error) {
+	if command != "hooks" {
+		return parsedFlags{}, args, nil
+	}
+	var positionals []string
+	var positionalIndexes []int
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--" {
+			for next := index + 1; next < len(args); next++ {
+				positionals = append(positionals, args[next])
+				positionalIndexes = append(positionalIndexes, next)
+			}
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			if !strings.Contains(arg, "=") && consumesValueFlag(arg) {
+				index++
+			}
+			continue
+		}
+		positionals = append(positionals, arg)
+		positionalIndexes = append(positionalIndexes, index)
+	}
+	if len(positionals) == 0 {
+		return parsedFlags{}, nil, errors.New("hooks action is required: status, install, or uninstall")
+	}
+	if len(positionals) > 2 {
+		return parsedFlags{}, nil, fmt.Errorf("unexpected hooks argument(s): %s", strings.Join(positionals[2:], " "))
+	}
+	result := parsedFlags{hooksAction: positionals[0]}
+	if len(positionals) == 2 {
+		result.hooksRuntime = positionals[1]
+	}
+	removed := make(map[int]struct{}, len(positionalIndexes))
+	for _, index := range positionalIndexes {
+		removed[index] = struct{}{}
+	}
+	filtered := make([]string, 0, len(args)-len(removed))
+	for index, arg := range args {
+		if _, found := removed[index]; !found {
+			filtered = append(filtered, arg)
+		}
+	}
+	return result, filtered, nil
+}
+
+func validateCommandFlags(command string, flags parsedFlags) error {
+	switch command {
+	case "ingest":
+		if !flags.runtimeSet || strings.TrimSpace(flags.runtime) == "" {
+			return errors.New("ingest requires --runtime claude|codex")
+		}
+		if _, err := ingestRuntime(flags.runtime); err != nil {
+			return err
+		}
+		if flags.nowSet {
+			return errors.New("ingest does not accept --now; observed_at comes from the local receive clock")
+		}
+		if flags.dryRunSet {
+			return errors.New("--dry-run is only valid for hooks install or hooks uninstall")
+		}
+		if flags.jsonSet {
+			return errors.New("--json is only valid for hooks status")
+		}
+	case "hooks":
+		if flags.eventSet || flags.managedSet {
+			return errors.New("--event and --managed-by are only valid for ingest")
+		}
+		if flags.runtimeSet && flags.hooksRuntime != "" {
+			return errors.New("hooks runtime must be positional or --runtime, not both")
+		}
+		if flags.hooksRuntime != "" {
+			if _, err := hookRuntime(flags.hooksRuntime); err != nil {
+				return err
+			}
+		} else if flags.runtimeSet {
+			if _, err := hookRuntime(flags.runtime); err != nil {
+				return err
+			}
+		}
+		switch flags.hooksAction {
+		case "status":
+			if flags.dryRunSet {
+				return errors.New("--dry-run is only valid for hooks install or hooks uninstall")
+			}
+		case "install", "uninstall":
+			if flags.jsonSet {
+				return errors.New("--json is only valid for hooks status")
+			}
+		default:
+			return fmt.Errorf("unknown hooks action %q (want status, install, or uninstall)", flags.hooksAction)
+		}
+	default:
+		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.jsonSet {
+			return fmt.Errorf("ingest or hooks flags are not valid for %s", command)
+		}
+	}
+	return nil
 }
 
 type commandConfig struct {
@@ -222,6 +359,123 @@ func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {
 	}, nil
 }
 
+// resolveIngestConfig is intentionally narrower than resolveConfig. A hook
+// receiver must not resolve a home/project tree or construct runtime adapters;
+// it only needs a local database path and the receive clock.
+func resolveIngestConfig(options Options, flags parsedFlags) (commandConfig, error) {
+	clock := options.Now
+	now := time.Now()
+	if clock != nil {
+		now = clock()
+	}
+	if now.IsZero() {
+		return commandConfig{}, errors.New("observation clock returned zero time")
+	}
+
+	dbPath := ""
+	if flags.dbSet {
+		dbPath = flags.dbPath
+	} else if options.ConfigDir != "" {
+		dbPath = filepath.Join(options.ConfigDir, "harness-lint", "harness-lint.db")
+	} else if flags.configDirSet {
+		dbPath = filepath.Join(flags.configDir, "harness-lint", "harness-lint.db")
+	} else {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return commandConfig{}, fmt.Errorf("resolve user config directory: %w", err)
+		}
+		dbPath = filepath.Join(base, "harness-lint", "harness-lint.db")
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return commandConfig{}, errors.New("database path is empty")
+	}
+	return commandConfig{
+		dbPath:   dbPath,
+		now:      now.UTC(),
+		days:     flags.days,
+		lookPath: options.LookPath,
+	}, nil
+}
+
+// resolveHooksConfig resolves only runtime hook roots and the injected clock.
+// In particular, explicit --claude-config/--codex-home overrides do not cause
+// an otherwise unnecessary HOME lookup, which keeps status/install tests and
+// automation hermetic.
+func resolveHooksConfig(options Options, flags parsedFlags) (commandConfig, error) {
+	currentDir, err := resolveCurrentDirectory(options)
+	if err != nil {
+		return commandConfig{}, err
+	}
+	home := ""
+	needClaude, needCodex := hookConfigNeedsHome(flags)
+	if flags.homeSet || options.Home != "" || needClaude || needCodex {
+		home, err = resolveHome(options, flags, currentDir)
+		if err != nil {
+			return commandConfig{}, err
+		}
+	}
+	claudeConfig := ""
+	if flags.claudeSet {
+		claudeConfig = flags.claudeConfig
+	} else if home != "" {
+		claudeConfig = filepath.Join(home, ".claude")
+	}
+	codexHome := ""
+	if flags.codexSet {
+		codexHome = flags.codexHome
+	} else if home != "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	claudeConfig, err = optionalAbsolutePath(claudeConfig, currentDir)
+	if err != nil {
+		return commandConfig{}, fmt.Errorf("resolve Claude config: %w", err)
+	}
+	codexHome, err = optionalAbsolutePath(codexHome, currentDir)
+	if err != nil {
+		return commandConfig{}, fmt.Errorf("resolve Codex home: %w", err)
+	}
+	now := time.Now()
+	if options.Now != nil {
+		now = options.Now()
+	}
+	if flags.nowText != "" {
+		now, err = time.Parse(time.RFC3339Nano, flags.nowText)
+		if err != nil {
+			return commandConfig{}, fmt.Errorf("parse --now: %w", err)
+		}
+	}
+	if now.IsZero() {
+		return commandConfig{}, errors.New("observation clock returned zero time")
+	}
+	return commandConfig{
+		home:         home,
+		codexHome:    codexHome,
+		claudeConfig: claudeConfig,
+		now:          now.UTC(),
+		lookPath:     options.LookPath,
+	}, nil
+}
+
+func hookConfigNeedsHome(flags parsedFlags) (bool, bool) {
+	needClaude := !flags.claudeSet
+	needCodex := !flags.codexSet
+	selected := strings.TrimSpace(flags.hooksRuntime)
+	if selected == "" && flags.runtimeSet {
+		selected = strings.TrimSpace(flags.runtime)
+	}
+	if selected == "" {
+		return needClaude, needCodex
+	}
+	switch strings.ToLower(selected) {
+	case "claude", "claude-code":
+		return needClaude, false
+	case "codex":
+		return false, needCodex
+	default:
+		return needClaude, needCodex
+	}
+}
+
 func resolveHome(options Options, flags parsedFlags, currentDir string) (string, error) {
 	if flags.homeSet {
 		path, err := optionalAbsolutePath(flags.home, currentDir)
@@ -340,7 +594,7 @@ func splitCommand(args []string) (string, []string, error) {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			return "", nil, unknownCommandError(args[0])
 		}
-		return "", nil, errors.New("a command is required: scan, report, context, stale, or doctor")
+		return "", nil, errors.New("a command is required: scan, report, context, stale, doctor, ingest, or hooks")
 	}
 	command := args[commandIndex]
 	commandArgs := append([]string(nil), args[:commandIndex]...)
@@ -349,12 +603,12 @@ func splitCommand(args []string) (string, []string, error) {
 }
 
 func unknownCommandError(command string) error {
-	return fmt.Errorf("unknown command %q (want scan, report, context, stale, or doctor)", command)
+	return fmt.Errorf("unknown command %q (want scan, report, context, stale, doctor, ingest, or hooks)", command)
 }
 
 func consumesValueFlag(arg string) bool {
 	switch arg {
-	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture":
+	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-event", "--event", "-managed-by", "--managed-by":
 		return true
 	default:
 		return false
@@ -362,12 +616,23 @@ func consumesValueFlag(arg string) bool {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: harness-lint <scan|report|context|stale|doctor> [options]")
-	fmt.Fprintln(w, "commands: scan, report, context, stale, doctor")
+	fmt.Fprintln(w, "usage: harness-lint <scan|report|context|stale|doctor|ingest|hooks> [options]")
+	fmt.Fprintln(w, "commands: scan, report, context, stale, doctor, ingest, hooks")
 	fmt.Fprintln(w, "use harness-lint <command> --help for command options")
 }
 
 func writeCommandUsage(w io.Writer, command string) {
+	if command == "hooks" {
+		fmt.Fprintln(w, "usage: harness-lint hooks <status|install|uninstall> [claude|codex] [options]")
+		fmt.Fprintln(w, "options:")
+		fmt.Fprintln(w, "  --json                     stable JSON output (status only)")
+		fmt.Fprintln(w, "  --dry-run                  show install/uninstall changes without writing")
+		fmt.Fprintln(w, "  --home PATH                synthetic user home")
+		fmt.Fprintln(w, "  --codex-home PATH          Codex configuration root")
+		fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
+		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
+		return
+	}
 	fmt.Fprintf(w, "usage: harness-lint %s [options]\n", command)
 	fmt.Fprintln(w, "options:")
 	fmt.Fprintln(w, "  --db PATH                  SQLite database path")
@@ -380,6 +645,12 @@ func writeCommandUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
 	fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
 	fmt.Fprintln(w, "  --now RFC3339              observation time")
+	if command == "ingest" {
+		fmt.Fprintln(w, "  --runtime claude|codex     named hook runtime")
+		fmt.Fprintln(w, "  --event EVENT              documented hook event (optional for managed hooks)")
+		fmt.Fprintln(w, "  --managed-by MARKER        require harness-lint-hooks/v1")
+		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
+	}
 }
 
 func hasCommandToken(args []string) bool {
