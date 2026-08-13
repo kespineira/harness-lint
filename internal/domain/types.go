@@ -127,9 +127,10 @@ func (c Confidence) Valid() bool {
 	}
 }
 
-// Measurement carries an advertised token quantity together with its
-// provenance. It does not represent an exact runtime context cost. Unknown
-// measurements use Value zero and ConfidenceUnknown.
+// Measurement carries a size quantity together with its provenance. Adapters
+// use it for metadata or body exposure estimates; it does not represent an
+// exact runtime context cost. Unknown measurements use Value zero and
+// ConfidenceUnknown.
 type Measurement struct {
 	Value      int64
 	Confidence Confidence
@@ -248,8 +249,8 @@ func (c Capability) Validate() error {
 		name  string
 		value Measurement
 	}{
-		{name: "advertised metadata tokens", value: c.MetadataTokens},
-		{name: "advertised body tokens", value: c.BodyTokens},
+		{name: "metadata tokens", value: c.MetadataTokens},
+		{name: "body tokens", value: c.BodyTokens},
 	}
 	for _, measurement := range measurements {
 		if err := measurement.value.Validate(); err != nil {

@@ -419,7 +419,7 @@ func (f footprintEvidence) Basis() string {
 	return strings.Join(parts, "; ")
 }
 
-// SummarizeContext aggregates installed configured baseline and on-load
+// SummarizeContext aggregates configured baseline and conditional body
 // measurements. It is intentionally independent of event observations:
 // neither exposure measurement is evidence of loaded or invoked use.
 func SummarizeContext(capabilities []domain.Capability) (ContextSummary, error) {
