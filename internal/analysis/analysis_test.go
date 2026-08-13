@@ -151,6 +151,26 @@ func TestAnalyzeReviewUsesConfigurableEstimatedFootprintAndLowInvocationUse(t *t
 	}
 }
 
+func TestAnalyzeExactFootprintDoesNotTriggerEstimatedReview(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("large-exact")
+	capability.MetadataTokens = domain.Measurement{Value: 2000, Confidence: domain.ConfidenceExact, Basis: "manifest"}
+	capability.BodyTokens = domain.Measurement{Value: 2000, Confidence: domain.ConfidenceExact, Basis: "manifest"}
+	event := testEvent(now.Add(-time.Hour), capability.Name, domain.EventLoaded, "session")
+
+	report, err := Analyze([]domain.Capability{capability}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.Classification != KEEP {
+		t.Fatalf("classification = %q, want %q for exact-only footprint", evidence.Classification, KEEP)
+	}
+	if evidence.Confidence != domain.ConfidenceObserved {
+		t.Fatalf("classification confidence = %q, want observed", evidence.Confidence)
+	}
+}
+
 func TestAnalyzeReviewBoundariesAreInclusiveOnlyWhereDocumented(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	config := Config{StaleAfter: 24 * time.Hour, ReviewFootprintTokens: 1000, ReviewMaxUseCount: 1}
@@ -230,6 +250,28 @@ func TestAnalyzeReportsDuplicateDefinitionsAndDeterministicOrdering(t *testing.T
 	}
 }
 
+func TestAnalyzeSharesUnscopedEventAcrossDuplicateDefinitions(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	first := testCapability("shared-event")
+	first.Source = "source-a"
+	second := first
+	second.Source = "source-b"
+	event := testEvent(now.Add(-time.Hour), first.Name, domain.EventInvoked, "session")
+
+	report, err := Analyze([]domain.Capability{first, second}, []domain.UsageEvent{event}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if len(report.Capabilities) != 2 {
+		t.Fatalf("capability evidence count = %d, want 2", len(report.Capabilities))
+	}
+	for _, evidence := range report.Capabilities {
+		if evidence.InvocationCount != 1 || evidence.EventCounts[domain.EventLoaded] != 0 || evidence.EventCounts[domain.EventInvoked] != 1 {
+			t.Fatalf("duplicate definition event attribution for %q = %#v", evidence.Capability.Source, evidence)
+		}
+	}
+}
+
 func TestDetectDuplicateNamesRequiresDifferentDefinitionScopeOrSource(t *testing.T) {
 	base := testCapability("same-name")
 	sameDefinition := base
@@ -293,6 +335,38 @@ func TestSummarizeContextAggregatesKnownValuesAndRetainsUncertainty(t *testing.T
 	}
 	if group.BodyTokens.Value != 12 || group.BodyTokens.KnownCount != 2 || group.BodyTokens.UnknownCount != 1 {
 		t.Fatalf("body aggregate = %#v, want known sum 12 and one unknown", group.BodyTokens)
+	}
+}
+
+func TestAnalyzeDoesNotMutateInputSlices(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capabilities := []domain.Capability{testCapability("zeta"), testCapability("alpha")}
+	events := []domain.UsageEvent{
+		testEvent(now, "zeta", domain.EventInvoked, "session-z"),
+		testEvent(now.Add(-time.Hour), "alpha", domain.EventLoaded, "session-a"),
+	}
+	wantCapabilities := append([]domain.Capability(nil), capabilities...)
+	wantEvents := append([]domain.UsageEvent(nil), events...)
+
+	if _, err := Analyze(capabilities, events, DefaultConfig(), now); err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if !reflect.DeepEqual(capabilities, wantCapabilities) {
+		t.Fatalf("Analyze() mutated capabilities: got %#v, want %#v", capabilities, wantCapabilities)
+	}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("Analyze() mutated events: got %#v, want %#v", events, wantEvents)
+	}
+}
+
+func TestSummarizeContextRejectsMeasurementOverflow(t *testing.T) {
+	first := testCapability("overflow-a")
+	first.MetadataTokens = domain.Measurement{Value: int64(^uint64(0) >> 1), Confidence: domain.ConfidenceExact, Basis: "manifest"}
+	second := testCapability("overflow-b")
+	second.MetadataTokens = domain.Measurement{Value: 1, Confidence: domain.ConfidenceExact, Basis: "manifest"}
+
+	if _, err := SummarizeContext([]domain.Capability{first, second}); err == nil || !strings.Contains(err.Error(), "overflows int64") {
+		t.Fatalf("SummarizeContext() error = %v, want int64 overflow", err)
 	}
 }
 
