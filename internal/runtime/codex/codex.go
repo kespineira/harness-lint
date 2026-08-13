@@ -21,50 +21,32 @@ import (
 	"github.com/kespineira/harness-lint/internal/runtime"
 )
 
-// Options contains the environment used by an Adapter.  UserHome and
+// Options contains the environment used by an Adapter. UserHome and
 // ConfigRoot are separate because Codex configuration can be redirected while
-// user skills remain rooted at the user's home.  Empty paths disable that
+// user skills remain rooted at the user's home. Empty paths disable that
 // source; the constructor never consults the process HOME environment.
-//
-// Now, LookPath, HomeDir, CodexHome, ConfigDir, ProjectRoot, RepoDir, WorkDir,
-// CWD, SkillRoots, and SessionsRoots are compatibility aliases for callers
-// that use shorter names.  The primary fields are Clock, CommandLookup,
-// UserHome, ConfigRoot, RepoRoot, CurrentDir, SystemSkillRoots, and
-// TranscriptRoots.
 type Options struct {
 	UserHome         string
 	ConfigRoot       string
-	RepoRoot         string
-	CurrentDir       string
+	ProjectRoot      string
+	CurrentDirectory string
 	SystemSkillRoots []string
 	TranscriptRoots  []string
-	Clock            func() time.Time
-	CommandLookup    func(string) (string, error)
-
-	// Compatibility aliases.  They are only used when the corresponding
-	// primary field is empty.
-	HomeDir       string
-	CodexHome     string
-	ConfigDir     string
-	ProjectRoot   string
-	RepoDir       string
-	WorkDir       string
-	CWD           string
-	SkillRoots    []string
-	SessionsRoots []string
-	Now           func() time.Time
-	LookPath      func(string) (string, error)
+	HookEventPaths   []string
+	Now              func() time.Time
+	LookPath         func(string) (string, error)
 }
 
 type normalizedOptions struct {
-	userHome         string
-	configRoot       string
-	repoRoot         string
-	currentDir       string
-	systemSkillRoots []string
-	transcriptRoots  []string
-	now              func() time.Time
-	commandLookup    func(string) (string, error)
+	userHome       string
+	configRoot     string
+	projectRoot    string
+	currentDir     string
+	systemRoots    []string
+	transcripts    []string
+	hookEventPaths []string
+	now            func() time.Time
+	lookPath       func(string) (string, error)
 }
 
 // Adapter discovers Codex capabilities and imports metadata-only usage.
@@ -75,53 +57,41 @@ var _ runtime.Adapter = (*Adapter)(nil)
 // New constructs a Codex adapter.  All slices are copied so later caller
 // mutation cannot change a running adapter's source set.
 func New(opts Options) *Adapter {
-	userHome := firstNonEmpty(opts.UserHome, opts.HomeDir)
-	configRoot := firstNonEmpty(opts.ConfigRoot, opts.CodexHome, opts.ConfigDir)
+	userHome := firstNonEmpty(opts.UserHome)
+	configRoot := firstNonEmpty(opts.ConfigRoot)
 	if configRoot == "" && userHome != "" {
 		configRoot = filepath.Join(userHome, ".codex")
 	}
-	repoRoot := firstNonEmpty(opts.RepoRoot, opts.ProjectRoot, opts.RepoDir)
-	currentDir := firstNonEmpty(opts.CurrentDir, opts.WorkDir, opts.CWD)
+	projectRoot := firstNonEmpty(opts.ProjectRoot)
+	currentDir := firstNonEmpty(opts.CurrentDirectory)
 	if currentDir == "" {
-		currentDir = repoRoot
-	}
-	systemSkillRoots := append([]string(nil), opts.SystemSkillRoots...)
-	if len(systemSkillRoots) == 0 {
-		systemSkillRoots = append([]string(nil), opts.SkillRoots...)
+		currentDir = projectRoot
 	}
 	transcriptRoots := append([]string(nil), opts.TranscriptRoots...)
-	if len(transcriptRoots) == 0 {
-		transcriptRoots = append([]string(nil), opts.SessionsRoots...)
+	if len(transcriptRoots) == 0 && configRoot != "" {
+		transcriptRoots = []string{filepath.Join(configRoot, "sessions")}
 	}
-	now := opts.Clock
-	if now == nil {
-		now = opts.Now
-	}
+	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
-	commandLookup := opts.CommandLookup
-	if commandLookup == nil {
-		commandLookup = opts.LookPath
-	}
-	if commandLookup == nil {
-		commandLookup = exec.LookPath
+	lookPath := opts.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
 	}
 
 	return &Adapter{options: normalizedOptions{
-		userHome:         cleanOptionalPath(userHome),
-		configRoot:       cleanOptionalPath(configRoot),
-		repoRoot:         cleanOptionalPath(repoRoot),
-		currentDir:       cleanOptionalPath(currentDir),
-		systemSkillRoots: cleanPaths(systemSkillRoots),
-		transcriptRoots:  cleanPaths(transcriptRoots),
-		now:              now,
-		commandLookup:    commandLookup,
+		userHome:       cleanOptionalPath(userHome),
+		configRoot:     cleanOptionalPath(configRoot),
+		projectRoot:    cleanOptionalPath(projectRoot),
+		currentDir:     cleanOptionalPath(currentDir),
+		systemRoots:    cleanPaths(opts.SystemSkillRoots),
+		transcripts:    cleanPaths(transcriptRoots),
+		hookEventPaths: cleanPaths(opts.HookEventPaths),
+		now:            now,
+		lookPath:       lookPath,
 	}}
 }
-
-// NewAdapter is an explicit-name alias for New.
-func NewAdapter(opts Options) *Adapter { return New(opts) }
 
 // Runtime identifies the source harness.
 func (a *Adapter) Runtime() domain.Runtime { return domain.RuntimeCodex }
@@ -163,9 +133,9 @@ func (a *Adapter) Discover(ctx context.Context) (domain.Discovery, error) {
 	return result, nil
 }
 
-// ImportUsage imports explicit tool/skill usage signals from configured
-// Codex-session JSONL/JSON files.  The since boundary is inclusive and all
-// timestamps are normalized to UTC before fingerprinting.
+// ImportUsage imports explicit tool usage signals from configured Codex-session
+// and PostToolUse-shaped JSONL/JSON files. The since boundary is inclusive and
+// all timestamps are normalized to UTC before fingerprinting.
 func (a *Adapter) ImportUsage(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
 	if err := contextErr(ctx); err != nil {
 		return nil, err
@@ -253,16 +223,17 @@ func estimatedMeasurement(content []byte, basis string) domain.Measurement {
 	}
 }
 
-func capabilityBase(now time.Time, typ domain.CapabilityType, name string, scope domain.Scope, source string) domain.Capability {
+func capabilityBase(now time.Time, typ domain.CapabilityType, name string, scope domain.Scope, source string, advertisement domain.AdvertisementState) domain.Capability {
 	return domain.Capability{
-		Runtime:   domain.RuntimeCodex,
-		Type:      typ,
-		Name:      name,
-		Scope:     scope,
-		Source:    source,
-		Enabled:   domain.EnabledStateUnknown,
-		FirstSeen: now,
-		LastSeen:  now,
+		Runtime:       domain.RuntimeCodex,
+		Type:          typ,
+		Name:          name,
+		Scope:         scope,
+		Source:        source,
+		Enabled:       domain.EnabledStateUnknown,
+		Advertisement: advertisement,
+		FirstSeen:     now,
+		LastSeen:      now,
 	}
 }
 

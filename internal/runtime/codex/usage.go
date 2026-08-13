@@ -16,21 +16,26 @@ import (
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
+// usageContext contains only opaque identifiers used to build hashed usage
+// records. Timestamps are always read from the record that produced an event;
+// they are intentionally not inherited from neighboring records or files.
 type usageContext struct {
-	timestamp time.Time
-	session   string
-	project   string
+	session string
+	project string
 }
 
 type usageCandidate struct {
 	typ       domain.CapabilityType
 	name      string
 	eventType domain.EventType
+	timestamp time.Time
 	context   usageContext
 }
 
 func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([]domain.UsageEvent, error) {
-	files, err := transcriptFiles(a.options.transcriptRoots)
+	roots := append([]string(nil), a.options.transcripts...)
+	roots = append(roots, a.options.hookEventPaths...)
+	files, err := transcriptFiles(roots)
 	if err != nil {
 		return nil, err
 	}
@@ -41,40 +46,26 @@ func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([
 			return nil, err
 		}
 		fallbackSession := transcriptSessionIdentifier(path)
-		fallbackProject := a.options.repoRoot
-		if a.options.repoRoot == "" {
+		fallbackProject := a.options.projectRoot
+		if fallbackProject == "" {
 			fallbackProject = filepath.Dir(path)
 		}
 		fileContext := usageContext{session: fallbackSession, project: fallbackProject}
 		visit := func(value any) error {
-			fileContext = persistentUsageContext(value, fileContext)
-			base := fileContext
-			candidates := make([]usageCandidate, 0, 2)
-			collectUsageCandidates(value, base, &candidates)
-			for _, candidate := range candidates {
+			for _, record := range topLevelRecords(value) {
 				if err := contextErr(ctx); err != nil {
 					return err
 				}
-				if candidate.context.timestamp.IsZero() {
+				fileContext = explicitUsageContext(record, fileContext)
+				candidate, ok := usageCandidateFromRecord(record, fileContext)
+				if !ok || (!since.IsZero() && candidate.timestamp.Before(since.UTC())) {
 					continue
-				}
-				timestamp := candidate.context.timestamp.UTC()
-				if !since.IsZero() && timestamp.Before(since.UTC()) {
-					continue
-				}
-				sessionID := candidate.context.session
-				if sessionID == "" {
-					sessionID = fallbackSession
-				}
-				projectID := candidate.context.project
-				if projectID == "" {
-					projectID = fallbackProject
 				}
 				event := domain.UsageEvent{
-					Timestamp:      timestamp,
+					Timestamp:      candidate.timestamp.UTC(),
 					Runtime:        domain.RuntimeCodex,
-					SessionID:      hashIdentifier(sessionID),
-					ProjectID:      hashIdentifier(projectID),
+					SessionID:      hashIdentifier(candidate.context.session),
+					ProjectID:      hashIdentifier(candidate.context.project),
 					CapabilityType: candidate.typ,
 					CapabilityName: candidate.name,
 					EventType:      candidate.eventType,
@@ -102,9 +93,8 @@ func (a *Adapter) importTranscriptUsage(ctx context.Context, since time.Time) ([
 func transcriptSessionIdentifier(path string) string {
 	stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	if strings.HasPrefix(stem, "rollout-") {
-		// Codex rollout names use rollout-<timestamp>-<thread-id>.  Keep
-		// the full thread id when the conventional timestamp prefix is
-		// present; it is an opaque identifier and is hashed before return.
+		// Codex rollout names use rollout-<timestamp>-<thread-id>. Keep the
+		// opaque thread identifier when the conventional prefix is present.
 		rest := strings.TrimPrefix(stem, "rollout-")
 		if len(rest) > 20 && rest[19] == '-' {
 			return rest[20:]
@@ -234,44 +224,136 @@ func decodeTranscriptFile(ctx context.Context, path string, visit func(any) erro
 	}
 }
 
-func collectUsageCandidates(value any, inherited usageContext, result *[]usageCandidate) {
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			collectUsageCandidates(item, inherited, result)
-		}
-	case map[string]any:
-		current := inherited
-		if timestamp, ok := timestampFromMap(typed); ok {
-			current.timestamp = timestamp
-		}
-		if session, ok := identifierField(typed, sessionKeys...); ok {
-			current.session = session
-		}
-		if project, ok := identifierField(typed, projectKeys...); ok {
-			current.project = project
-		}
-		if candidate, ok := toolCandidate(typed, current); ok {
-			*result = append(*result, candidate)
-		}
-		if candidate, ok := skillCandidate(typed, current); ok {
-			*result = append(*result, candidate)
-		}
-		for key, child := range typed {
-			if isSensitiveUsageField(key) {
-				continue
-			}
-			collectUsageCandidates(child, current, result)
-		}
+// topLevelRecords expands only a JSON document's outer array. It never walks
+// arbitrary nested message, prompt, response, or tool payload objects.
+func topLevelRecords(value any) []any {
+	if records, ok := value.([]any); ok {
+		return records
 	}
+	return []any{value}
 }
 
-func isSensitiveUsageField(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "arguments", "argument", "input", "inputs", "tool_input", "toolinput", "tool_args", "toolargs", "prompt", "prompts", "response", "responses", "output", "outputs", "tool_output", "tooloutput", "result", "results":
-		return true
-	default:
-		return false
+func explicitUsageContext(value any, inherited usageContext) usageContext {
+	record, ok := value.(map[string]any)
+	if !ok {
+		return inherited
+	}
+	marker := strings.ToLower(strings.TrimSpace(stringFieldAny(record, "type")))
+	knownRecord := marker == "session_meta" || marker == "response_item" || marker == "function_call" || marker == "custom_tool_call" || marker == "dynamic_tool_call"
+	hookEvent := strings.ToLower(strings.TrimSpace(stringFieldAny(record, "hook_event_name", "hookEventName")))
+	knownRecord = knownRecord || hookEvent == "posttooluse" || hookEvent == "post_tool_use"
+	if !knownRecord {
+		return inherited
+	}
+	result := inherited
+	if session, found := identifierField(record, sessionKeys...); found {
+		result.session = session
+	}
+	if project, found := identifierField(record, projectKeys...); found {
+		result.project = project
+	}
+	if marker != "session_meta" {
+		return result
+	}
+	payload, ok := record["payload"].(map[string]any)
+	if !ok {
+		return result
+	}
+	if session, found := identifierField(payload, "id", "session_id", "sessionId", "thread_id", "threadId"); found {
+		result.session = session
+	}
+	if project, found := identifierField(payload, projectKeys...); found {
+		result.project = project
+	}
+	return result
+}
+
+func usageCandidateFromRecord(value any, inherited usageContext) (usageCandidate, bool) {
+	record, ok := value.(map[string]any)
+	if !ok || ambiguousUsageRecord(record) {
+		return usageCandidate{}, false
+	}
+	timestamp, ok := timestampFromMap(record)
+	if !ok {
+		return usageCandidate{}, false
+	}
+	marker := strings.ToLower(strings.TrimSpace(stringFieldAny(record, "type")))
+	if marker == "response_item" {
+		payload, payloadOK := record["payload"].(map[string]any)
+		if !payloadOK {
+			return usageCandidate{}, false
+		}
+		payloadType := strings.ToLower(strings.TrimSpace(stringFieldAny(payload, "type")))
+		if payloadType != "function_call" && payloadType != "custom_tool_call" && payloadType != "dynamic_tool_call" {
+			return usageCandidate{}, false
+		}
+		name, nameOK := responseItemToolName(payload)
+		if !nameOK {
+			return usageCandidate{}, false
+		}
+		return newToolCandidate(name, timestamp, inherited), true
+	}
+	if marker == "function_call" || marker == "custom_tool_call" || marker == "dynamic_tool_call" {
+		name, nameOK := directToolName(record)
+		if !nameOK {
+			return usageCandidate{}, false
+		}
+		return newToolCandidate(name, timestamp, inherited), true
+	}
+	hookEvent := strings.ToLower(strings.TrimSpace(stringFieldAny(record, "hook_event_name", "hookEventName")))
+	if hookEvent != "posttooluse" && hookEvent != "post_tool_use" {
+		return usageCandidate{}, false
+	}
+	name, nameOK := postToolName(record)
+	if !nameOK {
+		return usageCandidate{}, false
+	}
+	return newToolCandidate(name, timestamp, inherited), true
+}
+
+func ambiguousUsageRecord(record map[string]any) bool {
+	for key := range record {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "prompt", "prompts", "response", "responses", "message", "messages", "content", "contents":
+			return true
+		}
+	}
+	return false
+}
+
+func responseItemToolName(payload map[string]any) (string, bool) {
+	return directToolName(payload)
+}
+
+func directToolName(record map[string]any) (string, bool) {
+	for _, key := range []string{"name", "tool_name", "toolName"} {
+		if value, ok := record[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
+func postToolName(record map[string]any) (string, bool) {
+	for _, key := range []string{"tool_name", "toolName", "name"} {
+		if value, ok := record[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
+func newToolCandidate(name string, timestamp time.Time, context usageContext) usageCandidate {
+	typ := domain.CapabilityTool
+	if isMCPToolIdentity(name) {
+		typ = domain.CapabilityMCPTool
+	}
+	return usageCandidate{
+		typ:       typ,
+		name:      name,
+		eventType: domain.EventInvoked,
+		timestamp: timestamp,
+		context:   context,
 	}
 }
 
@@ -285,44 +367,6 @@ var projectKeys = []string{
 
 var timestampKeys = []string{
 	"timestamp", "time", "created_at", "createdAt", "occurred_at", "occurredAt", "timestamp_ms", "timestampMs", "ts",
-}
-
-func persistentUsageContext(value any, inherited usageContext) usageContext {
-	result := inherited
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			result = persistentUsageContext(item, result)
-		}
-	case map[string]any:
-		if session, ok := identifierField(typed, sessionKeys...); ok {
-			result.session = session
-		}
-		if project, ok := identifierField(typed, projectKeys...); ok {
-			result.project = project
-		}
-		marker := strings.ToLower(strings.TrimSpace(stringFieldAny(typed, "type", "kind", "event_type", "eventType")))
-		if strings.Contains(marker, "session") {
-			if session, ok := identifierField(typed, "id", "session_id", "sessionId"); ok {
-				result.session = session
-			}
-			if payload, ok := typed["payload"].(map[string]any); ok {
-				if session, found := identifierField(payload, "id", "session_id", "sessionId", "thread_id", "threadId"); found {
-					result.session = session
-				}
-				if project, found := identifierField(payload, projectKeys...); found {
-					result.project = project
-				}
-			}
-		}
-		for key, child := range typed {
-			if isSensitiveUsageField(key) {
-				continue
-			}
-			result = persistentUsageContext(child, result)
-		}
-	}
-	return result
 }
 
 func identifierField(values map[string]any, keys ...string) (string, bool) {
@@ -391,8 +435,6 @@ func parseJSONTime(value any) (time.Time, bool) {
 }
 
 func unixTimestamp(value int64) time.Time {
-	// Codex JSONL timestamps are normally seconds; accepting millisecond and
-	// microsecond epochs makes the best-effort importer tolerant of hook tools.
 	absolute := value
 	if absolute < 0 {
 		absolute = -absolute
@@ -407,155 +449,6 @@ func unixTimestamp(value int64) time.Time {
 	}
 }
 
-func toolCandidate(values map[string]any, current usageContext) (usageCandidate, bool) {
-	marker := strings.ToLower(strings.TrimSpace(stringFieldAny(values, "type", "kind", "event_type", "eventType")))
-	normalizedMarker := strings.ReplaceAll(marker, "_", "")
-	if strings.Contains(marker, "output") || strings.Contains(marker, "result") || strings.Contains(marker, "response") || strings.Contains(normalizedMarker, "output") || strings.Contains(normalizedMarker, "result") {
-		return usageCandidate{}, false
-	}
-	explicit := false
-	for key := range values {
-		lower := strings.ToLower(key)
-		if lower == "function_call" || lower == "custom_tool_call" || lower == "dynamic_tool_call" || lower == "tool_call" || lower == "tooluse" || lower == "tool_use" {
-			explicit = true
-			break
-		}
-	}
-	for _, candidateMarker := range []string{"function_call", "custom_tool_call", "dynamic_tool_call", "tool_call", "function", "custom_tool", "dynamic_tool"} {
-		if marker == candidateMarker {
-			explicit = true
-			break
-		}
-	}
-	if strings.Contains(normalizedMarker, "functioncall") || strings.Contains(normalizedMarker, "customtoolcall") || strings.Contains(normalizedMarker, "dynamictoolcall") {
-		explicit = true
-	}
-	if method := strings.ToLower(strings.TrimSpace(stringFieldAny(values, "method"))); method == "item/tool/call" {
-		explicit = true
-	}
-	hookEvent := strings.ToLower(strings.TrimSpace(stringFieldAny(values, "hook_event_name", "hookEventName", "hook_event", "hookEvent")))
-	if hookEvent == "" {
-		if output, ok := values["hookSpecificOutput"].(map[string]any); ok {
-			hookEvent = strings.ToLower(strings.TrimSpace(stringFieldAny(output, "hook_event_name", "hookEventName", "hook_event", "hookEvent")))
-		}
-	}
-	if hookEvent == "posttooluse" || hookEvent == "post_tool_use" {
-		explicit = true
-	}
-	if !explicit {
-		return usageCandidate{}, false
-	}
-	name, ok := toolNameFromMap(values)
-	if !ok {
-		return usageCandidate{}, false
-	}
-	typ := domain.CapabilityTool
-	if isMCPToolIdentity(name) {
-		typ = domain.CapabilityMCPTool
-	}
-	return usageCandidate{typ: typ, name: name, eventType: domain.EventInvoked, context: current}, true
-}
-
-func toolNameFromMap(values map[string]any) (string, bool) {
-	for _, key := range []string{"tool_name", "toolName", "name", "function_name", "functionName"} {
-		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), true
-		}
-	}
-	if value, ok := values["function"]; ok {
-		if function, ok := value.(map[string]any); ok {
-			if name, found := function["name"].(string); found && strings.TrimSpace(name) != "" {
-				return strings.TrimSpace(name), true
-			}
-		}
-	}
-	if value, ok := values["tool"]; ok {
-		if name, ok := value.(string); ok && strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name), true
-		}
-		if tool, ok := value.(map[string]any); ok {
-			if name, found := tool["name"].(string); found && strings.TrimSpace(name) != "" {
-				return strings.TrimSpace(name), true
-			}
-		}
-	}
-	if namespace, ok := values["namespace"].(string); ok {
-		if name, found := values["name"].(string); found && strings.HasPrefix(namespace, "mcp__") && strings.TrimSpace(name) != "" {
-			return strings.TrimSuffix(namespace, "__") + "__" + strings.TrimSpace(name), true
-		}
-	}
-	if params, ok := values["params"].(map[string]any); ok {
-		if name, found := toolNameFromMap(params); found {
-			return name, true
-		}
-	}
-	if recipient, ok := values["recipient"].(string); ok {
-		recipient = strings.TrimSpace(recipient)
-		recipient = strings.TrimPrefix(recipient, "functions.")
-		if recipient != "" {
-			return recipient, true
-		}
-	}
-	return "", false
-}
-
-func skillCandidate(values map[string]any, current usageContext) (usageCandidate, bool) {
-	name := ""
-	eventType := domain.EventType("")
-	for _, key := range []string{"skill_name", "skillName", "skill", "loaded_skill", "loadedSkill", "invoked_skill", "invokedSkill"} {
-		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
-			name = strings.TrimSpace(value)
-			break
-		}
-	}
-	marker := strings.ToLower(strings.TrimSpace(stringFieldAny(values, "type", "kind", "event_type", "eventType", "event")))
-	if strings.Contains(marker, "skill_loaded") || strings.Contains(marker, "skill_load") || strings.Contains(marker, "skill_loaded") {
-		eventType = domain.EventLoaded
-	} else if strings.Contains(marker, "skill_invoked") || strings.Contains(marker, "skill_use") || strings.Contains(marker, "skill_used") {
-		eventType = domain.EventInvoked
-	}
-	if eventType == "" {
-		for _, key := range []string{"skill_event", "skillEvent", "event", "action"} {
-			value := strings.ToLower(strings.TrimSpace(stringFieldAny(values, key)))
-			switch value {
-			case string(domain.EventLoaded), "load", "loaded_skill":
-				eventType = domain.EventLoaded
-			case string(domain.EventInvoked), "invoke", "used", "use":
-				eventType = domain.EventInvoked
-			}
-			if eventType != "" {
-				break
-			}
-		}
-	}
-	if eventType == "" {
-		for _, key := range []string{"skill_loaded", "skillLoaded", "skill_invoked", "skillInvoked"} {
-			if enabled, ok := values[key].(bool); ok && enabled {
-				if strings.Contains(strings.ToLower(key), "loaded") {
-					eventType = domain.EventLoaded
-				} else {
-					eventType = domain.EventInvoked
-				}
-				break
-			}
-		}
-	}
-	if eventType == "" {
-		capabilityType := strings.ToLower(strings.TrimSpace(stringFieldAny(values, "capability_type", "capabilityType")))
-		if capabilityType == "skill" && (marker == string(domain.EventLoaded) || marker == string(domain.EventInvoked)) {
-			if marker == string(domain.EventLoaded) {
-				eventType = domain.EventLoaded
-			} else {
-				eventType = domain.EventInvoked
-			}
-		}
-	}
-	if name == "" || eventType == "" {
-		return usageCandidate{}, false
-	}
-	return usageCandidate{typ: domain.CapabilitySkill, name: name, eventType: eventType, context: current}, true
-}
-
 func stringFieldAny(values map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value, ok := values[key].(string); ok {
@@ -566,6 +459,9 @@ func stringFieldAny(values map[string]any, keys ...string) string {
 }
 
 func isMCPToolIdentity(name string) bool {
-	parts := strings.Split(name, "__")
-	return len(parts) >= 3 && parts[0] == "mcp" && strings.TrimSpace(parts[1]) != "" && strings.TrimSpace(strings.Join(parts[2:], "__")) != ""
+	if !strings.HasPrefix(name, "mcp__") {
+		return false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(name, "mcp__"), "__", 2)
+	return len(parts) == 2 && strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != ""
 }

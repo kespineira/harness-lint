@@ -17,17 +17,22 @@ type sourceRoot struct {
 	scope domain.Scope
 }
 
+type skillConfiguration struct {
+	enabled bool
+}
+
 func (a *Adapter) discoverSkills(ctx context.Context, now time.Time, result *domain.Discovery) error {
-	roots := make([]sourceRoot, 0, len(a.options.systemSkillRoots)+4)
-	for _, root := range projectAncestorRoots(a.options.repoRoot, a.options.currentDir, ".agents", "skills") {
+	roots := make([]sourceRoot, 0, len(a.options.systemRoots)+4)
+	for _, root := range projectAncestorRoots(a.options.projectRoot, a.options.currentDir, ".agents", "skills") {
 		roots = append(roots, sourceRoot{path: root, scope: domain.ScopeProject})
 	}
 	if a.options.userHome != "" {
 		roots = append(roots, sourceRoot{path: filepath.Join(a.options.userHome, ".agents", "skills"), scope: domain.ScopeUser})
 	}
-	for _, root := range a.options.systemSkillRoots {
+	for _, root := range a.options.systemRoots {
 		roots = append(roots, sourceRoot{path: root, scope: domain.ScopeGlobal})
 	}
+	configured := a.userSkillConfigurations(result)
 	for _, root := range roots {
 		if err := contextErr(ctx); err != nil {
 			return err
@@ -50,9 +55,30 @@ func (a *Adapter) discoverSkills(ctx context.Context, now time.Time, result *dom
 			if strings.TrimSpace(name) == "" {
 				name = filepath.Base(filepath.Dir(path))
 			}
-			capability := capabilityBase(now, domain.CapabilitySkill, name, root.scope, path)
+			canonicalPath := a.canonicalSkillPath(path)
+			configuredSkill, isConfigured := configured[canonicalPath]
+			advertisement := domain.AdvertisementStateUnknown
+			metadata := unknownMeasurement()
+			validMetadata := !doc.malformed && strings.TrimSpace(doc.name) != "" && strings.TrimSpace(doc.description) != ""
+			if isConfigured && !configuredSkill.enabled {
+				advertisement = domain.AdvertisementStateNotAdvertised
+				metadata = domain.Measurement{
+					Confidence: domain.ConfidenceObserved,
+					Basis:      "skill disabled by user configuration; configured-list metadata is zero/observed; not runtime cost",
+				}
+			} else if validMetadata {
+				advertisement = domain.AdvertisementStateFullyAdvertised
+				advertisedMetadata := []byte("path: " + canonicalPath + "\n" + string(doc.advertisedMetadata))
+				metadata = estimatedMeasurement(advertisedMetadata, "configured-list maximum: advertised SKILL.md path, name, and description; descriptions may be shortened and skills omitted by budget")
+			}
+			capability := capabilityBase(now, domain.CapabilitySkill, name, root.scope, path, advertisement)
+			if isConfigured && !configuredSkill.enabled {
+				capability.Enabled = domain.EnabledStateDisabled
+			} else if validMetadata {
+				capability.Enabled = domain.EnabledStateEnabled
+			}
 			capability.Hash = hashBytes(content)
-			capability.MetadataTokens = estimatedMeasurement(doc.metadata, "skill frontmatter metadata estimate")
+			capability.MetadataTokens = metadata
 			capability.BodyTokens = estimatedMeasurement(doc.body, "skill body estimate")
 			result.Capabilities = append(result.Capabilities, capability)
 			if doc.malformed {
@@ -66,33 +92,129 @@ func (a *Adapter) discoverSkills(ctx context.Context, now time.Time, result *dom
 	return nil
 }
 
+func (a *Adapter) userSkillConfigurations(result *domain.Discovery) map[string]skillConfiguration {
+	configured := make(map[string]skillConfiguration)
+	if a.options.configRoot == "" {
+		return configured
+	}
+	configPath := filepath.Join(a.options.configRoot, "config.toml")
+	content, exists, err := readOptionalFile(configPath)
+	if err != nil || !exists {
+		return configured
+	}
+	values, err := decodeTOML(content)
+	if err != nil {
+		// discoverMCP reports the parse finding for this same active user
+		// config; avoid retaining a second parser-specific diagnostic here.
+		return configured
+	}
+	rawSkills, exists := values["skills"]
+	if !exists {
+		return configured
+	}
+	skills, ok := rawSkills.(map[string]any)
+	if !ok {
+		addFinding(result, "malformed-config", "skills must be a TOML table", domain.CapabilitySkill, filepath.Base(configPath))
+		return configured
+	}
+	rawConfig, exists := skills["config"]
+	if !exists {
+		return configured
+	}
+	entries, ok := skillConfigurationEntries(rawConfig)
+	if !ok {
+		addFinding(result, "malformed-config", "skills.config must be an array of TOML tables", domain.CapabilitySkill, filepath.Base(configPath))
+		return configured
+	}
+	for _, entry := range entries {
+		rawPath, hasPath := entry["path"]
+		path, pathOK := rawPath.(string)
+		if !hasPath || !pathOK || strings.TrimSpace(path) == "" {
+			addFinding(result, "malformed-config", "skills.config path must be a non-empty string", domain.CapabilitySkill, filepath.Base(configPath))
+			continue
+		}
+		enabled := true
+		if rawEnabled, hasEnabled := entry["enabled"]; hasEnabled {
+			var enabledOK bool
+			enabled, enabledOK = rawEnabled.(bool)
+			if !enabledOK {
+				addFinding(result, "malformed-config", "skills.config enabled must be boolean", domain.CapabilitySkill, path)
+				continue
+			}
+		}
+		configured[a.canonicalSkillPath(path)] = skillConfiguration{enabled: enabled}
+	}
+	return configured
+}
+
+func skillConfigurationEntries(value any) ([]map[string]any, bool) {
+	switch entries := value.(type) {
+	case []any:
+		result := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			object, ok := entry.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, object)
+		}
+		return result, true
+	case []map[string]any:
+		return append([]map[string]any(nil), entries...), true
+	default:
+		return nil, false
+	}
+}
+
+func (a *Adapter) canonicalSkillPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if path == "~" && a.options.userHome != "" {
+		path = a.options.userHome
+	} else if strings.HasPrefix(path, "~/") && a.options.userHome != "" {
+		path = filepath.Join(a.options.userHome, strings.TrimPrefix(path, "~/"))
+	} else if !filepath.IsAbs(path) && a.options.configRoot != "" {
+		path = filepath.Join(a.options.configRoot, path)
+	}
+	path = filepath.Clean(path)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		path = filepath.Join(path, "SKILL.md")
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
+}
+
 // projectAncestorRoots returns roots from current directory toward the repo
 // root.  The result is reversed so instruction/skill precedence can be read
 // from the project root down to the current directory by callers that need
 // that order.  Inventory itself is sorted before return.
-func projectAncestorRoots(repoRoot, currentDir string, parts ...string) []string {
+func projectAncestorRoots(projectRoot, currentDir string, parts ...string) []string {
 	if currentDir == "" {
-		currentDir = repoRoot
+		currentDir = projectRoot
 	}
 	if currentDir == "" {
 		return nil
 	}
 	currentDir = filepath.Clean(currentDir)
-	if strings.TrimSpace(repoRoot) == "" {
+	if strings.TrimSpace(projectRoot) == "" {
 		return []string{filepath.Join(append([]string{currentDir}, parts...)...)}
 	}
-	repoRoot = filepath.Clean(repoRoot)
+	projectRoot = filepath.Clean(projectRoot)
 	dirs := make([]string, 0, 8)
 	for dir := currentDir; ; dir = filepath.Dir(dir) {
 		dirs = append(dirs, dir)
-		if repoRoot != "." && repoRoot != "" && sameOrDescendant(dir, repoRoot) && dir == repoRoot {
+		if projectRoot != "." && projectRoot != "" && sameOrDescendant(dir, projectRoot) && dir == projectRoot {
 			break
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			break
 		}
-		if repoRoot != "." && repoRoot != "" && !sameOrDescendant(parent, repoRoot) {
+		if projectRoot != "." && projectRoot != "" && !sameOrDescendant(parent, projectRoot) {
 			break
 		}
 	}
@@ -119,8 +241,8 @@ func (a *Adapter) discoverAgents(ctx context.Context, now time.Time, result *dom
 	if a.options.configRoot != "" {
 		roots = append(roots, sourceRoot{path: filepath.Join(a.options.configRoot, "agents"), scope: domain.ScopeUser})
 	}
-	if a.options.repoRoot != "" {
-		roots = append(roots, sourceRoot{path: filepath.Join(a.options.repoRoot, ".codex", "agents"), scope: domain.ScopeProject})
+	if a.options.projectRoot != "" {
+		roots = append(roots, sourceRoot{path: filepath.Join(a.options.projectRoot, ".codex", "agents"), scope: domain.ScopeProject})
 	}
 	for _, root := range roots {
 		if err := contextErr(ctx); err != nil {
@@ -139,20 +261,25 @@ func (a *Adapter) discoverAgents(ctx context.Context, now time.Time, result *dom
 				}
 				return nil
 			}
-			values, parseErr := parseTOML(content)
+			values, parseErr := decodeTOML(content)
 			name, hasName := stringField(values, "name")
+			_, hasDescription := stringField(values, "description")
+			developerInstructions, _ := stringField(values, "developer_instructions")
 			if strings.TrimSpace(name) == "" {
 				name = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 			}
-			capability := capabilityBase(now, domain.CapabilityAgent, name, root.scope, path)
+			// Agent name/description are identity and human-facing guidance in
+			// the documented TOML format, not proof of automatic model
+			// advertisement. Keep exposure and metadata unknown.
+			capability := capabilityBase(now, domain.CapabilityAgent, name, root.scope, path, domain.AdvertisementStateUnknown)
 			capability.Hash = hashBytes(content)
 			capability.MetadataTokens = unknownMeasurement()
-			capability.BodyTokens = unknownMeasurement()
+			capability.BodyTokens = estimatedMeasurement([]byte(developerInstructions), "agent developer instructions body estimate")
 			result.Capabilities = append(result.Capabilities, capability)
 			if parseErr != nil {
 				addFinding(result, "malformed-agent-toml", "agent TOML configuration could not be parsed", domain.CapabilityAgent, name)
-			} else if !hasName {
-				addFinding(result, "malformed-agent-metadata", "agent TOML has no name; filename fallback was used", domain.CapabilityAgent, name)
+			} else if !hasName || !hasDescription {
+				addFinding(result, "malformed-agent-metadata", "agent TOML must include name and description", domain.CapabilityAgent, name)
 			}
 			return nil
 		}); err != nil {
@@ -169,7 +296,7 @@ func (a *Adapter) discoverInstructions(ctx context.Context, now time.Time, resul
 		// ~/.codex), not directly beside the user's home directory.
 		roots = append(roots, sourceRoot{path: a.options.configRoot, scope: domain.ScopeUser})
 	}
-	projectDirs := projectAncestorRoots(a.options.repoRoot, a.options.currentDir)
+	projectDirs := projectAncestorRoots(a.options.projectRoot, a.options.currentDir)
 	for _, dir := range projectDirs {
 		roots = append(roots, sourceRoot{path: dir, scope: domain.ScopeProject})
 	}
@@ -210,11 +337,11 @@ func (a *Adapter) discoverInstructions(ctx context.Context, now time.Time, resul
 			continue
 		}
 		name := filepath.Base(selected)
-		capability := capabilityBase(now, domain.CapabilityInstructionFile, name, root.scope, selected)
+		capability := capabilityBase(now, domain.CapabilityInstructionFile, name, root.scope, selected, domain.AdvertisementStateFullyAdvertised)
 		capability.Enabled = domain.EnabledStateEnabled
 		capability.Hash = hashBytes(content)
 		capability.MetadataTokens = unknownMeasurement()
-		capability.BodyTokens = unknownMeasurement()
+		capability.BodyTokens = estimatedMeasurement(content, "configured AGENTS instruction body baseline estimate")
 		result.Capabilities = append(result.Capabilities, capability)
 	}
 	return nil
@@ -289,11 +416,11 @@ func isBrokenSymlink(path string) bool {
 }
 
 type skillDocument struct {
-	name        string
-	description string
-	metadata    []byte
-	body        []byte
-	malformed   bool
+	name               string
+	description        string
+	advertisedMetadata []byte
+	body               []byte
+	malformed          bool
 }
 
 func parseSkillDocument(content []byte) skillDocument {
@@ -314,14 +441,13 @@ func parseSkillDocument(content []byte) skillDocument {
 		}
 	}
 	if closeIndex < 0 {
-		doc.metadata = []byte(strings.Join(lines[1:], ""))
 		doc.malformed = true
 		return doc
 	}
-	doc.metadata = []byte(strings.Join(lines[1:closeIndex], ""))
+	frontmatter := []byte(strings.Join(lines[1:closeIndex], ""))
 	doc.body = []byte(strings.Join(lines[closeIndex+1:], ""))
 	seenKeys := make(map[string]struct{})
-	for _, line := range strings.Split(string(doc.metadata), "\n") {
+	for _, line := range strings.Split(string(frontmatter), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -350,6 +476,9 @@ func parseSkillDocument(content []byte) skillDocument {
 	}
 	if strings.TrimSpace(doc.name) == "" || strings.TrimSpace(doc.description) == "" {
 		doc.malformed = true
+	}
+	if !doc.malformed {
+		doc.advertisedMetadata = []byte("name: " + doc.name + "\ndescription: " + doc.description + "\n")
 	}
 	return doc
 }
