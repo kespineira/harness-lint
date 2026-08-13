@@ -27,8 +27,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "3" {
-		t.Fatalf("schema version = %q, want 3", version)
+	if version != "4" {
+		t.Fatalf("schema version = %q, want 4", version)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -343,6 +343,246 @@ func TestCapabilitiesWithDifferentSourcesCoexist(t *testing.T) {
 	}
 }
 
+func TestRecordInventoryTracksCurrentAndHistoricalRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	firstObserved := time.Date(2026, 8, 13, 12, 0, 0, 123, time.FixedZone("CEST", 2*60*60))
+	laterObserved := firstObserved.Add(time.Hour)
+	latestObserved := laterObserved.Add(time.Hour)
+	first := testCapability("first", time.Time{}, time.Time{})
+	first.Source = "/scan/first"
+	second := testCapability("second", time.Time{}, time.Time{})
+	second.Source = "/scan/second"
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, firstObserved, []domain.Capability{first, second}); err != nil {
+		t.Fatalf("first inventory scan: %v", err)
+	}
+	current, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after first scan: %v", err)
+	}
+	if len(current) != 2 || current[0].Name != "first" || current[1].Name != "second" {
+		t.Fatalf("first current capabilities = %#v, want first then second", current)
+	}
+	for _, capability := range current {
+		if !capability.FirstSeen.Equal(firstObserved.UTC()) || !capability.LastSeen.Equal(firstObserved.UTC()) {
+			t.Fatalf("first scan timestamps for %q = %s..%s, want %s", capability.Name, capability.FirstSeen, capability.LastSeen, firstObserved.UTC())
+		}
+	}
+
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, laterObserved, []domain.Capability{first}); err != nil {
+		t.Fatalf("second inventory scan: %v", err)
+	}
+	historical, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after second scan: %v", err)
+	}
+	if len(historical) != 2 {
+		t.Fatalf("historical capabilities after missing row = %#v, want two rows", historical)
+	}
+	current, err = s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after second scan: %v", err)
+	}
+	if len(current) != 1 || current[0].Name != "first" || !current[0].LastSeen.Equal(laterObserved.UTC()) {
+		t.Fatalf("second current capabilities = %#v, want first at %s", current, laterObserved.UTC())
+	}
+
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, latestObserved, nil); err != nil {
+		t.Fatalf("empty inventory scan: %v", err)
+	}
+	historical, err = s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after empty scan: %v", err)
+	}
+	if len(historical) != 2 {
+		t.Fatalf("historical capabilities after empty scan = %#v, want two rows", historical)
+	}
+	current, err = s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after empty scan: %v", err)
+	}
+	if len(current) != 0 {
+		t.Fatalf("current capabilities after empty scan = %#v, want empty", current)
+	}
+}
+
+func TestRecordInventorySameTimestampEmptyScanReplacesCurrentMembership(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	observedAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("same-timestamp", time.Time{}, time.Time{})
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, observedAt, []domain.Capability{capability}); err != nil {
+		t.Fatalf("non-empty inventory scan: %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, observedAt, nil); err != nil {
+		t.Fatalf("same-timestamp empty inventory scan: %v", err)
+	}
+	current, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after same-timestamp empty scan: %v", err)
+	}
+	if len(current) != 0 {
+		t.Fatalf("current capabilities after same-timestamp empty scan = %#v, want empty", current)
+	}
+	historical, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after same-timestamp empty scan: %v", err)
+	}
+	if len(historical) != 1 || historical[0].Name != capability.Name {
+		t.Fatalf("historical capabilities after same-timestamp empty scan = %#v, want preserved row", historical)
+	}
+}
+
+func TestRecordInventoryRejectsOlderOutOfOrderScanWithoutRollback(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	later := time.Date(2026, 8, 13, 13, 0, 0, 0, time.UTC)
+	earlier := later.Add(-time.Hour)
+	existing := testCapability("existing", time.Time{}, time.Time{})
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, later, []domain.Capability{existing}); err != nil {
+		t.Fatalf("latest inventory scan: %v", err)
+	}
+	older := testCapability("older", time.Time{}, time.Time{})
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, earlier, []domain.Capability{older}); err == nil {
+		t.Fatal("older out-of-order inventory scan accepted")
+	}
+	current, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after rejected older scan: %v", err)
+	}
+	if len(current) != 1 || current[0].Name != existing.Name || !current[0].LastSeen.Equal(later) {
+		t.Fatalf("current capabilities after rejected older scan = %#v, want existing row at %s", current, later)
+	}
+	historical, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after rejected older scan: %v", err)
+	}
+	if len(historical) != 1 || historical[0].Name != existing.Name {
+		t.Fatalf("historical capabilities after rejected older scan = %#v, want only existing row", historical)
+	}
+}
+
+func TestRecordInventoryMarkersAreIndependentPerRuntime(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	codexObserved := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	cursorObserved := codexObserved.Add(time.Hour)
+	codex := testCapability("codex-tool", time.Time{}, time.Time{})
+	codex.Source = "/codex/tool"
+	cursor := testCapability("cursor-tool", time.Time{}, time.Time{})
+	cursor.Runtime = domain.RuntimeCursor
+	cursor.Source = "/cursor/tool"
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, codexObserved, []domain.Capability{codex}); err != nil {
+		t.Fatalf("codex inventory scan: %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCursor, cursorObserved, []domain.Capability{cursor}); err != nil {
+		t.Fatalf("cursor inventory scan: %v", err)
+	}
+	codexCurrent, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(codex): %v", err)
+	}
+	cursorCurrent, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCursor)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(cursor): %v", err)
+	}
+	if len(codexCurrent) != 1 || codexCurrent[0].Name != codex.Name || !codexCurrent[0].LastSeen.Equal(codexObserved) {
+		t.Fatalf("codex current capabilities = %#v, want codex row at %s", codexCurrent, codexObserved)
+	}
+	if len(cursorCurrent) != 1 || cursorCurrent[0].Name != cursor.Name || !cursorCurrent[0].LastSeen.Equal(cursorObserved) {
+		t.Fatalf("cursor current capabilities = %#v, want cursor row at %s", cursorCurrent, cursorObserved)
+	}
+
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, cursorObserved.Add(time.Hour), nil); err != nil {
+		t.Fatalf("empty codex inventory scan: %v", err)
+	}
+	codexCurrent, err = s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(codex) after empty scan: %v", err)
+	}
+	cursorCurrent, err = s.ListCurrentCapabilities(ctx, domain.RuntimeCursor)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(cursor) after codex scan: %v", err)
+	}
+	if len(codexCurrent) != 0 {
+		t.Fatalf("codex current capabilities after empty scan = %#v, want empty", codexCurrent)
+	}
+	if len(cursorCurrent) != 1 || cursorCurrent[0].Name != cursor.Name {
+		t.Fatalf("cursor current capabilities after codex scan = %#v, want cursor row", cursorCurrent)
+	}
+}
+
+func TestRecordInventoryValidationIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	firstObserved := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	secondObserved := firstObserved.Add(time.Hour)
+	existing := testCapability("existing", time.Time{}, time.Time{})
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, firstObserved, []domain.Capability{existing}); err != nil {
+		t.Fatalf("seed inventory scan: %v", err)
+	}
+	newCapability := testCapability("new", time.Time{}, time.Time{})
+	invalid := testCapability("invalid", time.Time{}, time.Time{})
+	invalid.Name = " "
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, secondObserved, []domain.Capability{newCapability, invalid}); err == nil {
+		t.Fatal("invalid inventory scan accepted")
+	}
+	historical, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after failed scan: %v", err)
+	}
+	if len(historical) != 1 || historical[0].Name != existing.Name || !historical[0].LastSeen.Equal(firstObserved) {
+		t.Fatalf("historical capabilities after failed scan = %#v, want existing row at %s", historical, firstObserved)
+	}
+	current, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after failed scan: %v", err)
+	}
+	if len(current) != 1 || current[0].Name != existing.Name {
+		t.Fatalf("current capabilities after failed scan = %#v, want existing row", current)
+	}
+}
+
+func TestRecordInventoryPersistsCurrentMarkerAndUTCExactness(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "inventory.db")
+	observedAt := time.Date(2026, 8, 13, 14, 30, 0, 123456789, time.FixedZone("CEST", 2*60*60))
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	capability := testCapability("persisted", time.Time{}, time.Time{})
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, observedAt, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(): %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer reopened.Close()
+	current, err := reopened.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities() after reopen: %v", err)
+	}
+	if len(current) != 1 {
+		t.Fatalf("current capabilities after reopen = %#v, want one row", current)
+	}
+	if !current[0].LastSeen.Equal(observedAt.UTC()) || current[0].LastSeen.Location() != time.UTC {
+		t.Fatalf("reopened LastSeen = %s (%s), want UTC %s", current[0].LastSeen, current[0].LastSeen.Location(), observedAt.UTC())
+	}
+	var marker string
+	if err := reopened.db.QueryRowContext(ctx, `SELECT observed_at FROM inventory_scans WHERE runtime = ?`, domain.RuntimeCodex).Scan(&marker); err != nil {
+		t.Fatalf("read persisted inventory marker: %v", err)
+	}
+	if marker != observedAt.UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("persisted inventory marker = %q, want %q", marker, observedAt.UTC().Format(time.RFC3339Nano))
+	}
+}
+
 func TestCapabilityEnabledStatesPersistLosslessly(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -622,7 +862,7 @@ func checkSchema(t *testing.T, s *Store) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate schema tables: %v", err)
 	}
-	want := []string{"capabilities", "schema_meta", "usage_events"}
+	want := []string{"capabilities", "current_inventory", "inventory_scans", "schema_meta", "usage_events"}
 	if !reflect.DeepEqual(tables, want) {
 		sort.Strings(tables)
 		t.Fatalf("schema tables = %v, want %v", tables, want)

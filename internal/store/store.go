@@ -176,6 +176,24 @@ func migrationVersion(name string) (int, error) {
 	return version, nil
 }
 
+const capabilityUpsertQuery = `INSERT INTO capabilities (
+	runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash,
+	metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis,
+	body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(runtime, capability_type, name, scope, source) DO UPDATE SET
+enabled_state = excluded.enabled_state, advertisement_state = excluded.advertisement_state, hash = excluded.hash,
+metadata_tokens_value = excluded.metadata_tokens_value, metadata_tokens_confidence = excluded.metadata_tokens_confidence, metadata_tokens_basis = excluded.metadata_tokens_basis,
+body_tokens_value = excluded.body_tokens_value, body_tokens_confidence = excluded.body_tokens_confidence, body_tokens_basis = excluded.body_tokens_basis,
+first_seen = CASE WHEN excluded.first_seen = '' THEN capabilities.first_seen WHEN capabilities.first_seen = '' OR excluded.first_seen < capabilities.first_seen THEN excluded.first_seen ELSE capabilities.first_seen END,
+last_seen = CASE WHEN excluded.last_seen = '' THEN capabilities.last_seen WHEN capabilities.last_seen = '' OR excluded.last_seen > capabilities.last_seen THEN excluded.last_seen ELSE capabilities.last_seen END`
+
+const capabilityColumns = `runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen`
+
+const capabilityOrder = ` ORDER BY runtime, capability_type, name, scope, source`
+
+const currentCapabilityOrder = ` ORDER BY c.runtime, c.capability_type, c.name, c.scope, c.source`
+
 // UpsertCapabilities idempotently writes an inventory snapshot. The natural
 // key is runtime/type/name/scope/source; observations are refreshed while
 // first_seen and last_seen retain their complete observed range.
@@ -188,17 +206,16 @@ func (s *Store) UpsertCapabilities(ctx context.Context, capabilities []domain.Ca
 		return fmt.Errorf("begin capability upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	const query = `INSERT INTO capabilities (
-	runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash,
-	metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis,
-	body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(runtime, capability_type, name, scope, source) DO UPDATE SET
-enabled_state = excluded.enabled_state, advertisement_state = excluded.advertisement_state, hash = excluded.hash,
-metadata_tokens_value = excluded.metadata_tokens_value, metadata_tokens_confidence = excluded.metadata_tokens_confidence, metadata_tokens_basis = excluded.metadata_tokens_basis,
-body_tokens_value = excluded.body_tokens_value, body_tokens_confidence = excluded.body_tokens_confidence, body_tokens_basis = excluded.body_tokens_basis,
-first_seen = CASE WHEN excluded.first_seen = '' THEN capabilities.first_seen WHEN capabilities.first_seen = '' OR excluded.first_seen < capabilities.first_seen THEN excluded.first_seen ELSE capabilities.first_seen END,
-last_seen = CASE WHEN excluded.last_seen = '' THEN capabilities.last_seen WHEN capabilities.last_seen = '' OR excluded.last_seen > capabilities.last_seen THEN excluded.last_seen ELSE capabilities.last_seen END`
+	if err := upsertCapabilitiesTx(ctx, tx, capabilities); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit capability upsert: %w", err)
+	}
+	return nil
+}
+
+func upsertCapabilitiesTx(ctx context.Context, tx *sql.Tx, capabilities []domain.Capability) error {
 	for _, capability := range capabilities {
 		if err := capability.Validate(); err != nil {
 			return fmt.Errorf("validate capability %q: %w", capability.Name, err)
@@ -209,13 +226,82 @@ last_seen = CASE WHEN excluded.last_seen = '' THEN capabilities.last_seen WHEN c
 		}
 		metadata := capability.MetadataTokens
 		body := capability.BodyTokens
-		if _, err := tx.ExecContext(ctx, query, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source, capability.Enabled,
+		if _, err := tx.ExecContext(ctx, capabilityUpsertQuery, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source, capability.Enabled,
 			capability.Advertisement, capability.Hash, metadata.Value, metadata.Confidence, metadata.Basis, body.Value, body.Confidence, body.Basis, firstSeen, lastSeen); err != nil {
 			return fmt.Errorf("upsert capability %q: %w", capability.Name, err)
 		}
 	}
+	return nil
+}
+
+// RecordInventory atomically records a successful inventory observation and
+// the capabilities present in that scan. Empty capabilities are a successful
+// empty scan; existing rows remain historical and are never deleted.
+func (s *Store) RecordInventory(ctx context.Context, runtime domain.Runtime, observedAt time.Time, capabilities []domain.Capability) error {
+	if s.isClosed() {
+		return errors.New("store is closed")
+	}
+	if !runtime.Valid() {
+		return fmt.Errorf("invalid inventory runtime %q", runtime)
+	}
+	if observedAt.IsZero() {
+		return errors.New("inventory observation time is required")
+	}
+	observedAt = observedAt.UTC()
+	normalized := make([]domain.Capability, len(capabilities))
+	for i, capability := range capabilities {
+		if capability.Runtime != runtime {
+			return fmt.Errorf("capability %q runtime %q does not match inventory runtime %q", capability.Name, capability.Runtime, runtime)
+		}
+		if err := capability.Validate(); err != nil {
+			return fmt.Errorf("validate inventory capability %q: %w", capability.Name, err)
+		}
+		if capability.FirstSeen.IsZero() {
+			capability.FirstSeen = observedAt
+		}
+		capability.LastSeen = observedAt
+		if err := capability.Validate(); err != nil {
+			return fmt.Errorf("validate inventory capability %q: %w", capability.Name, err)
+		}
+		normalized[i] = capability
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin inventory record: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var previousMarker string
+	err = tx.QueryRowContext(ctx, `SELECT observed_at FROM inventory_scans WHERE runtime = ?`, runtime).Scan(&previousMarker)
+	if errors.Is(err, sql.ErrNoRows) {
+		previousMarker = ""
+	} else if err != nil {
+		return fmt.Errorf("read latest inventory scan: %w", err)
+	} else {
+		previousAt, parseErr := time.Parse(time.RFC3339Nano, previousMarker)
+		if parseErr != nil {
+			return fmt.Errorf("parse latest inventory scan: %w", parseErr)
+		}
+		if observedAt.Before(previousAt) {
+			return fmt.Errorf("inventory observation time %s is older than latest recorded scan %s", observedAt.Format(time.RFC3339Nano), previousMarker)
+		}
+	}
+	if err := upsertCapabilitiesTx(ctx, tx, normalized); err != nil {
+		return fmt.Errorf("record inventory capabilities: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM current_inventory WHERE runtime = ?`, runtime); err != nil {
+		return fmt.Errorf("replace current inventory: %w", err)
+	}
+	for _, capability := range normalized {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO current_inventory(runtime, capability_type, name, scope, source) VALUES (?, ?, ?, ?, ?) ON CONFLICT(runtime, capability_type, name, scope, source) DO NOTHING`, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source); err != nil {
+			return fmt.Errorf("record current capability %q: %w", capability.Name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO inventory_scans(runtime, observed_at) VALUES (?, ?) ON CONFLICT(runtime) DO UPDATE SET observed_at = excluded.observed_at`, runtime, observedAt.Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("record inventory scan: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit capability upsert: %w", err)
+		return fmt.Errorf("commit inventory record: %w", err)
 	}
 	return nil
 }
@@ -225,7 +311,23 @@ func (s *Store) ListCapabilities(ctx context.Context) ([]domain.Capability, erro
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen FROM capabilities ORDER BY runtime, capability_type, name, scope, source`)
+	return s.listCapabilities(ctx, `SELECT `+capabilityColumns+` FROM capabilities`+capabilityOrder)
+}
+
+// ListCurrentCapabilities returns only capabilities observed in the latest
+// successful inventory scan for runtime, in deterministic natural-key order.
+func (s *Store) ListCurrentCapabilities(ctx context.Context, runtime domain.Runtime) ([]domain.Capability, error) {
+	if s.isClosed() {
+		return nil, errors.New("store is closed")
+	}
+	if !runtime.Valid() {
+		return nil, fmt.Errorf("invalid inventory runtime %q", runtime)
+	}
+	return s.listCapabilities(ctx, `SELECT c.runtime, c.capability_type, c.name, c.scope, c.source, c.enabled_state, c.advertisement_state, c.hash, c.metadata_tokens_value, c.metadata_tokens_confidence, c.metadata_tokens_basis, c.body_tokens_value, c.body_tokens_confidence, c.body_tokens_basis, c.first_seen, c.last_seen FROM current_inventory AS current INNER JOIN capabilities AS c ON c.runtime = current.runtime AND c.capability_type = current.capability_type AND c.name = current.name AND c.scope = current.scope AND c.source = current.source WHERE current.runtime = ?`+currentCapabilityOrder, runtime)
+}
+
+func (s *Store) listCapabilities(ctx context.Context, query string, args ...any) ([]domain.Capability, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list capabilities: %w", err)
 	}
