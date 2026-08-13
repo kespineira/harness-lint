@@ -477,6 +477,134 @@ func TestConcurrentUsageInsertsSerializeWithSQLiteWriterConfiguration(t *testing
 	}
 }
 
+func TestIndependentStoreHandlesConfigureSQLiteBusyTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "busy-timeout.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(first): %v", err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(second): %v", err)
+	}
+	defer second.Close()
+
+	for name, s := range map[string]*Store{"first": first, "second": second} {
+		var timeoutMilliseconds int
+		if err := s.db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeoutMilliseconds); err != nil {
+			t.Fatalf("%s busy_timeout: %v", name, err)
+		}
+		if timeoutMilliseconds != 5000 {
+			t.Errorf("%s busy_timeout = %dms, want 5000ms", name, timeoutMilliseconds)
+		}
+	}
+}
+
+func TestConcurrentOpenAndUsageInsertAcrossIndependentStoreHandles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent-independent.db")
+	initialized, err := Open(path)
+	if err != nil {
+		t.Fatalf("initialize database: %v", err)
+	}
+	if err := initialized.Close(); err != nil {
+		t.Fatalf("close initialized database: %v", err)
+	}
+
+	const workers = 20
+	ready := make(chan struct{}, workers)
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			ready <- struct{}{}
+			<-start
+			s, err := Open(path)
+			if err != nil {
+				results <- fmt.Errorf("worker %d open: %w", index, err)
+				return
+			}
+			defer s.Close()
+
+			event := testUsageEvent(time.Date(2026, 8, 13, 15, 0, 0, index, time.UTC), "terminal", domain.EventInvoked)
+			event.SourceIdentity = "independent-" + strconv.Itoa(index)
+			if err := s.InsertUsageEvents(context.Background(), []domain.UsageEvent{event}); err != nil {
+				results <- fmt.Errorf("worker %d insert: %w", index, err)
+				return
+			}
+			results <- nil
+		}()
+	}
+	for range workers {
+		<-ready
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
+	verifier, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(verifier): %v", err)
+	}
+	defer verifier.Close()
+	events, err := verifier.ListUsageEvents(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(events) != workers {
+		t.Fatalf("persisted event count = %d, want %d", len(events), workers)
+	}
+}
+
+func TestConcurrentOpenMigratesNewDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent-migrate.db")
+	const workers = 8
+	ready := make(chan struct{}, workers)
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			ready <- struct{}{}
+			<-start
+			s, err := Open(path)
+			if err == nil {
+				err = s.Close()
+			}
+			results <- err
+		}()
+	}
+	for range workers {
+		<-ready
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Errorf("concurrent Open(): %v", err)
+		}
+	}
+
+	verifier, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(verifier): %v", err)
+	}
+	defer verifier.Close()
+	checkSchema(t, verifier)
+}
+
 func TestUsagePersistenceDoesNotContainRepresentativePayloadStrings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

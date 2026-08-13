@@ -29,6 +29,8 @@ type migration struct {
 	sql     []byte
 }
 
+const sqliteBusyTimeoutMilliseconds = 5000
+
 // Store is a concurrency-safe database handle. SQLite serializes writes and
 // each public write operation uses one transaction.
 type Store struct {
@@ -43,7 +45,7 @@ func Open(path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("store path is required")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -55,6 +57,14 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.ContainsRune(path, '?') {
+		separator = "&"
+	}
+	return path + separator + "_pragma=busy_timeout%28" + strconv.Itoa(sqliteBusyTimeoutMilliseconds) + "%29"
 }
 
 // Close releases the underlying SQLite handle.
