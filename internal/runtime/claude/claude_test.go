@@ -130,7 +130,16 @@ func TestDiscoverInventoryFrontmatterNestedMCPHooksAgentsInstructions(t *testing
 		t.Fatalf("nested skill scope = %q, want project", nested.Scope)
 	}
 	_ = findCapability(domain.CapabilityCommand, "legacy/deploy")
-	_ = findCapability(domain.CapabilityAgent, "reviewer")
+	reviewer := findCapability(domain.CapabilityAgent, "reviewer")
+	if reviewer.Enabled != domain.EnabledStateUnknown || reviewer.Advertisement != domain.AdvertisementStateFullyAdvertised {
+		t.Fatalf("reviewer agent exposure = %q/%q, want unknown/fully advertised", reviewer.Enabled, reviewer.Advertisement)
+	}
+	if reviewer.MetadataTokens.Confidence != domain.ConfidenceEstimated || reviewer.MetadataTokens.Value == 0 || reviewer.BodyTokens.Confidence != domain.ConfidenceEstimated || reviewer.BodyTokens.Value == 0 {
+		t.Fatalf("reviewer agent measurements = %#v/%#v, want separate metadata/body estimates", reviewer.MetadataTokens, reviewer.BodyTokens)
+	}
+	if !strings.Contains(reviewer.MetadataTokens.Basis, "configured maximum estimate") || strings.Contains(reviewer.MetadataTokens.Basis, "runtime cost") == false {
+		t.Fatalf("reviewer metadata basis = %q, want explicit non-runtime-cost estimate", reviewer.MetadataTokens.Basis)
+	}
 	_ = findCapability(domain.CapabilityAgent, "builder")
 	for _, capability := range discovery.Capabilities {
 		if capability.Type != domain.CapabilityInstructionFile {
@@ -193,6 +202,61 @@ func TestDiscoverFindingsMalformedConfigAndBrokenSymlinkAreDeterministic(t *test
 	assertFindingCode(t, first.Findings, "malformed-frontmatter")
 	assertFindingCode(t, first.Findings, "malformed-config")
 	assertFindingCode(t, first.Findings, "broken-symlink")
+}
+
+func TestDiscoverAgentExposureRequiresValidSelectionDescription(t *testing.T) {
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "project")
+	agents := filepath.Join(projectRoot, ".claude", "agents")
+	mustWrite(t, filepath.Join(agents, "valid.md"), "---\nname: valid\ndescription: delegates valid work\nmodel: sonnet\ntools: Read, Glob\n---\nValid agent system prompt.\n")
+	mustWrite(t, filepath.Join(agents, "missing-description.md"), "---\nname: missing-description\n---\nAgent body is not a selection description.\n")
+	mustWrite(t, filepath.Join(agents, "malformed.md"), "---\nname: malformed\ndescription: missing close\nAgent body.\n")
+
+	discovery, err := New(Options{
+		ProjectRoot: projectRoot,
+		Now:         func() time.Time { return time.Date(2026, 8, 13, 15, 0, 0, 0, time.UTC) },
+	}).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	find := func(name string) domain.Capability {
+		t.Helper()
+		for _, capability := range discovery.Capabilities {
+			if capability.Type == domain.CapabilityAgent && capability.Name == name {
+				return capability
+			}
+		}
+		t.Fatalf("agent %q not found: %#v", name, discovery.Capabilities)
+		return domain.Capability{}
+	}
+	valid := find("valid")
+	if valid.Enabled != domain.EnabledStateUnknown || valid.Advertisement != domain.AdvertisementStateFullyAdvertised || valid.MetadataTokens.Confidence != domain.ConfidenceEstimated || valid.BodyTokens.Confidence != domain.ConfidenceEstimated {
+		t.Fatalf("valid agent = %#v, want unknown enabled, fully advertised metadata, and body estimates", valid)
+	}
+	if valid.MetadataTokens.Value != estimateTokens([]byte("valid\ndelegates valid work")) {
+		t.Fatalf("valid agent metadata estimate = %d, want name+description estimate", valid.MetadataTokens.Value)
+	}
+	if valid.BodyTokens.Value != estimateTokens([]byte("Valid agent system prompt.\n")) {
+		t.Fatalf("valid agent body estimate = %d, want separate system-prompt estimate", valid.BodyTokens.Value)
+	}
+	if !strings.Contains(valid.BodyTokens.Basis, "on-invocation") || !strings.Contains(valid.BodyTokens.Basis, "not runtime cost") {
+		t.Fatalf("valid agent body basis = %q, want explicit on-invocation non-runtime-cost basis", valid.BodyTokens.Basis)
+	}
+	for _, name := range []string{"missing-description", "malformed"} {
+		capability := find(name)
+		if capability.Enabled != domain.EnabledStateUnknown || capability.Advertisement != domain.AdvertisementStateUnknown || capability.MetadataTokens.Confidence != domain.ConfidenceUnknown {
+			t.Fatalf("agent %q exposure/metadata = %q/%q/%#v, want unknown", name, capability.Enabled, capability.Advertisement, capability.MetadataTokens)
+		}
+	}
+	missingDescription := find("missing-description")
+	if missingDescription.BodyTokens.Confidence != domain.ConfidenceUnknown {
+		t.Fatalf("missing-description body measurement = %#v, want unknown with unusable selection description", missingDescription.BodyTokens)
+	}
+	malformed := find("malformed")
+	if malformed.BodyTokens.Confidence != domain.ConfidenceUnknown {
+		t.Fatalf("malformed body measurement = %#v, want unknown after malformed frontmatter", malformed.BodyTokens)
+	}
+	assertFindingCode(t, discovery.Findings, "malformed-frontmatter")
 }
 
 func TestDiscoverSkillAdvertisementStatesAndEffectiveProjectPrecedence(t *testing.T) {

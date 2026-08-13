@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	metadataEstimateBasis = "configured maximum estimate from advertised skill name and description at approximately 4 UTF-8 bytes/token; Claude may collapse descriptions to name-only under its skills context/character budget; not runtime cost"
-	hiddenMetadataBasis   = "observed configured skill metadata is not advertised; not runtime cost"
+	metadataEstimateBasis     = "configured maximum estimate from advertised name and description at approximately 4 UTF-8 bytes/token; Claude may collapse descriptions to name-only under its skills context/character budget; not runtime cost"
+	hiddenMetadataBasis       = "observed configured skill metadata is not advertised; not runtime cost"
+	subagentBodyEstimateBasis = "estimated on-invocation subagent system-prompt body from UTF-8 bytes at approximately 4 bytes/token; not runtime cost"
 )
 
 type fileEntry struct {
@@ -137,11 +138,21 @@ func commandExposure(s *discoveryState, name string, overrideNames []string, fro
 	return s.skillExposure(name, overrideNames, front)
 }
 
-func agentExposure() skillExposure {
+func agentExposure(name string, front frontMatter) skillExposure {
+	// Claude uses a valid subagent's name and description for automatic
+	// delegation; its Markdown body is loaded separately as the invoked
+	// subagent's system prompt.
+	if !front.has || front.err != nil || strings.TrimSpace(front.value("name")) == "" || strings.TrimSpace(front.value("description")) == "" {
+		return skillExposure{
+			enabled:       domain.EnabledStateUnknown,
+			advertisement: domain.AdvertisementStateUnknown,
+			metadata:      unknownMeasurement(),
+		}
+	}
 	return skillExposure{
 		enabled:       domain.EnabledStateUnknown,
-		advertisement: domain.AdvertisementStateUnknown,
-		metadata:      unknownMeasurement(),
+		advertisement: domain.AdvertisementStateFullyAdvertised,
+		metadata:      metadataMeasurement(name, front.value("description"), domain.AdvertisementStateFullyAdvertised),
 	}
 }
 
@@ -398,7 +409,15 @@ func (s *discoveryState) discoverAgents(ctx context.Context) {
 		if front.err != nil {
 			s.addFinding(finding("malformed-frontmatter", "an agent has malformed YAML frontmatter", domain.SeverityWarning, domain.CapabilityAgent, name))
 		}
-		exposure := agentExposure()
+		exposure := agentExposure(name, front)
+		body := unknownMeasurement()
+		if exposure.advertisement == domain.AdvertisementStateFullyAdvertised {
+			body = domain.Measurement{
+				Value:      estimateTokens(front.body),
+				Confidence: domain.ConfidenceEstimated,
+				Basis:      subagentBodyEstimateBasis,
+			}
+		}
 		first, last := s.observation()
 		s.addCapability(domain.Capability{
 			Runtime:        domain.RuntimeClaudeCode,
@@ -410,7 +429,7 @@ func (s *discoveryState) discoverAgents(ctx context.Context) {
 			Advertisement:  exposure.advertisement,
 			Hash:           hashBytes(data),
 			MetadataTokens: exposure.metadata,
-			BodyTokens:     unknownMeasurement(),
+			BodyTokens:     body,
 			FirstSeen:      first,
 			LastSeen:       last,
 		})
