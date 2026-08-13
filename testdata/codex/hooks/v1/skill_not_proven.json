@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "hook_event_name": "PostToolUse",
+  "session_id": "codex-session-skill",
+  "cwd": "/fixture/project",
+  "turn_id": "codex-turn-skill",
+  "tool_name": "Skill",
+  "tool_use_id": "codex-tool-use-skill"
+}

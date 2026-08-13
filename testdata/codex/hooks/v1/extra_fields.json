@@ -1,0 +1,10 @@
+{
+  "fixture_version": 1,
+  "hook_event_name": "PostToolUse",
+  "session_id": "codex-session-extra",
+  "cwd": "/fixture/project",
+  "turn_id": "codex-turn-extra",
+  "tool_name": "update_plan",
+  "tool_use_id": "codex-tool-use-extra",
+  "future_field": {"nested": "SENTINEL_UNKNOWN_FIELD"}
+}

@@ -1,0 +1,12 @@
+{
+  "fixture_version": 1,
+  "hook_event_name": "PostToolUse",
+  "session_id": "codex-session-private",
+  "cwd": "/fixture/project",
+  "turn_id": "codex-turn-private",
+  "tool_name": "Bash",
+  "tool_use_id": "codex-tool-use-private",
+  "prompt": "SENTINEL_PROMPT_NEVER_METADATA",
+  "tool_input": {"command": "SENTINEL_TOOL_INPUT_NEVER_METADATA"},
+  "tool_response": {"output": "SENTINEL_TOOL_RESPONSE_NEVER_METADATA"}
+}

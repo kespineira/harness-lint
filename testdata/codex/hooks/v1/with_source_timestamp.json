@@ -1,0 +1,10 @@
+{
+  "fixture_version": 1,
+  "hook_event_name": "PostToolUse",
+  "session_id": "codex-session-timestamp",
+  "cwd": "/fixture/project",
+  "turn_id": "codex-turn-timestamp",
+  "tool_name": "apply_patch",
+  "tool_use_id": "codex-tool-use-timestamp",
+  "timestamp": "2026-08-14T09:10:11.123Z"
+}

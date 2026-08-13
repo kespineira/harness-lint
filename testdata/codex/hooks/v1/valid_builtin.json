@@ -1,0 +1,12 @@
+{
+  "fixture_version": 1,
+  "hook_event_name": "PostToolUse",
+  "session_id": "codex-session-built-in",
+  "cwd": "/fixture/project",
+  "turn_id": "codex-turn-built-in",
+  "tool_name": "Bash",
+  "tool_use_id": "codex-tool-use-built-in",
+  "tool_input": {"command": "SENTINEL_TOOL_INPUT"},
+  "tool_response": {"output": "SENTINEL_TOOL_RESPONSE"},
+  "prompt": "SENTINEL_PROMPT"
+}
