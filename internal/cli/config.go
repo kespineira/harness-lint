@@ -280,7 +280,7 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 			return fmt.Errorf("unknown hooks action %q (want status, install, or uninstall)", flags.hooksAction)
 		}
 	default:
-		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.jsonSet {
+		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || (flags.jsonSet && command != "report" && command != "stale") {
 			return fmt.Errorf("ingest or hooks flags are not valid for %s", command)
 		}
 	}
@@ -298,6 +298,7 @@ type commandConfig struct {
 	since        time.Time
 	now          time.Time
 	days         int
+	json         bool
 	lookPath     func(string) (string, error)
 }
 
@@ -403,6 +404,7 @@ func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {
 		since:        since,
 		now:          now,
 		days:         flags.days,
+		json:         flags.json,
 		lookPath:     options.LookPath,
 	}, nil
 }
@@ -704,6 +706,9 @@ func writeCommandUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
 	fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
 	fmt.Fprintln(w, "  --now RFC3339              observation time")
+	if command == "report" || command == "stale" {
+		fmt.Fprintln(w, "  --json                     stable JSON output")
+	}
 }
 
 func hasCommandToken(args []string) bool {

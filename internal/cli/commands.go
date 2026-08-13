@@ -12,6 +12,7 @@ import (
 
 	"github.com/kespineira/harness-lint/internal/analysis"
 	"github.com/kespineira/harness-lint/internal/domain"
+	reportdto "github.com/kespineira/harness-lint/internal/report"
 	"github.com/kespineira/harness-lint/internal/runtime"
 	"github.com/kespineira/harness-lint/internal/runtime/claude"
 	"github.com/kespineira/harness-lint/internal/runtime/codex"
@@ -168,24 +169,40 @@ func runReport(ctx context.Context, config commandConfig, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if config.json {
+		document, buildErr := reportdto.BuildReport(result, events, config.now, config.days)
+		if buildErr != nil {
+			return fmt.Errorf("build report JSON: %w", buildErr)
+		}
+		return reportdto.WriteJSON(out, document)
+	}
 	fmt.Fprintf(out, "report as-of=%s stale-days=%d\n", config.now.Format(time.RFC3339), config.days)
 	printRuntimeCounts(out, result, events, config.now)
-	printCapabilityEvidence(out, result, config.now)
-	printUsageOnly(out, result.Capabilities, events)
+	printCapabilityEvidenceWithEvents(out, result, events, config.now)
+	printDuplicateFindings(out, result)
+	printUsageOnlyWithAnalysis(out, result, events, config.now)
 	return nil
 }
 
 func runStale(ctx context.Context, config commandConfig, out io.Writer) error {
-	result, _, err := loadReport(ctx, config, config.days)
+	result, events, err := loadReport(ctx, config, config.days)
 	if err != nil {
 		return err
+	}
+	if config.json {
+		document, buildErr := reportdto.BuildStale(result, events, config.now, config.days)
+		if buildErr != nil {
+			return fmt.Errorf("build stale JSON: %w", buildErr)
+		}
+		return reportdto.WriteJSON(out, document)
 	}
 	fmt.Fprintf(out, "stale as-of=%s days=%d\n", config.now.Format(time.RFC3339), config.days)
 	if len(result.Capabilities) == 0 {
 		fmt.Fprintln(out, "no current capabilities")
 		return nil
 	}
-	printCapabilityEvidence(out, result, config.now)
+	printCapabilityEvidenceWithEvents(out, result, events, config.now)
+	printDuplicateFindings(out, result)
 	return nil
 }
 

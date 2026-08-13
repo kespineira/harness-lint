@@ -3,13 +3,13 @@ package cli
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/kespineira/harness-lint/internal/analysis"
 	"github.com/kespineira/harness-lint/internal/domain"
+	reportdto "github.com/kespineira/harness-lint/internal/report"
 )
 
 func printFinding(out io.Writer, finding domain.Finding) {
@@ -25,7 +25,7 @@ func printRuntimeCounts(out io.Writer, result analysis.Report, events []domain.U
 		installed := 0
 		configuredAdvertised := 0
 		advertisedEvents, loadedEvents, invokedEvents := 0, 0, 0
-		usedLast30, neverUsed := 0, 0
+		usedLast30, noActivityObserved := 0, 0
 		for _, event := range events {
 			if event.Runtime != runtimeName {
 				continue
@@ -48,7 +48,7 @@ func printRuntimeCounts(out io.Writer, result analysis.Report, events []domain.U
 				configuredAdvertised++
 			}
 			if evidence.ActivityCount == 0 {
-				neverUsed++
+				noActivityObserved++
 			}
 			if evidence.HasLastUsed && !evidence.LastUsedAt.Before(now.Add(-lastUsedWindow)) && !evidence.LastUsedAt.After(now) {
 				usedLast30++
@@ -60,85 +60,104 @@ func printRuntimeCounts(out io.Writer, result analysis.Report, events []domain.U
 				usageEvents++
 			}
 		}
-		fmt.Fprintf(out, "runtime=%s installed=%d advertised=%d loaded=%d invoked=%d configured-advertised=%d used-last-30d=%d never-used=%d usage-events=%d\n", runtimeName, installed, advertisedEvents, loadedEvents, invokedEvents, configuredAdvertised, usedLast30, neverUsed, usageEvents)
+		fmt.Fprintf(out, "runtime=%s installed=%d advertised=%d loaded=%d invoked=%d configured-advertised=%d used-last-30d=%d no-activity-observed=%d usage-events=%d\n", runtimeName, installed, advertisedEvents, loadedEvents, invokedEvents, configuredAdvertised, usedLast30, noActivityObserved, usageEvents)
 	}
 }
 
-func printCapabilityEvidence(out io.Writer, result analysis.Report, now time.Time) {
+func printCapabilityEvidenceWithEvents(out io.Writer, result analysis.Report, events []domain.UsageEvent, now time.Time) {
 	if len(result.Capabilities) == 0 {
 		fmt.Fprintln(out, "no current capabilities")
 		return
 	}
+	document, err := reportdto.BuildStale(result, events, now, 0)
+	if err != nil {
+		// Analyze already validates the clock. Keep this formatter defensive for
+		// direct unit callers without turning a presentation error into a panic.
+		fmt.Fprintf(out, "report evidence unavailable: %s\n", cleanText(err.Error()))
+		return
+	}
 	fmt.Fprintln(out, "capabilities:")
-	for _, evidence := range result.Capabilities {
-		lastUsed := "never"
+	for _, capability := range document.Capabilities {
 		usedLast30 := "no"
-		if evidence.HasLastUsed {
-			lastUsed = evidence.LastUsedAt.UTC().Format(time.RFC3339)
-			if !evidence.LastUsedAt.Before(now.Add(-lastUsedWindow)) && !evidence.LastUsedAt.After(now) {
+		if capability.LastInvocationAge != nil && !capability.LastInvocationInFuture {
+			if age, parseErr := time.ParseDuration(*capability.LastInvocationAge); parseErr == nil && age <= lastUsedWindow {
 				usedLast30 = "yes"
 			}
 		}
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d loaded=%d invoked=%d exposure=%s used-last-30d=%s last-used=%s evidence=%s source=%s\n", evidence.Capability.Runtime, evidence.Capability.Type, cleanText(evidence.Capability.Name), evidence.Classification, evidence.EventCount(domain.EventAdvertised), evidence.EventCount(domain.EventLoaded), evidence.EventCount(domain.EventInvoked), evidence.Capability.Advertisement, usedLast30, lastUsed, cleanText(evidence.Basis), cleanText(evidence.Capability.Source))
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d loaded=%d invocation-uses=%d distinct-sessions=%d exposure=%s used-last-30d=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s confidence=%s coverage-confidence=%s basis=%s evidence=%s\n",
+			capability.Runtime,
+			capability.Type,
+			cleanText(capability.Name),
+			capability.Status,
+			capability.Advertised,
+			capability.Loaded,
+			capability.InvocationCount,
+			capability.DistinctSessionCount,
+			capability.Advertisement,
+			usedLast30,
+			humanObservedTimestamp(capability.FirstObservedAt),
+			humanObservedTimestamp(capability.LastObservedAt),
+			humanInvocationTimestamp(capability.FirstInvocationEffectiveAt),
+			humanInvocationTimestamp(capability.LastInvocationEffectiveAt),
+			joinSources(capability.EvidenceSources),
+			capability.Confidence,
+			capability.CoverageConfidence,
+			cleanText(capability.Basis),
+			cleanText(capability.Evidence))
 	}
 }
 
-type usageKey struct {
-	runtime domain.Runtime
-	typ     domain.CapabilityType
-	name    string
+func humanObservedTimestamp(value *string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return "never observed"
+	}
+	return *value
 }
 
-func printUsageOnly(out io.Writer, installed []analysis.CapabilityEvidence, events []domain.UsageEvent) {
-	installedKeys := make(map[usageKey]struct{}, len(installed))
-	for _, evidence := range installed {
-		installedKeys[usageKey{runtime: evidence.Capability.Runtime, typ: evidence.Capability.Type, name: evidence.Capability.Name}] = struct{}{}
+func humanInvocationTimestamp(value *string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return "no invocation observed"
 	}
-	type usageCounts struct {
-		advertised int
-		loaded     int
-		invoked    int
+	return *value
+}
+
+func joinSources(sources []string) string {
+	if len(sources) == 0 {
+		return "none"
 	}
-	counts := make(map[usageKey]*usageCounts)
-	for _, event := range events {
-		key := usageKey{runtime: event.Runtime, typ: event.CapabilityType, name: event.CapabilityName}
-		if _, ok := installedKeys[key]; ok {
-			continue
-		}
-		count := counts[key]
-		if count == nil {
-			count = &usageCounts{}
-			counts[key] = count
-		}
-		switch event.EventType {
-		case domain.EventAdvertised:
-			count.advertised++
-		case domain.EventLoaded:
-			count.loaded++
-		case domain.EventInvoked:
-			count.invoked++
-		}
+	return strings.Join(sources, ",")
+}
+
+func printDuplicateFindings(out io.Writer, result analysis.Report) {
+	if len(result.Duplicates) == 0 {
+		return
 	}
-	keys := make([]usageKey, 0, len(counts))
-	for key := range counts {
-		keys = append(keys, key)
+	fmt.Fprintln(out, "findings:")
+	for _, duplicate := range result.Duplicates {
+		fmt.Fprintf(out, "  finding runtime=%s code=duplicate-capability severity=warning confidence=observed capability=%s/%s definitions=%d\n", duplicate.Runtime, duplicate.CapabilityType, cleanText(duplicate.Name), len(duplicate.Definitions))
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].runtime != keys[j].runtime {
-			return keys[i].runtime < keys[j].runtime
-		}
-		if keys[i].typ != keys[j].typ {
-			return keys[i].typ < keys[j].typ
-		}
-		return keys[i].name < keys[j].name
-	})
-	if len(keys) == 0 {
+}
+
+func printUsageOnlyWithAnalysis(out io.Writer, result analysis.Report, events []domain.UsageEvent, now time.Time) {
+	document, err := reportdto.BuildReport(result, events, now, 0)
+	if err != nil || len(document.UsageOnly) == 0 {
 		return
 	}
 	fmt.Fprintln(out, "usage-only (observed usage is not installed inventory):")
-	for _, key := range keys {
-		count := counts[key]
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d loaded=%d invoked=%d status=usage-only\n", key.runtime, key.typ, cleanText(key.name), count.advertised, count.loaded, count.invoked)
+	for _, usage := range document.UsageOnly {
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d loaded=%d invocation-uses=%d distinct-sessions=%d first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s status=usage-only\n",
+			usage.Runtime,
+			usage.Type,
+			cleanText(usage.Name),
+			usage.Advertised,
+			usage.Loaded,
+			usage.InvocationCount,
+			usage.DistinctSessionCount,
+			humanObservedTimestamp(usage.FirstObservedAt),
+			humanObservedTimestamp(usage.LastObservedAt),
+			humanInvocationTimestamp(usage.FirstInvocationEffectiveAt),
+			humanInvocationTimestamp(usage.LastInvocationEffectiveAt),
+			joinSources(usage.EvidenceSources))
 	}
 }
 
