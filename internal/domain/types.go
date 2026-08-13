@@ -186,6 +186,29 @@ func (s EnabledState) Valid() bool {
 	}
 }
 
+// AdvertisementState describes current, configured, or observed exposure of
+// an installed capability. Fully advertised means the name and metadata are
+// exposed, name-only means only the name is exposed, and not advertised also
+// covers runtime modes such as user-invocable-only or off. This is exposure
+// evidence, not proof that every model request received the capability.
+type AdvertisementState string
+
+const (
+	AdvertisementStateUnknown         AdvertisementState = "unknown"
+	AdvertisementStateFullyAdvertised AdvertisementState = "fully_advertised"
+	AdvertisementStateNameOnly        AdvertisementState = "name_only"
+	AdvertisementStateNotAdvertised   AdvertisementState = "not_advertised"
+)
+
+func (s AdvertisementState) Valid() bool {
+	switch s {
+	case AdvertisementStateUnknown, AdvertisementStateFullyAdvertised, AdvertisementStateNameOnly, AdvertisementStateNotAdvertised:
+		return true
+	default:
+		return false
+	}
+}
+
 // Capability is an installed inventory item discovered by an adapter.
 type Capability struct {
 	Runtime        Runtime
@@ -194,6 +217,7 @@ type Capability struct {
 	Scope          Scope
 	Source         string
 	Enabled        EnabledState
+	Advertisement  AdvertisementState
 	Hash           string
 	MetadataTokens Measurement
 	BodyTokens     Measurement
@@ -216,6 +240,9 @@ func (c Capability) Validate() error {
 	}
 	if !c.Enabled.Valid() {
 		return fmt.Errorf("invalid enabled state %q", c.Enabled)
+	}
+	if !c.Advertisement.Valid() {
+		return fmt.Errorf("invalid advertisement state %q", c.Advertisement)
 	}
 	measurements := []struct {
 		name  string

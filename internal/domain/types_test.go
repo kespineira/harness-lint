@@ -36,6 +36,11 @@ func TestEnumValidation(t *testing.T) {
 		{name: "enabled state disabled", valid: func() bool { return EnabledStateDisabled.Valid() }, want: true},
 		{name: "enabled state unknown", valid: func() bool { return EnabledStateUnknown.Valid() }, want: true},
 		{name: "enabled state arbitrary", valid: func() bool { return EnabledState("maybe").Valid() }, want: false},
+		{name: "advertisement state unknown", valid: func() bool { return AdvertisementStateUnknown.Valid() }, want: true},
+		{name: "advertisement state fully advertised", valid: func() bool { return AdvertisementStateFullyAdvertised.Valid() }, want: true},
+		{name: "advertisement state name only", valid: func() bool { return AdvertisementStateNameOnly.Valid() }, want: true},
+		{name: "advertisement state not advertised", valid: func() bool { return AdvertisementStateNotAdvertised.Valid() }, want: true},
+		{name: "advertisement state arbitrary", valid: func() bool { return AdvertisementState("partial").Valid() }, want: false},
 	}
 
 	for _, test := range tests {
@@ -110,6 +115,7 @@ func TestCapabilityValidation(t *testing.T) {
 		Name:           "lint",
 		Scope:          ScopeProject,
 		Enabled:        EnabledStateUnknown,
+		Advertisement:  AdvertisementStateFullyAdvertised,
 		MetadataTokens: Measurement{Value: 20, Confidence: ConfidenceObserved, Basis: "advertised metadata"},
 		BodyTokens:     Measurement{Value: 30, Confidence: ConfidenceEstimated, Basis: "advertised body estimate"},
 		FirstSeen:      firstSeen,
@@ -123,16 +129,23 @@ func TestCapabilityValidation(t *testing.T) {
 	if err := capability.Validate(); err == nil || !strings.Contains(err.Error(), "precedes") {
 		t.Fatalf("invalid seen range error = %v", err)
 	}
+
+	capability.LastSeen = capability.FirstSeen.Add(time.Minute)
+	capability.Advertisement = AdvertisementState("partial")
+	if err := capability.Validate(); err == nil || !strings.Contains(err.Error(), "advertisement state") {
+		t.Fatalf("invalid advertisement state error = %v", err)
+	}
 }
 
 func TestAdvertisedMeasurementsCanBePopulatedIndependently(t *testing.T) {
 	t.Parallel()
 	base := Capability{
-		Runtime: RuntimeCodex,
-		Type:    CapabilitySkill,
-		Name:    "lint",
-		Scope:   ScopeProject,
-		Enabled: EnabledStateUnknown,
+		Runtime:       RuntimeCodex,
+		Type:          CapabilitySkill,
+		Name:          "lint",
+		Scope:         ScopeProject,
+		Enabled:       EnabledStateUnknown,
+		Advertisement: AdvertisementStateUnknown,
 	}
 	metadataOnly := base
 	metadataOnly.MetadataTokens = Measurement{Value: 12, Confidence: ConfidenceObserved, Basis: "advertised metadata"}
@@ -158,6 +171,7 @@ func TestFindingAndDiscoveryValidation(t *testing.T) {
 			Name:           "filesystem",
 			Scope:          ScopeUser,
 			Enabled:        EnabledStateUnknown,
+			Advertisement:  AdvertisementStateUnknown,
 			MetadataTokens: Measurement{Confidence: ConfidenceUnknown},
 			BodyTokens:     Measurement{Confidence: ConfidenceUnknown},
 		}},

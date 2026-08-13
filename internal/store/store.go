@@ -189,12 +189,12 @@ func (s *Store) UpsertCapabilities(ctx context.Context, capabilities []domain.Ca
 	}
 	defer func() { _ = tx.Rollback() }()
 	const query = `INSERT INTO capabilities (
-	runtime, capability_type, name, scope, source, enabled_state, hash,
+	runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash,
 	metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis,
 	body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(runtime, capability_type, name, scope, source) DO UPDATE SET
-enabled_state = excluded.enabled_state, hash = excluded.hash,
+enabled_state = excluded.enabled_state, advertisement_state = excluded.advertisement_state, hash = excluded.hash,
 metadata_tokens_value = excluded.metadata_tokens_value, metadata_tokens_confidence = excluded.metadata_tokens_confidence, metadata_tokens_basis = excluded.metadata_tokens_basis,
 body_tokens_value = excluded.body_tokens_value, body_tokens_confidence = excluded.body_tokens_confidence, body_tokens_basis = excluded.body_tokens_basis,
 first_seen = CASE WHEN excluded.first_seen = '' THEN capabilities.first_seen WHEN capabilities.first_seen = '' OR excluded.first_seen < capabilities.first_seen THEN excluded.first_seen ELSE capabilities.first_seen END,
@@ -209,8 +209,8 @@ last_seen = CASE WHEN excluded.last_seen = '' THEN capabilities.last_seen WHEN c
 		}
 		metadata := capability.MetadataTokens
 		body := capability.BodyTokens
-		if _, err := tx.ExecContext(ctx, query, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source, capability.Enabled, capability.Hash,
-			metadata.Value, metadata.Confidence, metadata.Basis, body.Value, body.Confidence, body.Basis, firstSeen, lastSeen); err != nil {
+		if _, err := tx.ExecContext(ctx, query, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source, capability.Enabled,
+			capability.Advertisement, capability.Hash, metadata.Value, metadata.Confidence, metadata.Basis, body.Value, body.Confidence, body.Basis, firstSeen, lastSeen); err != nil {
 			return fmt.Errorf("upsert capability %q: %w", capability.Name, err)
 		}
 	}
@@ -225,7 +225,7 @@ func (s *Store) ListCapabilities(ctx context.Context) ([]domain.Capability, erro
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT runtime, capability_type, name, scope, source, enabled_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen FROM capabilities ORDER BY runtime, capability_type, name, scope, source`)
+	rows, err := s.db.QueryContext(ctx, `SELECT runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen FROM capabilities ORDER BY runtime, capability_type, name, scope, source`)
 	if err != nil {
 		return nil, fmt.Errorf("list capabilities: %w", err)
 	}
@@ -234,7 +234,7 @@ func (s *Store) ListCapabilities(ctx context.Context) ([]domain.Capability, erro
 	for rows.Next() {
 		var c domain.Capability
 		var firstSeen, lastSeen string
-		if err := rows.Scan(&c.Runtime, &c.Type, &c.Name, &c.Scope, &c.Source, &c.Enabled, &c.Hash, &c.MetadataTokens.Value, &c.MetadataTokens.Confidence, &c.MetadataTokens.Basis, &c.BodyTokens.Value, &c.BodyTokens.Confidence, &c.BodyTokens.Basis, &firstSeen, &lastSeen); err != nil {
+		if err := rows.Scan(&c.Runtime, &c.Type, &c.Name, &c.Scope, &c.Source, &c.Enabled, &c.Advertisement, &c.Hash, &c.MetadataTokens.Value, &c.MetadataTokens.Confidence, &c.MetadataTokens.Basis, &c.BodyTokens.Value, &c.BodyTokens.Confidence, &c.BodyTokens.Basis, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan capability: %w", err)
 		}
 		if firstSeen != "" {

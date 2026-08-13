@@ -27,8 +27,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "2" {
-		t.Fatalf("schema version = %q, want 2", version)
+	if version != "3" {
+		t.Fatalf("schema version = %q, want 3", version)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -178,6 +178,93 @@ func TestOpenMigratesLegacyCapabilityShape(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesV2CapabilityAdvertisementToUnknownWithoutDataLoss(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v2.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	for _, name := range []string{"001_initial.sql", "002_capability_corrections.sql"} {
+		migration, err := migrations.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.ExecContext(ctx, string(migration)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
+	}
+	firstSeen := time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)
+	lastSeen := firstSeen.Add(time.Hour)
+	if _, err := db.ExecContext(ctx, `INSERT INTO capabilities(runtime, capability_type, name, scope, source, enabled_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"codex", "skill", "lint", "project", "/v2/source", "disabled", "v2-hash", 42, "observed", "v2 metadata", 84, "exact", "v2 body", firstSeen.Format(time.RFC3339Nano), lastSeen.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed v2 capability: %v", err)
+	}
+	usageTimestamp := firstSeen.Add(30 * time.Minute)
+	if _, err := db.ExecContext(ctx, `INSERT INTO usage_events(timestamp, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		usageTimestamp.Format(time.RFC3339Nano), "codex", "v2-session", "v2-project", "tool", "terminal", "invoked", "v2-event"); err != nil {
+		t.Fatalf("seed v2 usage event: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('version', '2')`); err != nil {
+		t.Fatalf("seed v2 schema version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close v2 database: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() migration error = %v", err)
+	}
+	defer s.Close()
+	capabilities, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after migration: %v", err)
+	}
+	wantCapability := domain.Capability{
+		Runtime:       domain.RuntimeCodex,
+		Type:          domain.CapabilitySkill,
+		Name:          "lint",
+		Scope:         domain.ScopeProject,
+		Source:        "/v2/source",
+		Enabled:       domain.EnabledStateDisabled,
+		Advertisement: domain.AdvertisementStateUnknown,
+		Hash:          "v2-hash",
+		MetadataTokens: domain.Measurement{
+			Value:      42,
+			Confidence: domain.ConfidenceObserved,
+			Basis:      "v2 metadata",
+		},
+		BodyTokens: domain.Measurement{
+			Value:      84,
+			Confidence: domain.ConfidenceExact,
+			Basis:      "v2 body",
+		},
+		FirstSeen: firstSeen,
+		LastSeen:  lastSeen,
+	}
+	if len(capabilities) != 1 || !reflect.DeepEqual(capabilities[0], wantCapability) {
+		t.Fatalf("migrated capabilities = %#v, want %#v", capabilities, []domain.Capability{wantCapability})
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents() after migration: %v", err)
+	}
+	wantEvent := domain.UsageEvent{
+		Timestamp:      usageTimestamp,
+		Runtime:        domain.RuntimeCodex,
+		SessionID:      "v2-session",
+		ProjectID:      "v2-project",
+		CapabilityType: domain.CapabilityTool,
+		CapabilityName: "terminal",
+		EventType:      domain.EventInvoked,
+		Fingerprint:    "v2-event",
+	}
+	if len(events) != 1 || !reflect.DeepEqual(events[0], wantEvent) {
+		t.Fatalf("migrated usage events = %#v, want %#v", events, []domain.UsageEvent{wantEvent})
+	}
+}
+
 func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -189,6 +276,7 @@ func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 	}
 	updated := first
 	updated.Enabled = domain.EnabledStateDisabled
+	updated.Advertisement = domain.AdvertisementStateNameOnly
 	updated.Hash = "new-hash"
 	updated.MetadataTokens = domain.Measurement{Value: 999, Confidence: domain.ConfidenceExact, Basis: "latest advertised metadata"}
 	if err := s.UpsertCapabilities(ctx, []domain.Capability{updated}); err != nil {
@@ -215,8 +303,8 @@ func TestCapabilitiesUpsertIsIdempotentAndMergesObservedRange(t *testing.T) {
 		t.Fatalf("capability count = %d, want 1", len(capabilities))
 	}
 	got := capabilities[0]
-	if got.Source != withoutObservation.Source || got.Enabled != withoutObservation.Enabled || got.Hash != withoutObservation.Hash {
-		t.Fatalf("latest mutable fields = %#v, want source/enabled/hash from latest upsert", got)
+	if got.Source != withoutObservation.Source || got.Enabled != withoutObservation.Enabled || got.Advertisement != withoutObservation.Advertisement || got.Hash != withoutObservation.Hash {
+		t.Fatalf("latest mutable fields = %#v, want source/enabled/advertisement/hash from latest upsert", got)
 	}
 	if got.MetadataTokens != withoutObservation.MetadataTokens || got.BodyTokens != withoutObservation.BodyTokens {
 		t.Fatalf("latest advertised measurements = %#v/%#v, want %#v/%#v", got.MetadataTokens, got.BodyTokens, withoutObservation.MetadataTokens, withoutObservation.BodyTokens)
@@ -291,6 +379,57 @@ func TestCapabilityEnabledStatesPersistLosslessly(t *testing.T) {
 	for _, capability := range got {
 		if capability.Enabled != wantBySource[capability.Source] {
 			t.Fatalf("persisted enabled state for %q = %q, want %q", capability.Source, capability.Enabled, wantBySource[capability.Source])
+		}
+	}
+}
+
+func TestCapabilityAdvertisementStatesPersistLosslessly(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	states := []domain.AdvertisementState{
+		domain.AdvertisementStateUnknown,
+		domain.AdvertisementStateFullyAdvertised,
+		domain.AdvertisementStateNameOnly,
+		domain.AdvertisementStateNotAdvertised,
+	}
+	capabilities := make([]domain.Capability, 0, len(states))
+	wantBySource := make(map[string]domain.AdvertisementState, len(states))
+	wantEnabledBySource := make(map[string]domain.EnabledState, len(states))
+	enabledStates := []domain.EnabledState{
+		domain.EnabledStateUnknown,
+		domain.EnabledStateEnabled,
+		domain.EnabledStateDisabled,
+		domain.EnabledStateEnabled,
+	}
+	for i, state := range states {
+		name := strings.ReplaceAll(string(state), "-", "_")
+		capability := testCapability("advertisement-"+name, time.Time{}, time.Time{})
+		capability.Source = "/project/skills/advertisement-" + name
+		capability.Enabled = enabledStates[i]
+		capability.Advertisement = state
+		capabilities = append(capabilities, capability)
+		wantBySource[capability.Source] = state
+		wantEnabledBySource[capability.Source] = capability.Enabled
+	}
+	if err := s.UpsertCapabilities(ctx, capabilities); err != nil {
+		t.Fatalf("upsert advertisement states: %v", err)
+	}
+	got, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities(): %v", err)
+	}
+	if len(got) != len(states) {
+		t.Fatalf("capability count = %d, want %d", len(got), len(states))
+	}
+	for _, capability := range got {
+		if !capability.Advertisement.Valid() {
+			t.Fatalf("invalid persisted advertisement state: %#v", capability)
+		}
+		if capability.Advertisement != wantBySource[capability.Source] {
+			t.Fatalf("persisted advertisement state for %q = %q, want %q", capability.Source, capability.Advertisement, wantBySource[capability.Source])
+		}
+		if capability.Enabled != wantEnabledBySource[capability.Source] {
+			t.Fatalf("persisted enabled state for %q = %q, want %q", capability.Source, capability.Enabled, wantEnabledBySource[capability.Source])
 		}
 	}
 }
@@ -444,6 +583,7 @@ func testCapability(name string, firstSeen, lastSeen time.Time) domain.Capabilit
 		Scope:          domain.ScopeProject,
 		Source:         "test-source",
 		Enabled:        domain.EnabledStateEnabled,
+		Advertisement:  domain.AdvertisementStateFullyAdvertised,
 		Hash:           "test-hash",
 		MetadataTokens: domain.Measurement{Value: 20, Confidence: domain.ConfidenceExact, Basis: "advertised metadata"},
 		BodyTokens:     domain.Measurement{Value: 30, Confidence: domain.ConfidenceEstimated, Basis: "advertised body"},
