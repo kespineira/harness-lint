@@ -27,13 +27,6 @@ const (
 	// DefaultReviewUseCount is the maximum observed invocation count that is
 	// considered low use for the review rule.
 	DefaultReviewUseCount = 1
-
-	// DefaultStaleThreshold is a descriptive alias for DefaultStaleAfter.
-	DefaultStaleThreshold = DefaultStaleAfter
-
-	// DefaultReviewFootprintThreshold is a descriptive alias for
-	// DefaultReviewFootprintTokens.
-	DefaultReviewFootprintThreshold = DefaultReviewFootprintTokens
 )
 
 // Classification is a plain policy label. It is not an opaque score.
@@ -44,13 +37,6 @@ const (
 	REVIEW Classification = "REVIEW"
 	STALE  Classification = "STALE"
 	DEAD   Classification = "DEAD"
-
-	// Descriptive aliases make the constants convenient in callers that prefer
-	// Go-style names while retaining the doctor-facing labels above.
-	ClassificationKeep   = KEEP
-	ClassificationReview = REVIEW
-	ClassificationStale  = STALE
-	ClassificationDead   = DEAD
 )
 
 // Config controls policy boundaries used by Analyze. A zero Config is
@@ -123,11 +109,10 @@ type CapabilityEvidence struct {
 	// All three keys are present, including zero-valued keys.
 	EventCounts map[domain.EventType]int
 
-	// InvocationCount (and its descriptive UseCount alias) counts only invoked
-	// events. ActivityCount counts loaded plus invoked events and is used to
-	// distinguish a loaded-but-never-invoked definition from a dead one.
+	// InvocationCount counts only invoked events. ActivityCount counts loaded
+	// plus invoked events and is used to distinguish a loaded-but-never-invoked
+	// definition from a dead one.
 	InvocationCount      int
-	UseCount             int
 	ActivityCount        int
 	DistinctSessionCount int
 
@@ -157,10 +142,6 @@ type Report struct {
 	Context      ContextSummary
 	Duplicates   []DuplicateName
 }
-
-// AnalysisResult is a descriptive alias for callers that prefer result-style
-// naming.
-type AnalysisResult = Report
 
 // MeasurementSummary is a grouped subtotal of one compatible measurement kind
 // (advertised metadata or advertised body). Value is only the sum of known
@@ -279,11 +260,6 @@ func Analyze(capabilities []domain.Capability, events []domain.UsageEvent, confi
 	return result, nil
 }
 
-// AnalyzeCapabilities is a descriptive alias for Analyze.
-func AnalyzeCapabilities(capabilities []domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (Report, error) {
-	return Analyze(capabilities, events, config, now)
-}
-
 func analyzeCapability(capability domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (CapabilityEvidence, error) {
 	eventCounts := map[domain.EventType]int{
 		domain.EventAdvertised: 0,
@@ -309,7 +285,6 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 		Capability:           capability,
 		EventCounts:          eventCounts,
 		InvocationCount:      invocationCount,
-		UseCount:             invocationCount,
 		ActivityCount:        activityCount,
 		DistinctSessionCount: len(sessions),
 		MetadataTokens:       capability.MetadataTokens,
@@ -441,12 +416,6 @@ func SummarizeContext(capabilities []domain.Capability) (ContextSummary, error) 
 	return result, nil
 }
 
-// ContextSummaryForCapabilities is a descriptive alias for
-// SummarizeContext.
-func ContextSummaryForCapabilities(capabilities []domain.Capability) (ContextSummary, error) {
-	return SummarizeContext(capabilities)
-}
-
 func aggregateMeasurements(measurements []domain.Measurement) (MeasurementSummary, error) {
 	result := MeasurementSummary{Complete: true}
 	bases := make(map[string]struct{})
@@ -576,11 +545,6 @@ func DetectDuplicateNames(capabilities []domain.Capability) ([]DuplicateName, er
 		})
 	}
 	return result, nil
-}
-
-// FindDuplicateNames is a short alias for DetectDuplicateNames.
-func FindDuplicateNames(capabilities []domain.Capability) ([]DuplicateName, error) {
-	return DetectDuplicateNames(capabilities)
 }
 
 func definitionKey(capability domain.Capability) string {

@@ -106,8 +106,8 @@ func TestAnalyzePreservesEventTypesAndSessions(t *testing.T) {
 	if got, want := evidence.EventCounts[domain.EventInvoked], 2; got != want {
 		t.Fatalf("invoked count = %d, want %d", got, want)
 	}
-	if evidence.InvocationCount != 2 || evidence.UseCount != 2 || evidence.ActivityCount != 3 {
-		t.Fatalf("use/activity counts = %d/%d/%d, want 2/2/3", evidence.InvocationCount, evidence.UseCount, evidence.ActivityCount)
+	if evidence.InvocationCount != 2 || evidence.ActivityCount != 3 {
+		t.Fatalf("invocation/activity counts = %d/%d, want 2/3", evidence.InvocationCount, evidence.ActivityCount)
 	}
 	if evidence.DistinctSessionCount != 3 {
 		t.Fatalf("distinct session count = %d, want 3", evidence.DistinctSessionCount)
@@ -151,6 +151,51 @@ func TestAnalyzeReviewUsesConfigurableEstimatedFootprintAndLowInvocationUse(t *t
 	}
 }
 
+func TestAnalyzeReviewBoundariesAreInclusiveOnlyWhereDocumented(t *testing.T) {
+	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	config := Config{StaleAfter: 24 * time.Hour, ReviewFootprintTokens: 1000, ReviewMaxUseCount: 1}
+
+	tests := []struct {
+		name               string
+		footprint          int64
+		invocationCount    int
+		wantClassification Classification
+	}{
+		{name: "exact footprint and use thresholds review", footprint: 1000, invocationCount: 1, wantClassification: REVIEW},
+		{name: "below footprint threshold keep", footprint: 999, invocationCount: 1, wantClassification: KEEP},
+		{name: "above low-use threshold keep", footprint: 1000, invocationCount: 2, wantClassification: KEEP},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capability := testCapability(test.name)
+			capability.MetadataTokens = domain.Measurement{Value: test.footprint, Confidence: domain.ConfidenceEstimated, Basis: "tokenizer estimate"}
+			events := []domain.UsageEvent{testEvent(now.Add(-time.Hour), capability.Name, domain.EventLoaded, "session")}
+			for i := 0; i < test.invocationCount; i++ {
+				events = append(events, testEvent(now.Add(-time.Minute-time.Duration(i)), capability.Name, domain.EventInvoked, "session"))
+			}
+
+			report, err := Analyze([]domain.Capability{capability}, events, config, now)
+			if err != nil {
+				t.Fatalf("Analyze() error = %v", err)
+			}
+			if got := report.Capabilities[0].Classification; got != test.wantClassification {
+				t.Fatalf("classification = %q, want %q", got, test.wantClassification)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigUsesSixtyDayStaleThreshold(t *testing.T) {
+	config := DefaultConfig()
+	if config.StaleAfter != 60*24*time.Hour {
+		t.Fatalf("default stale threshold = %s, want 60 days", config.StaleAfter)
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("DefaultConfig().Validate() error = %v", err)
+	}
+}
+
 func TestAnalyzeReportsDuplicateDefinitionsAndDeterministicOrdering(t *testing.T) {
 	now := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 	first := testCapability("same-name")
@@ -182,6 +227,31 @@ func TestAnalyzeReportsDuplicateDefinitionsAndDeterministicOrdering(t *testing.T
 	}
 	if !reflect.DeepEqual(report, reversed) {
 		t.Fatalf("analysis is input-order dependent:\nfirst: %#v\nsecond: %#v", report, reversed)
+	}
+}
+
+func TestDetectDuplicateNamesRequiresDifferentDefinitionScopeOrSource(t *testing.T) {
+	base := testCapability("same-name")
+	sameDefinition := base
+	secondSource := base
+	secondSource.Source = "another-source"
+	secondScope := base
+	secondScope.Scope = domain.ScopeUser
+
+	duplicates, err := DetectDuplicateNames([]domain.Capability{base, sameDefinition})
+	if err != nil {
+		t.Fatalf("DetectDuplicateNames(same definition) error = %v", err)
+	}
+	if len(duplicates) != 0 {
+		t.Fatalf("same source/scope definitions reported as duplicates: %#v", duplicates)
+	}
+
+	duplicates, err = DetectDuplicateNames([]domain.Capability{base, secondSource, secondScope})
+	if err != nil {
+		t.Fatalf("DetectDuplicateNames(different definitions) error = %v", err)
+	}
+	if len(duplicates) != 1 || len(duplicates[0].Definitions) != 3 {
+		t.Fatalf("different source/scope definitions = %#v, want one group with three definitions", duplicates)
 	}
 }
 
