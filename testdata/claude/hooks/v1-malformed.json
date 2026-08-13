@@ -1,0 +1,1 @@
+{"session_id":"fixture-session-malformed","cwd":"/fixture/project","hook_event_name":"PostToolUse","tool_input":{"command":"SENTINEL_MALFORMED"}

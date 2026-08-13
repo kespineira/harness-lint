@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-session-retry",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Bash",
+  "tool_input": {"command": "SENTINEL_FAILURE_COMMAND"},
+  "tool_use_id": "toolu_fixture_retry",
+  "error": "SENTINEL_FAILURE_ERROR",
+  "is_interrupt": false,
+  "duration_ms": 12
+}

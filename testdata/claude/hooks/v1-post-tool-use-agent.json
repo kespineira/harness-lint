@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-session-agent",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "subagent_type": "fixture-explore",
+    "prompt": "SENTINEL_AGENT_PROMPT"
+  },
+  "tool_response": "SENTINEL_AGENT_RESPONSE",
+  "tool_use_id": "toolu_fixture_agent"
+}

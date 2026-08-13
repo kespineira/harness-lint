@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-session-mcp",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__fixture__search",
+  "tool_input": {"query": "SENTINEL_MCP_INPUT"},
+  "tool_response": "SENTINEL_MCP_RESPONSE",
+  "tool_use_id": "toolu_fixture_mcp"
+}

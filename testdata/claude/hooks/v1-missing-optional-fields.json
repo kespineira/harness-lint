@@ -1,0 +1,6 @@
+{
+  "session_id": "fixture-session-missing-optional",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read"
+}

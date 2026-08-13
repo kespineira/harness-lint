@@ -1,0 +1,7 @@
+{
+  "session_id": "fixture-session-subagent",
+  "cwd": "/fixture/project",
+  "hook_event_name": "SubagentStart",
+  "agent_id": "agent_fixture_stable",
+  "agent_type": "fixture-explore"
+}

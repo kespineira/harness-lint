@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-session-skill",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Skill",
+  "tool_input": {
+    "skill": "fixture-review",
+    "args": "SENTINEL_SKILL_PROMPT"
+  },
+  "tool_response": "SENTINEL_SKILL_RESPONSE",
+  "tool_use_id": "toolu_fixture_skill"
+}

@@ -1,0 +1,7 @@
+{
+  "session_id": "fixture-session-unknown",
+  "cwd": "/fixture/project",
+  "hook_event_name": "UnknownFixtureEvent",
+  "tool_name": "Bash",
+  "tool_input": {"command": "SENTINEL_UNKNOWN_INPUT"}
+}

@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-session-builtin",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "SENTINEL_TOOL_INPUT"},
+  "tool_response": {"stdout": "SENTINEL_TOOL_RESPONSE"},
+  "tool_use_id": "toolu_fixture_builtin"
+}

@@ -1,0 +1,10 @@
+{
+  "session_id": "fixture-session-explicit",
+  "cwd": "/fixture/project",
+  "hook_event_name": "UserPromptExpansion",
+  "expansion_type": "slash_command",
+  "command_name": "fixture-review",
+  "command_args": "SENTINEL_COMMAND_ARGS",
+  "command_source": "project",
+  "prompt": "SENTINEL_EXPLICIT_PROMPT"
+}

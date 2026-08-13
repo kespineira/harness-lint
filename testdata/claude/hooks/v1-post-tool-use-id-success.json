@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-session-dedup",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "SENTINEL_DEDUP_COMMAND"},
+  "tool_response": {"stdout": "SENTINEL_DEDUP_RESPONSE"},
+  "tool_use_id": "toolu_fixture_dedup"
+}

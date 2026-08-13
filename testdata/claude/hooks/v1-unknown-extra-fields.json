@@ -1,0 +1,12 @@
+{
+  "session_id": "fixture-session-extra",
+  "cwd": "/fixture/project",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Glob",
+  "tool_use_id": "toolu_fixture_extra",
+  "extra": {
+    "prompt": "SENTINEL_EXTRA_PROMPT",
+    "tool_input": {"command": "SENTINEL_EXTRA_INPUT"},
+    "tool_response": "SENTINEL_EXTRA_RESPONSE"
+  }
+}
