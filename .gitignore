@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local build output from: go build ./cmd/harness-lint
+/harness-lint
+
+# Local SQLite state and SQLite sidecars
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
