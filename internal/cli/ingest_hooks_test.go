@@ -123,6 +123,52 @@ func TestExecuteIngestRejectsUnsafeInvocationWithoutReadingPayload(t *testing.T)
 	}
 }
 
+func TestExecuteRejectsMeaninglessIngestAndHooksFlags(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "state", "harness-lint.db")
+	capturePath := filepath.Join(root, "capture.jsonl")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "ingest home before command", args: []string{"--home", filepath.Join(root, "home"), "ingest", "--runtime", "codex", "--db", dbPath}, want: "--home"},
+		{name: "ingest project", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--project", root}, want: "--project"},
+		{name: "ingest Codex home", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--codex-home", root}, want: "--codex-home"},
+		{name: "ingest Claude config", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--claude-config", root}, want: "--claude-config"},
+		{name: "ingest since", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--since", "2026-08-14T12:00:00Z"}, want: "--since"},
+		{name: "ingest days", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--days", "1"}, want: "--days"},
+		{name: "ingest hook capture", args: []string{"ingest", "--runtime", "codex", "--db", dbPath, "--hook-capture", capturePath}, want: "--hook-capture"},
+		{name: "hooks database", args: []string{"hooks", "status", "--db", dbPath}, want: "--db"},
+		{name: "hooks project", args: []string{"hooks", "status", "--project", root}, want: "--project"},
+		{name: "hooks config directory", args: []string{"hooks", "status", "--config-dir", root}, want: "--config-dir"},
+		{name: "hooks since", args: []string{"hooks", "status", "--since", "2026-08-14T12:00:00Z"}, want: "--since"},
+		{name: "hooks days", args: []string{"hooks", "status", "--days", "1"}, want: "--days"},
+		{name: "hooks hook capture", args: []string{"hooks", "status", "--hook-capture", capturePath}, want: "--hook-capture"},
+		{name: "hooks event", args: []string{"hooks", "status", "--event", "PostToolUse"}, want: "--event"},
+		{name: "hooks managed by", args: []string{"hooks", "status", "--managed-by", "harness-lint-hooks/v1"}, want: "--managed-by"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := ExecuteWithOptions(Options{
+				Home: filepath.Join(root, "home"),
+				CWD:  root,
+				Now:  func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) },
+			}, test.args, strings.NewReader(`{"prompt":"PROMPT_SENTINEL"}`), &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want rejection mentioning %q", err, test.want)
+			}
+			if stdout.Len() != 0 || strings.Contains(stdout.String()+stderr.String(), "PROMPT_SENTINEL") {
+				t.Fatalf("rejected invocation output stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("rejected ingest invocation created database: %v", err)
+	}
+}
+
 func TestExecuteHooksLifecycleAndStableJSON(t *testing.T) {
 	root := t.TempDir()
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)

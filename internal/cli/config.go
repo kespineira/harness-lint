@@ -52,8 +52,11 @@ type parsedFlags struct {
 	nowText      string
 	nowSet       bool
 	sinceText    string
+	sinceSet     bool
 	days         int
+	daysSet      bool
 	hooks        []string
+	hooksSet     bool
 	runtime      string
 	runtimeSet   bool
 	event        string
@@ -122,6 +125,12 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.managedSet = true
 		case "now":
 			result.nowSet = true
+		case "since":
+			result.sinceSet = true
+		case "days":
+			result.daysSet = true
+		case "hook-capture":
+			result.hooksSet = true
 		case "dry-run":
 			result.dryRunSet = true
 		case "json":
@@ -188,11 +197,26 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 func validateCommandFlags(command string, flags parsedFlags) error {
 	switch command {
 	case "ingest":
-		if !flags.runtimeSet || strings.TrimSpace(flags.runtime) == "" {
-			return errors.New("ingest requires --runtime claude|codex")
+		if flags.homeSet {
+			return errors.New("ingest does not accept --home")
 		}
-		if _, err := ingestRuntime(flags.runtime); err != nil {
-			return err
+		if flags.projectSet {
+			return errors.New("ingest does not accept --project")
+		}
+		if flags.codexSet {
+			return errors.New("ingest does not accept --codex-home")
+		}
+		if flags.claudeSet {
+			return errors.New("ingest does not accept --claude-config")
+		}
+		if flags.sinceSet {
+			return errors.New("ingest does not accept --since")
+		}
+		if flags.daysSet {
+			return errors.New("ingest does not accept --days")
+		}
+		if flags.hooksSet {
+			return errors.New("ingest does not accept --hook-capture")
 		}
 		if flags.nowSet {
 			return errors.New("ingest does not accept --now; observed_at comes from the local receive clock")
@@ -203,7 +227,31 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 		if flags.jsonSet {
 			return errors.New("--json is only valid for hooks status")
 		}
+		if !flags.runtimeSet || strings.TrimSpace(flags.runtime) == "" {
+			return errors.New("ingest requires --runtime claude|codex")
+		}
+		if _, err := ingestRuntime(flags.runtime); err != nil {
+			return err
+		}
 	case "hooks":
+		if flags.dbSet {
+			return errors.New("hooks does not accept --db")
+		}
+		if flags.projectSet {
+			return errors.New("hooks does not accept --project")
+		}
+		if flags.configDirSet {
+			return errors.New("hooks does not accept --config-dir")
+		}
+		if flags.sinceSet {
+			return errors.New("hooks does not accept --since")
+		}
+		if flags.daysSet {
+			return errors.New("hooks does not accept --days")
+		}
+		if flags.hooksSet {
+			return errors.New("hooks does not accept --hook-capture")
+		}
 		if flags.eventSet || flags.managedSet {
 			return errors.New("--event and --managed-by are only valid for ingest")
 		}
@@ -622,6 +670,17 @@ func writeUsage(w io.Writer) {
 }
 
 func writeCommandUsage(w io.Writer, command string) {
+	if command == "ingest" {
+		fmt.Fprintln(w, "usage: harness-lint ingest [options]")
+		fmt.Fprintln(w, "options:")
+		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
+		fmt.Fprintln(w, "  --config-dir PATH          default database configuration directory")
+		fmt.Fprintln(w, "  --runtime claude|codex     named hook runtime")
+		fmt.Fprintln(w, "  --event EVENT              documented hook event (optional)")
+		fmt.Fprintln(w, "  --managed-by harness-lint-hooks/v1")
+		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
+		return
+	}
 	if command == "hooks" {
 		fmt.Fprintln(w, "usage: harness-lint hooks <status|install|uninstall> [claude|codex] [options]")
 		fmt.Fprintln(w, "options:")
@@ -645,12 +704,6 @@ func writeCommandUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
 	fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
 	fmt.Fprintln(w, "  --now RFC3339              observation time")
-	if command == "ingest" {
-		fmt.Fprintln(w, "  --runtime claude|codex     named hook runtime")
-		fmt.Fprintln(w, "  --event EVENT              documented hook event (optional for managed hooks)")
-		fmt.Fprintln(w, "  --managed-by MARKER        require harness-lint-hooks/v1")
-		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
-	}
 }
 
 func hasCommandToken(args []string) bool {

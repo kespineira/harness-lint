@@ -458,6 +458,47 @@ func TestExecuteHelpFlagsSucceedForGlobalAndEveryCommand(t *testing.T) {
 	}
 }
 
+func TestExecuteIngestHelpListsOnlySupportedOptions(t *testing.T) {
+	for _, args := range [][]string{{"ingest", "--help"}, {"--help", "ingest"}} {
+		t.Run(strings.Join(args, "-"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if err := ExecuteWithOptions(Options{}, args, nil, &stdout, &stderr); err != nil {
+				t.Fatalf("help error = %v\nstderr=%s", err, stderr.String())
+			}
+			output := stdout.String()
+			for _, want := range []string{
+				"usage: harness-lint ingest [options]",
+				"--db PATH",
+				"--config-dir PATH",
+				"--runtime claude|codex",
+				"--event EVENT",
+				"--managed-by harness-lint-hooks/v1",
+				"stdin",
+			} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("ingest help = %q, missing %q", output, want)
+				}
+			}
+			for _, forbidden := range []string{
+				"--home",
+				"--project",
+				"--codex-home",
+				"--claude-config",
+				"--since",
+				"--days",
+				"--hook-capture",
+				"--now",
+				"--dry-run",
+				"--json",
+			} {
+				if strings.Contains(output, forbidden) {
+					t.Fatalf("ingest help = %q, unexpectedly contains %q", output, forbidden)
+				}
+			}
+		})
+	}
+}
+
 func TestCleanTextReplacesControlCharacters(t *testing.T) {
 	got := cleanText("a\nb\tc\x00d\x1b")
 	if got != "a b c d" {
