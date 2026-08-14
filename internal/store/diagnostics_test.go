@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -13,14 +14,14 @@ import (
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
-func TestStatusEmptyAndPopulatedDatabase(t *testing.T) {
+func TestDatabaseStatusEmptyAndPopulatedDatabase(t *testing.T) {
 	ctx := context.Background()
 	empty := openTestStore(t)
-	status, err := empty.Status(ctx)
+	status, err := empty.DatabaseStatus(ctx)
 	if err != nil {
-		t.Fatalf("Status(empty): %v", err)
+		t.Fatalf("DatabaseStatus(empty): %v", err)
 	}
-	if status.Path != ":memory:" || status.Schema != (SchemaStatus{Current: 6, Latest: 6}) || status.SizeBytes != nil || status.UsageEventCount != 0 || status.OldestEffectiveActivityAt != nil || status.LatestEffectiveActivityAt != nil {
+	if status.Path != ":memory:" || status.Schema != (SchemaStatus{Current: 6, Latest: 6}) || status.SizeBytes != nil || status.UsageEventCount != 0 || status.OldestObservedAt != nil || status.LatestObservedAt != nil {
 		t.Fatalf("empty status = %#v", status)
 	}
 
@@ -35,22 +36,24 @@ func TestStatusEmptyAndPopulatedDatabase(t *testing.T) {
 	first := testUsageEvent(observedFirst, "first", "invoked")
 	first.SourceTimestamp = &sourceFirst
 	second := testUsageEvent(observedFirst.Add(2*time.Hour), "second", "loaded")
+	sourceSecond := second.ObservedAt.Add(time.Hour)
+	second.SourceTimestamp = &sourceSecond
 	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{first, second}); err != nil {
 		t.Fatalf("InsertUsageEvents(): %v", err)
 	}
-	status, err = s.Status(ctx)
+	status, err = s.DatabaseStatus(ctx)
 	if err != nil {
-		t.Fatalf("Status(populated): %v", err)
+		t.Fatalf("DatabaseStatus(populated): %v", err)
 	}
 	if status.Path != path || status.Schema != (SchemaStatus{Current: 6, Latest: 6}) || status.SizeBytes == nil || *status.SizeBytes <= 0 || status.UsageEventCount != 2 {
 		t.Fatalf("populated status = %#v", status)
 	}
-	if status.OldestEffectiveActivityAt == nil || !status.OldestEffectiveActivityAt.Equal(sourceFirst) || status.LatestEffectiveActivityAt == nil || !status.LatestEffectiveActivityAt.Equal(second.ObservedAt) {
-		t.Fatalf("effective activity range = %v/%v", status.OldestEffectiveActivityAt, status.LatestEffectiveActivityAt)
+	if status.OldestObservedAt == nil || !status.OldestObservedAt.Equal(first.ObservedAt) || status.LatestObservedAt == nil || !status.LatestObservedAt.Equal(second.ObservedAt) {
+		t.Fatalf("observed range = %v/%v", status.OldestObservedAt, status.LatestObservedAt)
 	}
 }
 
-func TestCheckHealthyAndDoesNotMutateLogicalData(t *testing.T) {
+func TestCheckDatabaseHealthyAndDoesNotMutateLogicalData(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	event := testUsageEvent(time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC), "safe", "invoked")
@@ -65,9 +68,9 @@ func TestCheckHealthyAndDoesNotMutateLogicalData(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&beforeEvidence); err != nil {
 		t.Fatalf("evidence count before: %v", err)
 	}
-	result, err := s.Check(ctx)
+	result, err := s.CheckDatabase(ctx)
 	if err != nil {
-		t.Fatalf("Check(): %v", err)
+		t.Fatalf("CheckDatabase(): %v", err)
 	}
 	if !result.Healthy || result.QuickCheck != IntegrityOK || result.ForeignKeyCheck != IntegrityOK || result.Schema != IntegrityOK || len(result.Issues) != 0 {
 		t.Fatalf("healthy result = %#v", result)
@@ -85,15 +88,15 @@ func TestCheckHealthyAndDoesNotMutateLogicalData(t *testing.T) {
 	}
 }
 
-func TestCheckSeparatesForeignKeyIssues(t *testing.T) {
+func TestCheckDatabaseSeparatesForeignKeyIssues(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO usage_event_evidence(fingerprint, provenance, observed_at, invocation_origin) VALUES ('orphan', 'import', '2026-08-14T00:00:00Z', 'unknown')`); err != nil {
 		t.Fatalf("insert orphan evidence: %v", err)
 	}
-	result, err := s.Check(ctx)
+	result, err := s.CheckDatabase(ctx)
 	if err != nil {
-		t.Fatalf("Check(): %v", err)
+		t.Fatalf("CheckDatabase(): %v", err)
 	}
 	if result.Healthy || result.QuickCheck != IntegrityOK || result.ForeignKeyCheck != IntegrityIssues || result.Schema != IntegrityOK {
 		t.Fatalf("foreign-key result = %#v", result)
@@ -120,13 +123,14 @@ func TestParseIntegrityRowsIsCoarseAndBounded(t *testing.T) {
 	}
 }
 
-func TestCheckReportsUnexpectedAndMalformedSchemaVersion(t *testing.T) {
+func TestCheckDatabaseReportsUnexpectedAndMalformedSchemaVersion(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		raw  string
 		want string
 	}{
 		{name: "newer", raw: "99", want: "schema_version_newer"},
+		{name: "outdated", raw: "5", want: "schema_version_mismatch"},
 		{name: "malformed", raw: "not-a-version", want: "schema_version_invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -139,9 +143,9 @@ func TestCheckReportsUnexpectedAndMalformedSchemaVersion(t *testing.T) {
 			if _, err := db.ExecContext(ctx, `CREATE TABLE schema_meta(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL); INSERT INTO schema_meta(key, value) VALUES ('version', ?)`, test.raw); err != nil {
 				t.Fatalf("seed schema version: %v", err)
 			}
-			result, err := (&Store{db: db, path: ":memory:"}).Check(ctx)
+			result, err := (&Store{db: db, path: ":memory:"}).CheckDatabase(ctx)
 			if err != nil {
-				t.Fatalf("Check(): %v", err)
+				t.Fatalf("CheckDatabase(): %v", err)
 			}
 			if result.Healthy || result.Schema != IntegrityIssues {
 				t.Fatalf("schema result = %#v", result)
@@ -153,7 +157,25 @@ func TestCheckReportsUnexpectedAndMalformedSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestCheckReportsMalformedMigrationDefinition(t *testing.T) {
+func TestParseSchemaVersionReturnsMalformedSentinel(t *testing.T) {
+	_, err := parseSchemaVersion("not-a-version")
+	if err == nil || !errors.Is(err, ErrMalformedSchemaVersion) || !strings.Contains(err.Error(), "not-a-version") {
+		t.Fatalf("parseSchemaVersion() error = %v, want malformed sentinel and raw value", err)
+	}
+}
+
+func TestIntegrityStateValidityIsAllowListed(t *testing.T) {
+	for _, state := range []IntegrityState{IntegrityOK, IntegrityIssues, IntegrityUnavailable} {
+		if !state.Valid() {
+			t.Fatalf("IntegrityState(%q).Valid() = false", state)
+		}
+	}
+	if IntegrityState("unexpected").Valid() {
+		t.Fatal("unexpected integrity state is valid")
+	}
+}
+
+func TestCheckDatabaseReportsMalformedMigrationDefinition(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	result, err := s.checkWithMigrationFS(ctx, fstest.MapFS{
@@ -167,16 +189,16 @@ func TestCheckReportsMalformedMigrationDefinition(t *testing.T) {
 	}
 }
 
-func TestCheckClosedStoreReturnsCleanError(t *testing.T) {
+func TestCheckDatabaseAndDatabaseStatusClosedStoreReturnsCleanError(t *testing.T) {
 	s := openTestStore(t)
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close(): %v", err)
 	}
-	if _, err := s.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
-		t.Fatalf("Check(closed) error = %v", err)
+	if _, err := s.CheckDatabase(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("CheckDatabase(closed) error = %v", err)
 	}
-	if _, err := s.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
-		t.Fatalf("Status(closed) error = %v", err)
+	if _, err := s.DatabaseStatus(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("DatabaseStatus(closed) error = %v", err)
 	}
 }
 

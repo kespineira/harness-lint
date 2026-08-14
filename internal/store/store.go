@@ -38,6 +38,11 @@ type SchemaStatus struct {
 	Latest  int
 }
 
+// ErrMalformedSchemaVersion identifies a schema metadata value that cannot be
+// parsed as a non-negative integer. Callers can use errors.Is while retaining
+// the actionable parse detail carried by the wrapped error.
+var ErrMalformedSchemaVersion = errors.New("malformed schema version")
+
 const sqliteBusyTimeoutMilliseconds = 5000
 
 // Store is a concurrency-safe database handle. SQLite serializes writes and
@@ -173,16 +178,16 @@ func readSchemaVersion(ctx context.Context, reader schemaVersionReader) (int, er
 
 func parseSchemaVersion(raw string) (int, error) {
 	if raw == "" {
-		return 0, errors.New("schema version is empty")
+		return 0, fmt.Errorf("%w: schema version is empty", ErrMalformedSchemaVersion)
 	}
 	for _, char := range raw {
 		if char < '0' || char > '9' {
-			return 0, fmt.Errorf("schema version %q is not a non-negative integer", raw)
+			return 0, fmt.Errorf("%w: schema version %q is not a non-negative integer", ErrMalformedSchemaVersion, raw)
 		}
 	}
 	version, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, fmt.Errorf("parse schema version %q: %w", raw, err)
+		return 0, fmt.Errorf("%w: parse schema version %q: %v", ErrMalformedSchemaVersion, raw, err)
 	}
 	return version, nil
 }

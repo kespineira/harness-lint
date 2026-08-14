@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// DatabaseStatus is the bounded metadata returned by Status. It deliberately
-// excludes the database handle and all persisted identifiers or payloads.
+// DatabaseStatus is the bounded metadata returned by Store.DatabaseStatus. It
+// deliberately excludes the database handle and all persisted identifiers or payloads.
 // SizeBytes is nil when the database is not backed by a stat-able main file
 // (for example, an in-memory database).
 type DatabaseStatus struct {
-	Path                      string
-	Schema                    SchemaStatus
-	SizeBytes                 *int64
-	UsageEventCount           int64
-	OldestEffectiveActivityAt *time.Time
-	LatestEffectiveActivityAt *time.Time
+	Path             string
+	Schema           SchemaStatus
+	SizeBytes        *int64
+	UsageEventCount  int64
+	OldestObservedAt *time.Time
+	LatestObservedAt *time.Time
 }
 
 // IntegrityState is a coarse result for one read-only integrity check.
@@ -33,6 +33,16 @@ const (
 	IntegrityUnavailable IntegrityState = "unavailable"
 )
 
+// Valid reports whether s is one of the allow-listed integrity states.
+func (s IntegrityState) Valid() bool {
+	switch s {
+	case IntegrityOK, IntegrityIssues, IntegrityUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
 const maxIntegrityIssues = 16
 
 // IntegrityIssue identifies only the kind of failed check. SQLite result rows
@@ -42,10 +52,10 @@ type IntegrityIssue struct {
 	Check string
 }
 
-// IntegrityResult reports bounded, read-only structural diagnostics. Check
+// DatabaseCheck reports bounded, read-only structural diagnostics. CheckDatabase
 // runs quick_check, foreign_key_check, and schema validation independently;
 // it never migrates, repairs, checkpoints, or otherwise mutates the database.
-type IntegrityResult struct {
+type DatabaseCheck struct {
 	Healthy         bool
 	QuickCheck      IntegrityState
 	ForeignKeyCheck IntegrityState
@@ -53,10 +63,11 @@ type IntegrityResult struct {
 	Issues          []IntegrityIssue
 }
 
-// Status returns cheap metadata about the store without running integrity
-// pragmas. A valid empty database has a zero usage count and nil activity
-// timestamps.
-func (s *Store) Status(ctx context.Context) (DatabaseStatus, error) {
+// DatabaseStatus returns cheap metadata about the store without running
+// integrity pragmas. A valid empty database has a zero usage count and nil
+// observed timestamps. The range describes retained local reception history;
+// source timestamps are intentionally excluded.
+func (s *Store) DatabaseStatus(ctx context.Context) (DatabaseStatus, error) {
 	if s.isClosed() {
 		return DatabaseStatus{}, errors.New("store is closed")
 	}
@@ -68,41 +79,40 @@ func (s *Store) Status(ctx context.Context) (DatabaseStatus, error) {
 	var count int64
 	var oldest, latest sql.NullString
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*), MIN(COALESCE(source_timestamp, observed_at)),
-		       MAX(COALESCE(source_timestamp, observed_at))
+		SELECT COUNT(*), MIN(observed_at), MAX(observed_at)
 		FROM usage_events`).Scan(&count, &oldest, &latest); err != nil {
 		return DatabaseStatus{}, fmt.Errorf("read database usage status: %w", err)
 	}
 	oldestAt, err := parseNullableTimestamp(oldest)
 	if err != nil {
-		return DatabaseStatus{}, fmt.Errorf("parse oldest activity timestamp: %w", err)
+		return DatabaseStatus{}, fmt.Errorf("parse oldest observed timestamp: %w", err)
 	}
 	latestAt, err := parseNullableTimestamp(latest)
 	if err != nil {
-		return DatabaseStatus{}, fmt.Errorf("parse latest activity timestamp: %w", err)
+		return DatabaseStatus{}, fmt.Errorf("parse latest observed timestamp: %w", err)
 	}
 	return DatabaseStatus{
-		Path:                      s.path,
-		Schema:                    schema,
-		SizeBytes:                 mainDatabaseSize(s.path),
-		UsageEventCount:           count,
-		OldestEffectiveActivityAt: oldestAt,
-		LatestEffectiveActivityAt: latestAt,
+		Path:             s.path,
+		Schema:           schema,
+		SizeBytes:        mainDatabaseSize(s.path),
+		UsageEventCount:  count,
+		OldestObservedAt: oldestAt,
+		LatestObservedAt: latestAt,
 	}, nil
 }
 
-// Check runs the three independent, read-only database diagnostics. Database
-// access failures are returned as errors; failed checks themselves are
-// represented in the bounded result so callers can inspect all checks.
-func (s *Store) Check(ctx context.Context) (IntegrityResult, error) {
+// CheckDatabase runs the three independent, read-only database diagnostics.
+// Database access failures are returned as errors; failed checks themselves
+// are represented in the bounded result so callers can inspect all checks.
+func (s *Store) CheckDatabase(ctx context.Context) (DatabaseCheck, error) {
 	if s.isClosed() {
-		return IntegrityResult{}, errors.New("store is closed")
+		return DatabaseCheck{}, errors.New("store is closed")
 	}
 	return s.checkWithMigrationFS(nonNilContext(ctx), migrations)
 }
 
-func (s *Store) checkWithMigrationFS(ctx context.Context, migrationFS fs.FS) (IntegrityResult, error) {
-	result := IntegrityResult{
+func (s *Store) checkWithMigrationFS(ctx context.Context, migrationFS fs.FS) (DatabaseCheck, error) {
+	result := DatabaseCheck{
 		QuickCheck:      IntegrityUnavailable,
 		ForeignKeyCheck: IntegrityUnavailable,
 		Schema:          IntegrityUnavailable,
@@ -110,14 +120,14 @@ func (s *Store) checkWithMigrationFS(ctx context.Context, migrationFS fs.FS) (In
 
 	quickIssues, err := readQuickCheck(ctx, s.db)
 	if err != nil {
-		return IntegrityResult{}, fmt.Errorf("run sqlite quick check: %w", err)
+		return DatabaseCheck{}, fmt.Errorf("run sqlite quick check: %w", err)
 	}
 	result.QuickCheck = stateForIssues(quickIssues)
 	result.Issues = appendBoundedIssues(result.Issues, quickIssues)
 
 	foreignKeyIssues, err := readForeignKeyCheck(ctx, s.db)
 	if err != nil {
-		return IntegrityResult{}, fmt.Errorf("run sqlite foreign key check: %w", err)
+		return DatabaseCheck{}, fmt.Errorf("run sqlite foreign key check: %w", err)
 	}
 	result.ForeignKeyCheck = stateForIssues(foreignKeyIssues)
 	result.Issues = appendBoundedIssues(result.Issues, foreignKeyIssues)
@@ -130,11 +140,11 @@ func (s *Store) checkWithMigrationFS(ctx context.Context, migrationFS fs.FS) (In
 		var current int
 		current, err = readSchemaVersion(ctx, s.db)
 		if err != nil {
-			if strings.Contains(err.Error(), "schema version") {
+			if errors.Is(err, ErrMalformedSchemaVersion) {
 				result.Schema = IntegrityIssues
 				result.Issues = appendBoundedIssues(result.Issues, []IntegrityIssue{{Check: "schema_version_invalid"}})
 			} else {
-				return IntegrityResult{}, fmt.Errorf("read schema version for integrity check: %w", err)
+				return DatabaseCheck{}, fmt.Errorf("read schema version for integrity check: %w", err)
 			}
 		}
 		if err != nil {
