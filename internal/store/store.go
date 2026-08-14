@@ -368,6 +368,12 @@ func (s *Store) RecordInventory(ctx context.Context, runtime domain.Runtime, obs
 	if err := upsertCapabilitiesTx(ctx, tx, normalized); err != nil {
 		return fmt.Errorf("record inventory capabilities: %w", err)
 	}
+	// Presence epochs are transitioned from the prior current snapshot and
+	// successful scan contents in this same transaction. They deliberately do
+	// not use capabilities.first_seen/last_seen, which are flattened M3 bounds.
+	if err := transitionPresenceEpochsTx(ctx, tx, runtime, observedAt, normalized); err != nil {
+		return fmt.Errorf("record capability presence epochs: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM current_inventory WHERE runtime = ?`, runtime); err != nil {
 		return fmt.Errorf("replace current inventory: %w", err)
 	}

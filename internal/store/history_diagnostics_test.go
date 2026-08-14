@@ -640,8 +640,8 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatus(v5 upgrade): %v", err)
 	}
-	if status != (SchemaStatus{Current: 6, Latest: 6}) {
-		t.Fatalf("v5 upgraded schema status = %#v, want 6/6", status)
+	if status != (SchemaStatus{Current: 7, Latest: 7}) {
+		t.Fatalf("v5 upgraded schema status = %#v, want 7/7", status)
 	}
 	capabilities, err := s.ListCapabilities(ctx)
 	if err != nil {
@@ -693,8 +693,8 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatus(second open): %v", err)
 	}
-	if status != (SchemaStatus{Current: 6, Latest: 6}) {
-		t.Fatalf("schema status after reopen = %#v, want 6/6", status)
+	if status != (SchemaStatus{Current: 7, Latest: 7}) {
+		t.Fatalf("schema status after reopen = %#v, want 7/7", status)
 	}
 	if err := reopened.migrate(ctx); err != nil {
 		t.Fatalf("second no-op migration: %v", err)
