@@ -59,40 +59,54 @@ type Runtime struct {
 	UsageEvents        int `json:"usage_events"`
 }
 
+// Measurement is the privacy-safe DTO for one installed definition
+// measurement. Tokens is nil when the source measurement is unknown; the
+// confidence and basis remain explicit without serializing domain.Measurement
+// or implying an exact runtime context cost.
+type Measurement struct {
+	Tokens     *int64 `json:"tokens"`
+	Confidence string `json:"confidence"`
+	Basis      string `json:"basis"`
+}
+
 // Capability contains one installed definition's analysis and safe activity
 // history.  It intentionally excludes source paths, hashes, session IDs,
 // source identities, and fingerprints.
 type Capability struct {
-	Runtime                    string    `json:"runtime"`
-	Type                       string    `json:"type"`
-	Name                       string    `json:"name"`
-	Installed                  bool      `json:"installed"`
-	Scope                      string    `json:"scope"`
-	InstalledScopes            []string  `json:"installed_scopes,omitempty"`
-	Enabled                    string    `json:"enabled"`
-	Advertisement              string    `json:"advertisement"`
-	Status                     string    `json:"status"`
-	Confidence                 string    `json:"confidence"`
-	CoverageConfidence         string    `json:"coverage_confidence"`
-	Basis                      string    `json:"basis"`
-	Evidence                   string    `json:"evidence"`
-	EvidenceSources            []string  `json:"evidence_sources"`
-	Advertised                 int       `json:"advertised"`
-	ObservedAdvertisedSessions *int      `json:"observed_advertised_sessions,omitempty"`
-	Loaded                     int       `json:"loaded"`
-	InvocationCount            int       `json:"invocation_count"`
-	DistinctSessionCount       int       `json:"distinct_sessions"`
-	FirstObservedAt            *string   `json:"first_observed_at"`
-	LastObservedAt             *string   `json:"last_observed_at"`
-	FirstEffectiveActivityAt   *string   `json:"first_effective_activity_at"`
-	LastEffectiveActivityAt    *string   `json:"last_effective_activity_at"`
-	FirstInvocationObservedAt  *string   `json:"first_invocation_observed_at"`
-	LastInvocationObservedAt   *string   `json:"last_invocation_observed_at"`
-	FirstInvocationEffectiveAt *string   `json:"first_invocation_effective_at"`
-	LastInvocationEffectiveAt  *string   `json:"last_invocation_effective_at"`
-	LastInvocationAge          *string   `json:"last_invocation_age"`
-	LastInvocationInFuture     bool      `json:"last_invocation_in_future"`
-	Coverage                   *Coverage `json:"coverage,omitempty"`
+	Runtime         string   `json:"runtime"`
+	Type            string   `json:"type"`
+	Name            string   `json:"name"`
+	Installed       bool     `json:"installed"`
+	Scope           string   `json:"scope"`
+	InstalledScopes []string `json:"installed_scopes,omitempty"`
+	Enabled         string   `json:"enabled"`
+	Advertisement   string   `json:"advertisement"`
+	// MetadataExposure describes name/description/metadata exposure only.
+	MetadataExposure Measurement `json:"metadata_exposure"`
+	// LoadedBodyFootprint describes loaded or on-load body content only.
+	LoadedBodyFootprint        Measurement `json:"loaded_body_footprint"`
+	Status                     string      `json:"status"`
+	Confidence                 string      `json:"confidence"`
+	CoverageConfidence         string      `json:"coverage_confidence"`
+	Basis                      string      `json:"basis"`
+	Evidence                   string      `json:"evidence"`
+	EvidenceSources            []string    `json:"evidence_sources"`
+	Advertised                 int         `json:"advertised"`
+	ObservedAdvertisedSessions *int        `json:"observed_advertised_sessions,omitempty"`
+	Loaded                     int         `json:"loaded"`
+	InvocationCount            int         `json:"invocation_count"`
+	DistinctSessionCount       int         `json:"distinct_sessions"`
+	FirstObservedAt            *string     `json:"first_observed_at"`
+	LastObservedAt             *string     `json:"last_observed_at"`
+	FirstEffectiveActivityAt   *string     `json:"first_effective_activity_at"`
+	LastEffectiveActivityAt    *string     `json:"last_effective_activity_at"`
+	FirstInvocationObservedAt  *string     `json:"first_invocation_observed_at"`
+	LastInvocationObservedAt   *string     `json:"last_invocation_observed_at"`
+	FirstInvocationEffectiveAt *string     `json:"first_invocation_effective_at"`
+	LastInvocationEffectiveAt  *string     `json:"last_invocation_effective_at"`
+	LastInvocationAge          *string     `json:"last_invocation_age"`
+	LastInvocationInFuture     bool        `json:"last_invocation_in_future"`
+	Coverage                   *Coverage   `json:"coverage,omitempty"`
 }
 
 // Coverage contains only nullable observation windows. It intentionally has
@@ -391,6 +405,21 @@ func validateReportAggregate(aggregate history.Aggregate) error {
 			return err
 		}
 	}
+	if aggregate.AdvertisedObservations == 0 {
+		if aggregate.ObservedAdvertisedSessions != nil {
+			return errors.New("observed advertised sessions must be nil when advertised observations are zero")
+		}
+	} else {
+		if aggregate.ObservedAdvertisedSessions == nil {
+			return errors.New("observed advertised sessions are required when advertised observations are positive")
+		}
+		if *aggregate.ObservedAdvertisedSessions <= 0 {
+			return errors.New("observed advertised sessions must be positive")
+		}
+		if *aggregate.ObservedAdvertisedSessions > aggregate.AdvertisedObservations {
+			return errors.New("observed advertised sessions exceed advertised observations")
+		}
+	}
 	seenScopes := make(map[domain.Scope]struct{}, len(aggregate.InstalledScopes))
 	for _, scope := range aggregate.InstalledScopes {
 		if !scope.Valid() {
@@ -513,6 +542,12 @@ func safeText(value string) string {
 }
 
 func looksSensitiveToken(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"sentinel", "secret", "payload", "prompt", "response", "session", "fingerprint", "source_identity", "sourceidentity"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
 	if len(value) == 64 {
 		for _, character := range value {
 			if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F')) {
@@ -543,6 +578,18 @@ func safeBasis(value string) string {
 		}
 	}
 	return strings.Join(fields, " ")
+}
+
+func measurementDTO(measurement domain.Measurement) Measurement {
+	result := Measurement{
+		Confidence: string(measurement.Confidence),
+		Basis:      safeBasis(measurement.Basis),
+	}
+	if measurement.Confidence != domain.ConfidenceUnknown {
+		value := measurement.Value
+		result.Tokens = &value
+	}
+	return result
 }
 
 func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSummary) Capability {
@@ -631,6 +678,8 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 		InstalledScopes:            scopes,
 		Enabled:                    string(evidence.Capability.Enabled),
 		Advertisement:              string(evidence.Capability.Advertisement),
+		MetadataExposure:           measurementDTO(evidence.MetadataTokens),
+		LoadedBodyFootprint:        measurementDTO(evidence.BodyTokens),
 		Status:                     string(evidence.Classification),
 		Confidence:                 string(evidence.Confidence),
 		CoverageConfidence:         string(evidence.CoverageConfidence),

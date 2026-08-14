@@ -120,6 +120,151 @@ func TestHistoryReportRejectsDuplicateAggregateKeysAndKeepsTypedAPIs(t *testing.
 	}
 }
 
+func TestHistoryReportsRejectImpossibleAdvertisedSessionEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	session := int64(1)
+	zero := int64(0)
+	tooMany := int64(2)
+	base := history.Aggregate{
+		Runtime:        domain.RuntimeCodex,
+		CapabilityType: domain.CapabilitySkill,
+		CapabilityName: "advertisement-invariant",
+	}
+	tests := []struct {
+		name      string
+		aggregate history.Aggregate
+		wantError string
+	}{
+		{
+			name:      "zero advertisements require nil sessions",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions must be nil when advertised observations are zero",
+		},
+		{
+			name:      "positive advertisements require sessions",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions are required when advertised observations are positive",
+		},
+		{
+			name:      "sessions must be positive",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions must be positive",
+		},
+		{
+			name:      "sessions cannot exceed advertisements",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions exceed advertised observations",
+		},
+	}
+	builders := []struct {
+		name  string
+		build func([]history.Aggregate) error
+	}{
+		{
+			name: "report",
+			build: func(aggregates []history.Aggregate) error {
+				_, err := BuildReportHistory(analysis.Report{}, aggregates, now, 0)
+				return err
+			},
+		},
+		{
+			name: "stale",
+			build: func(aggregates []history.Aggregate) error {
+				_, err := BuildStaleHistory(analysis.Report{}, aggregates, now, 0)
+				return err
+			},
+		},
+	}
+	for _, builder := range builders {
+		for _, test := range tests {
+			t.Run(builder.name+"/"+test.name, func(t *testing.T) {
+				if err := builder.build([]history.Aggregate{test.aggregate}); err == nil || err.Error() != test.wantError {
+					t.Fatalf("history validation error = %v, want %q", err, test.wantError)
+				}
+			})
+		}
+	}
+}
+
+func TestCapabilityMeasurementJSONKeepsIndependentSafeEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	known := reportTestCapability("known-footprint")
+	known.MetadataTokens = domain.Measurement{
+		Value:      42,
+		Confidence: domain.ConfidenceEstimated,
+		Basis:      "configured metadata /private/secret/definition.md PROMPT_SENTINEL",
+	}
+	known.BodyTokens = domain.Measurement{
+		Value:      18,
+		Confidence: domain.ConfidenceObserved,
+		Basis:      "loaded body OUTPUT_SENTINEL",
+	}
+	unknown := reportTestCapability("unknown-footprint")
+	aggregates := []history.Aggregate{
+		{Runtime: known.Runtime, CapabilityType: known.Type, CapabilityName: known.Name, Installed: true},
+		{Runtime: unknown.Runtime, CapabilityType: unknown.Type, CapabilityName: unknown.Name, Installed: true},
+	}
+	result, err := analysis.AnalyzeHistory([]domain.Capability{known, unknown}, aggregates, analysis.DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	document, err := BuildReportHistory(result, aggregates, now, 0)
+	if err != nil {
+		t.Fatalf("BuildReportHistory() error = %v", err)
+	}
+	rows := make(map[string]Capability, len(document.Capabilities))
+	for _, row := range document.Capabilities {
+		rows[row.Name] = row
+	}
+	knownRow := rows[known.Name]
+	if knownRow.MetadataExposure.Tokens == nil || *knownRow.MetadataExposure.Tokens != 42 || knownRow.MetadataExposure.Confidence != string(domain.ConfidenceEstimated) || knownRow.MetadataExposure.Basis == "" {
+		t.Fatalf("metadata exposure DTO = %#v", knownRow.MetadataExposure)
+	}
+	if knownRow.LoadedBodyFootprint.Tokens == nil || *knownRow.LoadedBodyFootprint.Tokens != 18 || knownRow.LoadedBodyFootprint.Confidence != string(domain.ConfidenceObserved) || knownRow.LoadedBodyFootprint.Basis == "" {
+		t.Fatalf("loaded body footprint DTO = %#v", knownRow.LoadedBodyFootprint)
+	}
+	if *knownRow.MetadataExposure.Tokens != 42 || *knownRow.LoadedBodyFootprint.Tokens != 18 {
+		t.Fatalf("measurement DTOs were combined or overwritten: %#v", knownRow)
+	}
+	unknownRow := rows[unknown.Name]
+	if unknownRow.MetadataExposure.Tokens != nil || unknownRow.MetadataExposure.Confidence != string(domain.ConfidenceUnknown) || unknownRow.LoadedBodyFootprint.Tokens != nil || unknownRow.LoadedBodyFootprint.Confidence != string(domain.ConfidenceUnknown) {
+		t.Fatalf("unknown measurement DTOs = %#v", unknownRow)
+	}
+
+	var raw map[string]interface{}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal report JSON: %v", err)
+	}
+	if strings.Contains(string(encoded), "/private/secret/definition.md") || strings.Contains(string(encoded), "PROMPT_SENTINEL") || strings.Contains(string(encoded), "OUTPUT_SENTINEL") {
+		t.Fatalf("report JSON contains private measurement basis sentinel: %s", encoded)
+	}
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatalf("decode report JSON: %v", err)
+	}
+	capabilities, ok := raw["capabilities"].([]interface{})
+	if !ok || len(capabilities) != 2 {
+		t.Fatalf("decoded capabilities = %#v", raw["capabilities"])
+	}
+	for _, capability := range capabilities {
+		row, ok := capability.(map[string]interface{})
+		if !ok {
+			t.Fatalf("decoded capability row = %#v", capability)
+		}
+		if row["name"] != unknown.Name {
+			continue
+		}
+		metadata, ok := row["metadata_exposure"].(map[string]interface{})
+		if !ok || metadata["tokens"] != nil || metadata["confidence"] != string(domain.ConfidenceUnknown) {
+			t.Fatalf("unknown metadata JSON = %#v", row["metadata_exposure"])
+		}
+		body, ok := row["loaded_body_footprint"].(map[string]interface{})
+		if !ok || body["tokens"] != nil || body["confidence"] != string(domain.ConfidenceUnknown) {
+			t.Fatalf("unknown body JSON = %#v", row["loaded_body_footprint"])
+		}
+	}
+}
+
 func TestHistoryReportKeepsLoadedSeparateFromInvocationTimes(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	capability := reportTestCapability("loaded-only")
@@ -180,6 +325,9 @@ func TestBuildStaleHistoryKeepsStrictClassificationBasisCoverageLimited(t *testi
 	}
 	if len(document.Capabilities) != 1 || !strings.Contains(document.Capabilities[0].Basis, "coverage") || strings.Contains(strings.ToLower(document.Capabilities[0].Basis), "complete") {
 		t.Fatalf("stale DTO basis = %#v, want strict stale basis limited by observation coverage", document.Capabilities[0])
+	}
+	if document.Capabilities[0].MetadataExposure.Tokens != nil || document.Capabilities[0].LoadedBodyFootprint.Tokens != nil {
+		t.Fatalf("stale unknown measurements = %#v, want nullable unknown values", document.Capabilities[0])
 	}
 }
 

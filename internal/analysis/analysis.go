@@ -127,8 +127,8 @@ type CapabilityEvidence struct {
 	// or proves lifetime completeness.
 	Coverage *history.Coverage
 	// ObservedAdvertisedSessions is nil when the selected history interval has
-	// no explicit advertised-event evidence. A non-nil zero is meaningful and
-	// must not be collapsed into unknown.
+	// no explicit advertised-event evidence. When advertised observations are
+	// present, this is a positive, bounded distinct-session count.
 	ObservedAdvertisedSessions *int64
 	// These aggregate timestamps are invocation-only. The event compatibility
 	// path leaves them empty and report formatting continues to summarize its
@@ -447,6 +447,21 @@ func validateAggregate(aggregate history.Aggregate) error {
 	}
 	if aggregate.ObservedAdvertisedSessions != nil && *aggregate.ObservedAdvertisedSessions > maxPlatformInt64() {
 		return errors.New("observed advertised session count does not fit int")
+	}
+	if aggregate.AdvertisedObservations == 0 {
+		if aggregate.ObservedAdvertisedSessions != nil {
+			return errors.New("observed advertised sessions must be nil when advertised observations are zero")
+		}
+	} else {
+		if aggregate.ObservedAdvertisedSessions == nil {
+			return errors.New("observed advertised sessions are required when advertised observations are positive")
+		}
+		if *aggregate.ObservedAdvertisedSessions <= 0 {
+			return errors.New("observed advertised sessions must be positive")
+		}
+		if *aggregate.ObservedAdvertisedSessions > aggregate.AdvertisedObservations {
+			return errors.New("observed advertised sessions exceed advertised observations")
+		}
 	}
 	seenScopes := make(map[domain.Scope]struct{}, len(aggregate.InstalledScopes))
 	for _, scope := range aggregate.InstalledScopes {

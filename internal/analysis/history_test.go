@@ -284,6 +284,51 @@ func TestAnalyzeHistoryAdvertisedExposureRetainsUnknownAndKnownStates(t *testing
 	}
 }
 
+func TestAnalyzeHistoryRejectsImpossibleAdvertisedSessionEvidence(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	session := int64(1)
+	zero := int64(0)
+	tooMany := int64(2)
+	base := history.Aggregate{
+		Runtime:        domain.RuntimeCodex,
+		CapabilityType: domain.CapabilitySkill,
+		CapabilityName: "advertisement-invariant",
+	}
+	tests := []struct {
+		name      string
+		aggregate history.Aggregate
+		wantError string
+	}{
+		{
+			name:      "zero advertisements require nil sessions",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions must be nil when advertised observations are zero",
+		},
+		{
+			name:      "positive advertisements require sessions",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions are required when advertised observations are positive",
+		},
+		{
+			name:      "sessions must be positive",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions must be positive",
+		},
+		{
+			name:      "sessions cannot exceed advertisements",
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany},
+			wantError: "invalid history aggregate at index 0: observed advertised sessions exceed advertised observations",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := AnalyzeHistory(nil, []history.Aggregate{test.aggregate}, DefaultConfig(), now); err == nil || err.Error() != test.wantError {
+				t.Fatalf("AnalyzeHistory() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestAnalyzeHistoryStaleUsesStrictInvocationBoundaryAndCoverageBasis(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	threshold := 60 * 24 * time.Hour
