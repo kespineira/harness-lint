@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ var supportedCommands = map[string]struct{}{
 	"context": {},
 	"stale":   {},
 	"doctor":  {},
+	"db":      {},
 }
 
 type stringListFlag []string
@@ -76,10 +78,13 @@ type parsedFlags struct {
 	dryRunSet      bool
 	json           bool
 	jsonSet        bool
+	output         string
+	outputSet      bool
 	monthly        bool
 	monthlySet     bool
 	hooksAction    string
 	hooksRuntime   string
+	dbAction       string
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, error) {
@@ -87,7 +92,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: harness-lint %s [options]\n", command)
-		fmt.Fprintln(stderr, "commands: scan, usage, report, context, stale, doctor, ingest, hooks")
+		fmt.Fprintln(stderr, "commands: scan, usage, report, context, stale, doctor, ingest, hooks, db")
 	}
 	var result parsedFlags
 	fs.StringVar(&result.dbPath, "db", "", "SQLite database path")
@@ -105,6 +110,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.StringVar(&result.managedBy, "managed-by", "", "managed hook ownership marker")
 	fs.BoolVar(&result.dryRun, "dry-run", false, "show hook changes without writing configuration")
 	fs.BoolVar(&result.json, "json", false, "render stable JSON output")
+	fs.StringVar(&result.output, "output", "", "backup destination path")
 	fs.BoolVar(&result.monthly, "monthly", false, "include UTC monthly usage evidence")
 	var hooks stringListFlag
 	fs.Var(&hooks, "hook-capture", "repeatable metadata-only hook capture path")
@@ -150,6 +156,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.dryRunSet = true
 		case "json":
 			result.jsonSet = true
+		case "output":
+			result.outputSet = true
 		case "monthly":
 			result.monthlySet = true
 		}
@@ -165,7 +173,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 // argument, while the public hooks syntax intentionally places those
 // positionals next to options.
 func parseCommandArgs(command string, args []string) (parsedFlags, []string, error) {
-	if command != "hooks" {
+	if command != "hooks" && command != "db" {
 		return parsedFlags{}, args, nil
 	}
 	var positionals []string
@@ -189,13 +197,27 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 		positionalIndexes = append(positionalIndexes, index)
 	}
 	if len(positionals) == 0 {
+		if command == "db" {
+			return parsedFlags{}, nil, errors.New("db action is required: status, check, or backup")
+		}
 		return parsedFlags{}, nil, errors.New("hooks action is required: status, test, install, or uninstall")
 	}
 	if len(positionals) > 2 {
+		if command == "db" {
+			return parsedFlags{}, nil, fmt.Errorf("unexpected db argument(s): %s", strings.Join(positionals[1:], " "))
+		}
 		return parsedFlags{}, nil, fmt.Errorf("unexpected hooks argument(s): %s", strings.Join(positionals[2:], " "))
 	}
-	result := parsedFlags{hooksAction: positionals[0]}
+	result := parsedFlags{}
+	if command == "db" {
+		result.dbAction = positionals[0]
+	} else {
+		result.hooksAction = positionals[0]
+	}
 	if len(positionals) == 2 {
+		if command == "db" {
+			return parsedFlags{}, nil, fmt.Errorf("unexpected db argument(s): %s", strings.Join(positionals[1:], " "))
+		}
 		result.hooksRuntime = positionals[1]
 	}
 	removed := make(map[int]struct{}, len(positionalIndexes))
@@ -338,8 +360,27 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 		if flags.days <= 0 {
 			return errors.New("usage --days must be greater than zero")
 		}
+	case "db":
+		if flags.homeSet || flags.projectSet || flags.codexSet || flags.claudeSet {
+			return errors.New("db does not accept runtime or project configuration flags")
+		}
+		if flags.sinceSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.hooksSet || flags.typeSet || flags.monthlySet || flags.daysSet {
+			return errors.New("db does not accept ingest, hooks, usage, or report flags")
+		}
+		switch flags.dbAction {
+		case "status", "check":
+			if flags.outputSet {
+				return errors.New("--output is only valid for db backup")
+			}
+		case "backup":
+			if flags.jsonSet {
+				return errors.New("db backup does not support --json")
+			}
+		default:
+			return fmt.Errorf("unknown db action %q (want status, check, or backup)", flags.dbAction)
+		}
 	default:
-		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.typeSet || flags.monthlySet || (flags.jsonSet && command != "report" && command != "stale") {
+		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.typeSet || flags.monthlySet || flags.outputSet || (flags.jsonSet && command != "report" && command != "stale") {
 			return fmt.Errorf("ingest or hooks flags are not valid for %s", command)
 		}
 	}
@@ -358,9 +399,85 @@ type commandConfig struct {
 	now             time.Time
 	days            int
 	json            bool
+	dataDir         string
 	lookPath        func(string) (string, error)
 	versionResolver compatibility.ExecutableResolver
 	versionRunner   compatibility.CommandRunner
+}
+
+// resolveDBConfig is intentionally narrower than resolveConfig. Database
+// diagnostics and backups do not inspect HOME, project trees, or runtime
+// configuration, and backup's data root is explicitly injectable.
+func resolveDBConfig(options Options, flags parsedFlags) (commandConfig, error) {
+	currentDir, err := resolveCurrentDirectory(options)
+	if err != nil {
+		return commandConfig{}, err
+	}
+	dbPath := ""
+	if flags.dbSet {
+		dbPath = flags.dbPath
+	} else if options.ConfigDir != "" {
+		dbPath = filepath.Join(options.ConfigDir, "harness-lint", "harness-lint.db")
+	} else if flags.configDirSet {
+		dbPath = filepath.Join(flags.configDir, "harness-lint", "harness-lint.db")
+	} else {
+		base, configErr := os.UserConfigDir()
+		if configErr != nil {
+			return commandConfig{}, errors.New("resolve user config directory")
+		}
+		dbPath = filepath.Join(base, "harness-lint", "harness-lint.db")
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return commandConfig{}, errors.New("database path is empty")
+	}
+	if dbPath != ":memory:" {
+		dbPath, err = absolutePath(dbPath, currentDir)
+		if err != nil {
+			return commandConfig{}, errors.New("resolve database path")
+		}
+	}
+	now := time.Now()
+	if options.Now != nil {
+		now = options.Now()
+	}
+	if flags.nowText != "" {
+		now, err = time.Parse(time.RFC3339Nano, flags.nowText)
+		if err != nil {
+			return commandConfig{}, errors.New("parse --now")
+		}
+	}
+	if now.IsZero() {
+		return commandConfig{}, errors.New("observation clock returned zero time")
+	}
+	dataDir := ""
+	if flags.dbAction == "backup" {
+		dataDir = options.DataDir
+		if dataDir == "" {
+			dataDir, err = userDataDirectory()
+			if err != nil {
+				return commandConfig{}, errors.New("resolve user data directory")
+			}
+		}
+		dataDir, err = absolutePath(dataDir, currentDir)
+		if err != nil {
+			return commandConfig{}, errors.New("resolve data directory")
+		}
+	}
+	return commandConfig{dbPath: dbPath, currentDir: currentDir, now: now.UTC(), json: flags.json, dataDir: dataDir}, nil
+}
+
+func userDataDirectory() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); value != "" {
+		return value, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(home, "Library", "Application Support"), nil
+	}
+	return filepath.Join(home, ".local", "share"), nil
 }
 
 func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {
@@ -792,7 +909,7 @@ func splitCommand(args []string) (string, []string, error) {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			return "", nil, unknownCommandError(args[0])
 		}
-		return "", nil, errors.New("a command is required: scan, usage, report, context, stale, doctor, ingest, or hooks")
+		return "", nil, errors.New("a command is required: scan, usage, report, context, stale, doctor, ingest, hooks, or db")
 	}
 	command := args[commandIndex]
 	commandArgs := append([]string(nil), args[:commandIndex]...)
@@ -801,12 +918,12 @@ func splitCommand(args []string) (string, []string, error) {
 }
 
 func unknownCommandError(command string) error {
-	return fmt.Errorf("unknown command %q (want scan, usage, report, context, stale, doctor, ingest, or hooks)", command)
+	return fmt.Errorf("unknown command %q (want scan, usage, report, context, stale, doctor, ingest, hooks, or db)", command)
 }
 
 func consumesValueFlag(arg string) bool {
 	switch arg {
-	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-type", "--type", "-event", "--event", "-managed-by", "--managed-by":
+	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-type", "--type", "-event", "--event", "-managed-by", "--managed-by", "-output", "--output":
 		return true
 	default:
 		return false
@@ -814,8 +931,8 @@ func consumesValueFlag(arg string) bool {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks> [options]")
-	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks")
+	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks|db> [options]")
+	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks, db")
 	fmt.Fprintln(w, "use harness-lint <command> --help for command options")
 }
 
@@ -851,6 +968,16 @@ func writeCommandUsage(w io.Writer, command string) {
 		fmt.Fprintln(w, "  --home PATH                synthetic user home")
 		fmt.Fprintln(w, "  --codex-home PATH          Codex configuration root")
 		fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
+		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
+		return
+	}
+	if command == "db" {
+		fmt.Fprintln(w, "usage: harness-lint db <status|check|backup> [options]")
+		fmt.Fprintln(w, "options:")
+		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
+		fmt.Fprintln(w, "  --config-dir PATH          default database configuration directory")
+		fmt.Fprintln(w, "  --json                     stable JSON output (status/check only)")
+		fmt.Fprintln(w, "  --output PATH              backup destination (backup only)")
 		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
 		return
 	}

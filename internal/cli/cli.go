@@ -19,8 +19,11 @@ type Options struct {
 	CWD         string
 	ProjectRoot string
 	ConfigDir   string
-	Now         func() time.Time
-	LookPath    func(string) (string, error)
+	// DataDir is the local data root used by artifact-producing commands.
+	// Injecting it keeps database backups hermetic in tests.
+	DataDir  string
+	Now      func() time.Time
+	LookPath func(string) (string, error)
 
 	// VersionResolver and VersionRunner are used only by low-frequency
 	// doctor/hooks-test diagnostics. They are deliberately absent from the
@@ -75,6 +78,7 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	}
 	parsed.hooksAction = nested.hooksAction
 	parsed.hooksRuntime = nested.hooksRuntime
+	parsed.dbAction = nested.dbAction
 	if err := validateCommandFlags(command, parsed); err != nil {
 		return err
 	}
@@ -89,6 +93,8 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	var config commandConfig
 	if command == "usage" {
 		config, err = resolveUsageConfig(options, parsed)
+	} else if command == "db" {
+		config, err = resolveDBConfig(options, parsed)
 	} else if command == "hooks" {
 		if parsed.hooksAction == "test" {
 			config, err = resolveHooksTestConfig(options, parsed)
@@ -117,6 +123,8 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		return runStale(ctx, config, stdout)
 	case "doctor":
 		return runDoctor(ctx, config, stdout)
+	case "db":
+		return runDatabase(ctx, config, parsed, stdout)
 	default:
 		return unknownCommandError(command)
 	}
