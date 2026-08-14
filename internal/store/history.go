@@ -161,6 +161,27 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 			result[index].InstalledScopes = scopes
 		}
 		result[index].Coverage = coverage[key]
+		result[index].ObservationOnlyCoverage = coverage[key]
+	}
+	effective, err := s.QueryEffectiveCoverage(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	effectiveByKey := make(map[historyKey]*history.EffectiveCoverage, len(effective))
+	for index := range effective {
+		item := effective[index]
+		effectiveByKey[historyKey{runtime: item.Key.Runtime, typ: item.Key.CapabilityType, name: item.Key.CapabilityName}] = &item
+	}
+	for index := range result {
+		key := historyKey{runtime: result[index].Runtime, typ: result[index].CapabilityType, name: result[index].CapabilityName}
+		if item, ok := effectiveByKey[key]; ok {
+			result[index].EffectiveCoverage = item
+		} else {
+			result[index].EffectiveCoverage = &history.EffectiveCoverage{
+				Key:       history.CoverageKey{Runtime: key.runtime, CapabilityType: key.typ, CapabilityName: key.name},
+				Intervals: []history.Interval{}, Status: history.CoverageUnknown,
+			}
+		}
 	}
 	return result, nil
 }
@@ -182,7 +203,19 @@ func historyUsageFilters(alias string, query history.Query) (string, []any) {
 }
 
 func historyCurrentFilters(alias string, query history.Query) (string, []any) {
-	return historyIdentityFilters(alias, "name", query)
+	conditions, args := historyIdentityConditions(alias, "name", query)
+	if query.Scope != "" {
+		conditions = append(conditions, alias+`.scope = ?`)
+		args = append(args, query.Scope)
+	}
+	if query.Source != "" {
+		conditions = append(conditions, alias+`.source = ?`)
+		args = append(args, query.Source)
+	}
+	if len(conditions) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
 func historyIdentityConditions(alias, nameColumn string, query history.Query) ([]string, []any) {

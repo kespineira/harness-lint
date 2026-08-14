@@ -13,28 +13,42 @@ import (
 
 // Query describes a closed UTC activity interval. A non-zero Start includes
 // events exactly at Start; a non-zero End includes events exactly at End. A
-// zero endpoint is unbounded. Runtime, CapabilityType, and CapabilityName
-// filters compose with the interval. Effective activity is source_timestamp
-// when trustworthy and observed_at otherwise; observed_at itself is never
-// replaced.
+// zero endpoint is unbounded. Runtime, CapabilityType, CapabilityName, Scope,
+// and Source filters compose with the interval. Effective activity is
+// source_timestamp when trustworthy and observed_at otherwise; observed_at
+// itself is never replaced. AsOf is used only by modeled coverage queries.
 type Query struct {
 	Start time.Time
 	End   time.Time
+	// AsOf is an optional modeled-coverage calculation boundary. It does not
+	// alter the historical event interval; when set, effective coverage is
+	// clipped at the earlier of End and AsOf. A clipped result remains partial.
+	AsOf time.Time
 
 	Runtime        domain.Runtime
 	CapabilityType domain.CapabilityType
 	CapabilityName string
+	// Scope and Source narrow effective capability-presence evidence. Usage
+	// events do not carry these fields, so they do not affect event buckets.
+	Scope  domain.Scope
+	Source string
 }
 
 func (q Query) Validate() error {
 	if !q.Start.IsZero() && !q.End.IsZero() && q.End.Before(q.Start) {
 		return errors.New("history query end precedes start")
 	}
+	if !q.AsOf.IsZero() && !q.Start.IsZero() && q.AsOf.Before(q.Start) {
+		return errors.New("history query as-of precedes start")
+	}
 	if q.Runtime != "" && !q.Runtime.Valid() {
 		return fmt.Errorf("invalid history runtime %q", q.Runtime)
 	}
 	if q.CapabilityType != "" && !q.CapabilityType.Valid() {
 		return fmt.Errorf("invalid history capability type %q", q.CapabilityType)
+	}
+	if q.Scope != "" && !q.Scope.Valid() {
+		return fmt.Errorf("invalid history scope %q", q.Scope)
 	}
 	return nil
 }
@@ -87,7 +101,14 @@ type Aggregate struct {
 
 	Installed       bool
 	InstalledScopes []domain.Scope
-	Coverage        *Coverage
+	// Coverage is retained as the legacy observation-only evidence range. It
+	// is not a continuity claim and must not be used as effective coverage.
+	Coverage                *Coverage
+	ObservationOnlyCoverage *Coverage
+	// EffectiveCoverage is the modeled intersection of confirmed capture and
+	// matching capability-presence epochs. It is always partial or unknown;
+	// a nil value is reserved for callers that did not request this query.
+	EffectiveCoverage *EffectiveCoverage
 }
 
 // EventEvidence is one normalized evidence relation for a canonical usage
