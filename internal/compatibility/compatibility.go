@@ -11,23 +11,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kespineira/harness-lint/internal/domain"
 )
 
-// Runtime identifies a locally detectable runtime. Keep this type local to
-// the package so version checks do not become part of the ingestion contract.
-type Runtime string
-
-const (
-	RuntimeClaudeCode Runtime = "claude-code"
-	RuntimeCodex      Runtime = "codex"
-)
-
-func (r Runtime) executable() string {
-	switch r {
-	case RuntimeClaudeCode:
+func executableFor(runtime domain.Runtime) string {
+	switch runtime {
+	case domain.RuntimeClaudeCode:
 		return "claude"
-	case RuntimeCodex:
-		return "codex-cli"
+	case domain.RuntimeCodex:
+		return "codex"
 	default:
 		return ""
 	}
@@ -187,7 +180,7 @@ const (
 // version. Version is nil for unavailable, failed, timed out, or malformed
 // command results.
 type Detection struct {
-	Runtime    Runtime
+	Runtime    domain.Runtime
 	Version    *Version
 	Status     DetectionStatus
 	Diagnostic error
@@ -203,9 +196,9 @@ type Detector struct {
 
 const DefaultVersionCommandTimeout = 2 * time.Second
 
-func (d Detector) Detect(ctx context.Context, runtime Runtime) Detection {
+func (d Detector) Detect(ctx context.Context, runtime domain.Runtime) Detection {
 	result := Detection{Runtime: runtime}
-	name := runtime.executable()
+	name := executableFor(runtime)
 	if name == "" {
 		result.Status = DetectionMissing
 		result.Diagnostic = ErrUnsupportedRuntime
@@ -298,7 +291,7 @@ func (r VersionRange) contains(version Version) bool {
 // documentation; lower bounds are optional and are the only basis for the
 // older-than-supported state.
 type Policy struct {
-	Runtime    Runtime
+	Runtime    domain.Runtime
 	Validated  []ValidatedVersion
 	Comparable *VersionRange
 	LowerBound *Version
@@ -307,7 +300,7 @@ type Policy struct {
 // Compatibility is the result of evaluating a parsed local version against a
 // policy. Version is retained for diagnostics but never contains command text.
 type Compatibility struct {
-	Runtime Runtime
+	Runtime domain.Runtime
 	Version Version
 	State   CompatibilityState
 }
@@ -317,7 +310,7 @@ type Compatibility struct {
 // documented comparable family/range and above the newest exact fact.
 func Evaluate(policy Policy, version Version) Compatibility {
 	result := Compatibility{Runtime: policy.Runtime, Version: version, State: StateUnknown}
-	if !version.valid() {
+	if executableFor(policy.Runtime) == "" || !version.valid() {
 		return result
 	}
 	for _, fact := range policy.Validated {

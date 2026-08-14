@@ -18,7 +18,7 @@ import (
 const conformanceObservedAt = "2026-08-14T12:00:00.000Z"
 
 type conformanceFixtureSuite struct {
-	runtime       string
+	runtime       domain.Runtime
 	documentation string
 	root          string
 	parse         func([]byte, time.Time) (domain.UsageEvent, error)
@@ -79,7 +79,7 @@ func TestRuntimeConformanceFixtureManifests(t *testing.T) {
 	}
 	tests := []conformanceFixtureSuite{
 		{
-			runtime:       "claude-code",
+			runtime:       domain.RuntimeClaudeCode,
 			documentation: "https://code.claude.com/docs/en/hooks",
 			root:          filepath.Join(filepath.Dir(sourceFile), "..", "..", "testdata", "claude", "hooks"),
 			parse: func(payload []byte, observedAt time.Time) (domain.UsageEvent, error) {
@@ -87,7 +87,7 @@ func TestRuntimeConformanceFixtureManifests(t *testing.T) {
 			},
 		},
 		{
-			runtime:       "codex",
+			runtime:       domain.RuntimeCodex,
 			documentation: "https://learn.chatgpt.com/docs/hooks",
 			root:          filepath.Join(filepath.Dir(sourceFile), "..", "..", "testdata", "codex", "hooks", "v1"),
 			parse: func(payload []byte, observedAt time.Time) (domain.UsageEvent, error) {
@@ -102,7 +102,7 @@ func TestRuntimeConformanceFixtureManifests(t *testing.T) {
 	}
 	for _, suite := range tests {
 		suite := suite
-		t.Run(suite.runtime, func(t *testing.T) {
+		t.Run(string(suite.runtime), func(t *testing.T) {
 			manifest := readConformanceManifest(t, suite)
 			validateConformanceManifest(t, suite, manifest)
 			assertManifestEnumeratesFixtureFiles(t, suite, manifest)
@@ -164,7 +164,7 @@ func readConformanceManifest(t *testing.T, suite conformanceFixtureSuite) confor
 
 func validateConformanceManifest(t *testing.T, suite conformanceFixtureSuite, manifest conformanceManifest) {
 	t.Helper()
-	if manifest.Runtime != suite.runtime {
+	if domain.Runtime(manifest.Runtime) != suite.runtime {
 		t.Fatalf("manifest runtime = %q, want %q", manifest.Runtime, suite.runtime)
 	}
 	if manifest.ManifestSchema != "runtime-conformance/manifest-v2" {
@@ -176,20 +176,25 @@ func validateConformanceManifest(t *testing.T, suite conformanceFixtureSuite, ma
 	if manifest.SourceDocumentationURL != suite.documentation {
 		t.Fatalf("documentation URL = %q, want %q", manifest.SourceDocumentationURL, suite.documentation)
 	}
-	if _, err := time.Parse("2006-01-02", manifest.AsOf); err != nil {
+	asOf, err := time.Parse("2006-01-02", manifest.AsOf)
+	if err != nil {
 		t.Fatalf("manifest as_of = %q is not an ISO date: %v", manifest.AsOf, err)
 	}
-	if manifest.LastValidated != manifest.AsOf {
-		t.Fatalf("manifest last_validated = %q, want same date as as_of %q", manifest.LastValidated, manifest.AsOf)
-	}
-	if _, err := time.Parse("2006-01-02", manifest.LastValidated); err != nil {
+	lastValidated, err := time.Parse("2006-01-02", manifest.LastValidated)
+	if err != nil {
 		t.Fatalf("manifest last_validated = %q is not an ISO date: %v", manifest.LastValidated, err)
+	}
+	if lastValidated.Before(asOf) {
+		t.Fatalf("manifest last_validated = %q is before as_of %q", manifest.LastValidated, manifest.AsOf)
 	}
 	if manifest.RuntimeVersion == nil && manifest.RuntimeVersionProvenance.Status != "unknown" {
 		t.Fatalf("runtime_version is unavailable but provenance status = %q, want unknown", manifest.RuntimeVersionProvenance.Status)
 	}
 	if manifest.RuntimeVersion != nil && strings.TrimSpace(*manifest.RuntimeVersion) == "" {
 		t.Fatal("manifest runtime_version must be non-empty when known")
+	}
+	if manifest.RuntimeVersion != nil && manifest.RuntimeVersionProvenance.Status != "known" {
+		t.Fatalf("runtime_version is present but provenance status = %q, want known", manifest.RuntimeVersionProvenance.Status)
 	}
 	if manifest.RuntimeVersionProvenance.Status != "unknown" && manifest.RuntimeVersionProvenance.Status != "known" {
 		t.Fatalf("unsupported runtime_version_provenance status %q", manifest.RuntimeVersionProvenance.Status)
@@ -206,8 +211,12 @@ func validateConformanceManifest(t *testing.T, suite conformanceFixtureSuite, ma
 	if manifest.DocumentationProvenance.URL != manifest.SourceDocumentationURL || !strings.HasPrefix(manifest.DocumentationProvenance.URL, "https://") {
 		t.Fatalf("documentation provenance URL = %q, want HTTPS source URL %q", manifest.DocumentationProvenance.URL, manifest.SourceDocumentationURL)
 	}
-	if _, err := time.Parse("2006-01-02", manifest.DocumentationProvenance.RetrievedAt); err != nil {
+	retrievedAt, err := time.Parse("2006-01-02", manifest.DocumentationProvenance.RetrievedAt)
+	if err != nil {
 		t.Fatalf("documentation retrieved_at = %q is not an ISO date: %v", manifest.DocumentationProvenance.RetrievedAt, err)
+	}
+	if retrievedAt.After(lastValidated) {
+		t.Fatalf("documentation retrieved_at = %q is after last_validated %q", manifest.DocumentationProvenance.RetrievedAt, manifest.LastValidated)
 	}
 	if strings.TrimSpace(manifest.DocumentationProvenance.ReleaseScope) == "" {
 		t.Fatal("documentation provenance release_scope is empty")
@@ -321,7 +330,7 @@ func assertConformanceEvent(t *testing.T, suite conformanceFixtureSuite, fixture
 	if err := event.Validate(); err != nil {
 		t.Fatalf("fixture %q normalized event is invalid: %v", fixture.File, err)
 	}
-	if event.Runtime != domain.Runtime(suite.runtime) {
+	if event.Runtime != suite.runtime {
 		t.Fatalf("fixture %q runtime = %q, want %q", fixture.File, event.Runtime, suite.runtime)
 	}
 	if event.EventType != domain.EventInvoked || event.Provenance != domain.ProvenanceHook {
