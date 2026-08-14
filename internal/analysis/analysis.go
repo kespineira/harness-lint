@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
 )
 
 const (
@@ -115,6 +116,27 @@ func (c Config) withDefaults() (Config, error) {
 type CapabilityEvidence struct {
 	// Capability is the installed definition represented by this row.
 	Capability domain.Capability
+	// Installed is kept separate from configured and observed advertisement.
+	// The aggregate history path sets this from the current capability input;
+	// usage-only aggregates are intentionally not projected onto this slice.
+	Installed bool
+	// InstalledScopes is the safe, normalized scope set supplied by history.
+	// It is kept separate from event evidence because usage rows have no scope.
+	InstalledScopes []domain.Scope
+	// Coverage is an observation window only. It never establishes continuity
+	// or proves lifetime completeness.
+	Coverage *history.Coverage
+	// ObservedAdvertisedSessions is nil when the selected history interval has
+	// no explicit advertised-event evidence. A non-nil zero is meaningful and
+	// must not be collapsed into unknown.
+	ObservedAdvertisedSessions *int64
+	// These aggregate timestamps are invocation-only. The event compatibility
+	// path leaves them empty and report formatting continues to summarize its
+	// complete event wrapper separately.
+	FirstObservedAt          *time.Time
+	LastObservedAt           *time.Time
+	FirstEffectiveActivityAt *time.Time
+	LastEffectiveActivityAt  *time.Time
 
 	// EventCounts keeps advertised, loaded, and invoked observations separate.
 	// All three keys are present, including zero-valued keys.
@@ -233,9 +255,29 @@ type capabilityKey struct {
 }
 
 // Analyze validates inputs and returns deterministic per-definition evidence,
-// context totals, and duplicate-name findings. now is explicit so repeated
-// runs at the same instant produce identical ages and classifications.
-func Analyze(capabilities []domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (Report, error) {
+// context totals, and duplicate-name findings. The observations argument is
+// normally []history.Aggregate. []domain.UsageEvent remains accepted only as
+// a compatibility wrapper for the pre-aggregate CLI/tests; normal report and
+// stale callers should pass the aggregate result of QueryInvocationHistory.
+// now is explicit so repeated runs at the same instant produce identical ages
+// and classifications.
+func Analyze(capabilities []domain.Capability, observations any, config Config, now time.Time) (Report, error) {
+	switch values := observations.(type) {
+	case nil:
+		return AnalyzeHistory(capabilities, nil, config, now)
+	case []history.Aggregate:
+		return AnalyzeHistory(capabilities, values, config, now)
+	case []domain.UsageEvent:
+		return AnalyzeEvents(capabilities, values, config, now)
+	default:
+		return Report{}, fmt.Errorf("unsupported analysis observations %T; want []history.Aggregate", observations)
+	}
+}
+
+// AnalyzeEvents is the compatibility wrapper for callers that still have the
+// complete normalized event table. New report/stale paths must use
+// AnalyzeHistory so they do not load that table.
+func AnalyzeEvents(capabilities []domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (Report, error) {
 	config, err := config.withDefaults()
 	if err != nil {
 		return Report{}, fmt.Errorf("invalid analysis config: %w", err)
@@ -293,6 +335,429 @@ func Analyze(capabilities []domain.Capability, events []domain.UsageEvent, confi
 		result.Capabilities = append(result.Capabilities, evidence)
 	}
 	return result, nil
+}
+
+// AnalyzeHistory analyzes the bounded, runtime-neutral aggregate contract.
+// Aggregates contain invocation-only timestamps and provenance subtotals, so
+// this path never treats an advertised or loaded observation as a use and
+// never requires the complete usage event table.
+func AnalyzeHistory(capabilities []domain.Capability, aggregates []history.Aggregate, config Config, now time.Time) (Report, error) {
+	config, err := config.withDefaults()
+	if err != nil {
+		return Report{}, fmt.Errorf("invalid analysis config: %w", err)
+	}
+	if now.IsZero() {
+		return Report{}, errors.New("analysis time is required")
+	}
+	now = now.UTC()
+
+	orderedCapabilities := append([]domain.Capability(nil), capabilities...)
+	for index, capability := range orderedCapabilities {
+		if err := capability.Validate(); err != nil {
+			return Report{}, fmt.Errorf("invalid capability at index %d (%q): %w", index, capability.Name, err)
+		}
+	}
+	orderedAggregates, err := normalizeAggregates(aggregates)
+	if err != nil {
+		return Report{}, err
+	}
+	sort.SliceStable(orderedCapabilities, func(i, j int) bool {
+		return capabilityLess(orderedCapabilities[i], orderedCapabilities[j])
+	})
+
+	duplicates, err := DetectDuplicateNames(orderedCapabilities)
+	if err != nil {
+		return Report{}, err
+	}
+	context, err := SummarizeContext(orderedCapabilities)
+	if err != nil {
+		return Report{}, err
+	}
+
+	byKey := make(map[capabilityKey]history.Aggregate, len(orderedAggregates))
+	for _, aggregate := range orderedAggregates {
+		key := capabilityKey{runtime: aggregate.Runtime, typ: aggregate.CapabilityType, name: aggregate.CapabilityName}
+		byKey[key] = aggregate
+	}
+
+	result := Report{
+		Capabilities: make([]CapabilityEvidence, 0, len(orderedCapabilities)),
+		Context:      context,
+		Duplicates:   duplicates,
+	}
+	for _, capability := range orderedCapabilities {
+		key := capabilityKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name}
+		aggregate, found := byKey[key]
+		evidence, err := analyzeAggregate(capability, aggregateOrZero(aggregate, found), found, config, now)
+		if err != nil {
+			return Report{}, fmt.Errorf("analyze capability %q: %w", capability.Name, err)
+		}
+		result.Capabilities = append(result.Capabilities, evidence)
+	}
+	return result, nil
+}
+
+func aggregateOrZero(aggregate history.Aggregate, found bool) history.Aggregate {
+	if !found {
+		return history.Aggregate{}
+	}
+	return aggregate
+}
+
+func normalizeAggregates(input []history.Aggregate) ([]history.Aggregate, error) {
+	ordered := append([]history.Aggregate(nil), input...)
+	for index, aggregate := range ordered {
+		if err := validateAggregate(aggregate); err != nil {
+			return nil, fmt.Errorf("invalid history aggregate at index %d: %w", index, err)
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return aggregateLess(ordered[i], ordered[j])
+	})
+	if len(ordered) < 2 {
+		return ordered, nil
+	}
+	merged := make([]history.Aggregate, 0, len(ordered))
+	for _, aggregate := range ordered {
+		if len(merged) == 0 || !sameAggregateKey(merged[len(merged)-1], aggregate) {
+			merged = append(merged, cloneAggregate(aggregate))
+			continue
+		}
+		if err := mergeAggregate(&merged[len(merged)-1], aggregate); err != nil {
+			return nil, err
+		}
+	}
+	return merged, nil
+}
+
+func validateAggregate(aggregate history.Aggregate) error {
+	if !aggregate.Runtime.Valid() {
+		return fmt.Errorf("invalid runtime %q", aggregate.Runtime)
+	}
+	if !aggregate.CapabilityType.Valid() {
+		return fmt.Errorf("invalid capability type %q", aggregate.CapabilityType)
+	}
+	if strings.TrimSpace(aggregate.CapabilityName) == "" {
+		return errors.New("capability name is required")
+	}
+	if aggregate.Uses < 0 {
+		return errors.New("invocation use count cannot be negative")
+	}
+	if aggregate.DistinctInvocationSessions < 0 {
+		return errors.New("distinct invocation session count cannot be negative")
+	}
+	if aggregate.ObservedAdvertisedSessions != nil && *aggregate.ObservedAdvertisedSessions < 0 {
+		return errors.New("observed advertised session count cannot be negative")
+	}
+	for provenance, count := range aggregate.InvocationEvidence {
+		if count < 0 {
+			return fmt.Errorf("invocation evidence count for %q cannot be negative", provenance)
+		}
+	}
+	return nil
+}
+
+func aggregateLess(left, right history.Aggregate) bool {
+	if left.Runtime != right.Runtime {
+		return left.Runtime < right.Runtime
+	}
+	if left.CapabilityType != right.CapabilityType {
+		return left.CapabilityType < right.CapabilityType
+	}
+	return left.CapabilityName < right.CapabilityName
+}
+
+func sameAggregateKey(left, right history.Aggregate) bool {
+	return left.Runtime == right.Runtime && left.CapabilityType == right.CapabilityType && left.CapabilityName == right.CapabilityName
+}
+
+func cloneAggregate(aggregate history.Aggregate) history.Aggregate {
+	clone := aggregate
+	clone.InvocationEvidence = make(map[domain.Provenance]int64, len(aggregate.InvocationEvidence))
+	for provenance, count := range aggregate.InvocationEvidence {
+		clone.InvocationEvidence[provenance] = count
+	}
+	clone.InstalledScopes = append([]domain.Scope(nil), aggregate.InstalledScopes...)
+	clone.ObservedAdvertisedSessions = cloneInt64Pointer(aggregate.ObservedAdvertisedSessions)
+	clone.FirstObservedAt = cloneTimePointer(aggregate.FirstObservedAt)
+	clone.LastObservedAt = cloneTimePointer(aggregate.LastObservedAt)
+	clone.FirstEffectiveActivityAt = cloneTimePointer(aggregate.FirstEffectiveActivityAt)
+	clone.LastEffectiveActivityAt = cloneTimePointer(aggregate.LastEffectiveActivityAt)
+	clone.Coverage = cloneCoverage(aggregate.Coverage)
+	return clone
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	clone := value.UTC()
+	return &clone
+}
+
+func cloneCoverage(coverage *history.Coverage) *history.Coverage {
+	if coverage == nil {
+		return nil
+	}
+	return &history.Coverage{
+		FirstInventoryObservedAt:  cloneTimePointer(coverage.FirstInventoryObservedAt),
+		LastInventoryObservedAt:   cloneTimePointer(coverage.LastInventoryObservedAt),
+		FirstUsageObservedAt:      cloneTimePointer(coverage.FirstUsageObservedAt),
+		LastUsageObservedAt:       cloneTimePointer(coverage.LastUsageObservedAt),
+		FirstDirectHookObservedAt: cloneTimePointer(coverage.FirstDirectHookObservedAt),
+		LastDirectHookObservedAt:  cloneTimePointer(coverage.LastDirectHookObservedAt),
+	}
+}
+
+func minTimePointer(left, right *time.Time) *time.Time {
+	if left == nil {
+		return cloneTimePointer(right)
+	}
+	if right == nil || !right.Before(*left) {
+		return cloneTimePointer(left)
+	}
+	return cloneTimePointer(right)
+}
+
+func maxTimePointer(left, right *time.Time) *time.Time {
+	if left == nil {
+		return cloneTimePointer(right)
+	}
+	if right == nil || !right.After(*left) {
+		return cloneTimePointer(left)
+	}
+	return cloneTimePointer(right)
+}
+
+func mergeCoverage(left, right *history.Coverage) *history.Coverage {
+	if left == nil {
+		return cloneCoverage(right)
+	}
+	if right == nil {
+		return cloneCoverage(left)
+	}
+	return &history.Coverage{
+		FirstInventoryObservedAt:  minTimePointer(left.FirstInventoryObservedAt, right.FirstInventoryObservedAt),
+		LastInventoryObservedAt:   maxTimePointer(left.LastInventoryObservedAt, right.LastInventoryObservedAt),
+		FirstUsageObservedAt:      minTimePointer(left.FirstUsageObservedAt, right.FirstUsageObservedAt),
+		LastUsageObservedAt:       maxTimePointer(left.LastUsageObservedAt, right.LastUsageObservedAt),
+		FirstDirectHookObservedAt: minTimePointer(left.FirstDirectHookObservedAt, right.FirstDirectHookObservedAt),
+		LastDirectHookObservedAt:  maxTimePointer(left.LastDirectHookObservedAt, right.LastDirectHookObservedAt),
+	}
+}
+
+func mergeAggregate(target *history.Aggregate, source history.Aggregate) error {
+	if source.Uses > maxInt64-target.Uses {
+		return errors.New("history aggregate invocation count overflows int64")
+	}
+	target.Uses += source.Uses
+	if source.DistinctInvocationSessions > maxInt64-target.DistinctInvocationSessions {
+		return errors.New("history aggregate distinct session count overflows int64")
+	}
+	target.DistinctInvocationSessions += source.DistinctInvocationSessions
+	for provenance, count := range source.InvocationEvidence {
+		if count > maxInt64-target.InvocationEvidence[provenance] {
+			return errors.New("history aggregate evidence count overflows int64")
+		}
+		target.InvocationEvidence[provenance] += count
+	}
+	target.Installed = target.Installed || source.Installed
+	target.InstalledScopes = mergeScopes(target.InstalledScopes, source.InstalledScopes)
+	mergedAdvertised, overflow := mergeOptionalCounts(target.ObservedAdvertisedSessions, source.ObservedAdvertisedSessions)
+	if overflow {
+		return errors.New("history aggregate advertised session count overflows int64")
+	}
+	target.ObservedAdvertisedSessions = mergedAdvertised
+	target.FirstObservedAt = minTimePointer(target.FirstObservedAt, source.FirstObservedAt)
+	target.LastObservedAt = maxTimePointer(target.LastObservedAt, source.LastObservedAt)
+	target.FirstEffectiveActivityAt = minTimePointer(target.FirstEffectiveActivityAt, source.FirstEffectiveActivityAt)
+	target.LastEffectiveActivityAt = maxTimePointer(target.LastEffectiveActivityAt, source.LastEffectiveActivityAt)
+	target.Coverage = mergeCoverage(target.Coverage, source.Coverage)
+	return nil
+}
+
+func mergeScopes(left, right []domain.Scope) []domain.Scope {
+	set := make(map[domain.Scope]struct{}, len(left)+len(right))
+	for _, scope := range left {
+		set[scope] = struct{}{}
+	}
+	for _, scope := range right {
+		set[scope] = struct{}{}
+	}
+	result := make([]domain.Scope, 0, len(set))
+	for scope := range set {
+		result = append(result, scope)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func mergeOptionalCounts(left, right *int64) (*int64, bool) {
+	if left == nil {
+		return cloneInt64Pointer(right), false
+	}
+	if right == nil {
+		return left, false
+	}
+	if *right > maxInt64-*left {
+		return left, true
+	}
+	value := *left + *right
+	return &value, false
+}
+
+func analyzeAggregate(capability domain.Capability, aggregate history.Aggregate, found bool, config Config, now time.Time) (CapabilityEvidence, error) {
+	invocationCount, err := safeInt(aggregate.Uses)
+	if err != nil {
+		return CapabilityEvidence{}, err
+	}
+	distinctSessions, err := safeInt(aggregate.DistinctInvocationSessions)
+	if err != nil {
+		return CapabilityEvidence{}, err
+	}
+	advertisedCount, err := safeOptionalInt(aggregate.ObservedAdvertisedSessions)
+	if err != nil {
+		return CapabilityEvidence{}, err
+	}
+	eventCounts := map[domain.EventType]int{
+		domain.EventAdvertised: advertisedCount,
+		domain.EventLoaded:     0,
+		domain.EventInvoked:    invocationCount,
+	}
+	sources := aggregateProvenanceSources(aggregate.InvocationEvidence)
+	evidence := CapabilityEvidence{
+		Capability:                 capability,
+		Installed:                  true,
+		InstalledScopes:            aggregateScopes(capability, aggregate, found),
+		Coverage:                   cloneCoverage(aggregate.Coverage),
+		ObservedAdvertisedSessions: cloneInt64Pointer(aggregate.ObservedAdvertisedSessions),
+		EventCounts:                eventCounts,
+		InvocationCount:            invocationCount,
+		// Aggregate history has no loaded-event subtotal. Keeping this at zero
+		// is deliberate: Uses remains invocation-only and loading is not inferred.
+		ActivityCount:        invocationCount,
+		DistinctSessionCount: distinctSessions,
+		EvidenceSources:      sources,
+		MetadataTokens:       capability.MetadataTokens,
+		BodyTokens:           capability.BodyTokens,
+		Confidence:           domain.ConfidenceObserved,
+		CoverageConfidence:   domain.ConfidenceUnknown,
+	}
+	if found && aggregate.Uses > 0 {
+		evidence.FirstObservedAt = cloneTimePointer(aggregate.FirstObservedAt)
+		evidence.LastObservedAt = cloneTimePointer(aggregate.LastObservedAt)
+		evidence.FirstEffectiveActivityAt = cloneTimePointer(aggregate.FirstEffectiveActivityAt)
+		evidence.LastEffectiveActivityAt = cloneTimePointer(aggregate.LastEffectiveActivityAt)
+		if evidence.FirstEffectiveActivityAt == nil {
+			evidence.FirstEffectiveActivityAt = cloneTimePointer(evidence.FirstObservedAt)
+		}
+		if evidence.LastEffectiveActivityAt == nil {
+			evidence.LastEffectiveActivityAt = cloneTimePointer(evidence.LastObservedAt)
+		}
+	}
+	if evidence.FirstEffectiveActivityAt != nil {
+		lastEffective := *evidence.FirstEffectiveActivityAt
+		if evidence.LastEffectiveActivityAt != nil {
+			lastEffective = *evidence.LastEffectiveActivityAt
+		}
+		setUseObservation(&evidence, *evidence.FirstEffectiveActivityAt, lastEffective, now)
+	}
+	evidence.EvidenceCoverage = aggregateCoverageWording(evidence, found)
+
+	classification, confidence, basis, err := classify(evidence, config)
+	if err != nil {
+		return CapabilityEvidence{}, err
+	}
+	evidence.Classification = classification
+	evidence.Confidence = confidence
+	evidence.Basis = basis
+	return evidence, nil
+}
+
+func aggregateScopes(capability domain.Capability, aggregate history.Aggregate, found bool) []domain.Scope {
+	if found && aggregate.Installed && len(aggregate.InstalledScopes) > 0 {
+		return append([]domain.Scope(nil), aggregate.InstalledScopes...)
+	}
+	return []domain.Scope{capability.Scope}
+}
+
+func aggregateProvenanceSources(counts map[domain.Provenance]int64) []domain.Provenance {
+	set := make(map[domain.Provenance]struct{}, len(counts))
+	for provenance, count := range counts {
+		if count > 0 {
+			set[provenance] = struct{}{}
+		}
+	}
+	return sortedProvenanceSources(set)
+}
+
+func aggregateCoverageWording(evidence CapabilityEvidence, found bool) string {
+	coverage := coverageDescription(evidence.Coverage)
+	if evidence.InvocationCount > 0 {
+		return fmt.Sprintf("observed invocation activity from %s; %s", provenanceWording(evidence.EvidenceSources), coverage)
+	}
+	if evidence.ObservedAdvertisedSessions != nil {
+		return fmt.Sprintf("not observed in period; advertised evidence for %d observed session(s); %s", *evidence.ObservedAdvertisedSessions, coverage)
+	}
+	if found && evidence.Coverage != nil {
+		return "not observed in period; no invocation evidence in the selected interval; " + coverage
+	}
+	return "never observed; no invocation evidence in the selected interval; " + coverageInsufficient
+}
+
+func coverageDescription(coverage *history.Coverage) string {
+	if coverage == nil {
+		return coverageUnknown
+	}
+	parts := make([]string, 0, 3)
+	if coverage.FirstInventoryObservedAt != nil || coverage.LastInventoryObservedAt != nil {
+		parts = append(parts, "inventory observations "+formatCoverageRange(coverage.FirstInventoryObservedAt, coverage.LastInventoryObservedAt))
+	}
+	if coverage.FirstUsageObservedAt != nil || coverage.LastUsageObservedAt != nil {
+		parts = append(parts, "usage observations "+formatCoverageRange(coverage.FirstUsageObservedAt, coverage.LastUsageObservedAt))
+	}
+	if coverage.FirstDirectHookObservedAt != nil || coverage.LastDirectHookObservedAt != nil {
+		parts = append(parts, "direct-hook observations "+formatCoverageRange(coverage.FirstDirectHookObservedAt, coverage.LastDirectHookObservedAt))
+	}
+	if len(parts) == 0 {
+		return coverageUnknown
+	}
+	return "coverage is observation-only (" + strings.Join(parts, "; ") + "); lifetime activity coverage is unknown"
+}
+
+func formatCoverageRange(first, last *time.Time) string {
+	if first == nil && last == nil {
+		return "unknown"
+	}
+	if first == nil {
+		return "through " + last.UTC().Format(time.RFC3339Nano)
+	}
+	if last == nil {
+		return "from " + first.UTC().Format(time.RFC3339Nano)
+	}
+	return first.UTC().Format(time.RFC3339Nano) + " to " + last.UTC().Format(time.RFC3339Nano)
+}
+
+func safeInt(value int64) (int, error) {
+	if value < 0 || value > int64(^uint(0)>>1) {
+		return 0, errors.New("history aggregate count does not fit int")
+	}
+	return int(value), nil
+}
+
+func safeOptionalInt(value *int64) (int, error) {
+	if value == nil {
+		return 0, nil
+	}
+	return safeInt(*value)
 }
 
 func analyzeCapability(capability domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (CapabilityEvidence, error) {
@@ -355,7 +820,7 @@ func classify(evidence CapabilityEvidence, config Config) (Classification, domai
 		return REVIEW, domain.ConfidenceUnknown, evidence.EvidenceCoverage, nil
 	}
 	if evidence.InvocationCount > 0 && !evidence.LastUsedInFuture && evidence.LastUsedAge > config.StaleAfter {
-		return STALE, domain.ConfidenceObserved, fmt.Sprintf("last invocation is %s older than the %s stale threshold; %s", evidence.LastUsedAge, config.StaleAfter, evidence.EvidenceCoverage), nil
+		return STALE, domain.ConfidenceObserved, fmt.Sprintf("last observed invocation is %s older than the %s stale threshold; %s", evidence.LastUsedAge, config.StaleAfter, evidence.EvidenceCoverage), nil
 	}
 	footprint, err := knownFootprint(evidence.MetadataTokens, evidence.BodyTokens)
 	if err != nil {

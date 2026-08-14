@@ -16,6 +16,7 @@ import (
 
 	"github.com/kespineira/harness-lint/internal/analysis"
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
 )
 
 const SchemaVersion = 1
@@ -62,54 +63,72 @@ type Runtime struct {
 // history.  It intentionally excludes source paths, hashes, session IDs,
 // source identities, and fingerprints.
 type Capability struct {
-	Runtime                    string   `json:"runtime"`
-	Type                       string   `json:"type"`
-	Name                       string   `json:"name"`
-	Scope                      string   `json:"scope"`
-	Enabled                    string   `json:"enabled"`
-	Advertisement              string   `json:"advertisement"`
-	Status                     string   `json:"status"`
-	Confidence                 string   `json:"confidence"`
-	CoverageConfidence         string   `json:"coverage_confidence"`
-	Basis                      string   `json:"basis"`
-	Evidence                   string   `json:"evidence"`
-	EvidenceSources            []string `json:"evidence_sources"`
-	Advertised                 int      `json:"advertised"`
-	Loaded                     int      `json:"loaded"`
-	InvocationCount            int      `json:"invocation_count"`
-	DistinctSessionCount       int      `json:"distinct_sessions"`
-	FirstObservedAt            *string  `json:"first_observed_at"`
-	LastObservedAt             *string  `json:"last_observed_at"`
-	FirstEffectiveActivityAt   *string  `json:"first_effective_activity_at"`
-	LastEffectiveActivityAt    *string  `json:"last_effective_activity_at"`
-	FirstInvocationObservedAt  *string  `json:"first_invocation_observed_at"`
-	LastInvocationObservedAt   *string  `json:"last_invocation_observed_at"`
-	FirstInvocationEffectiveAt *string  `json:"first_invocation_effective_at"`
-	LastInvocationEffectiveAt  *string  `json:"last_invocation_effective_at"`
-	LastInvocationAge          *string  `json:"last_invocation_age"`
-	LastInvocationInFuture     bool     `json:"last_invocation_in_future"`
+	Runtime                    string    `json:"runtime"`
+	Type                       string    `json:"type"`
+	Name                       string    `json:"name"`
+	Installed                  bool      `json:"installed"`
+	Scope                      string    `json:"scope"`
+	InstalledScopes            []string  `json:"installed_scopes,omitempty"`
+	Enabled                    string    `json:"enabled"`
+	Advertisement              string    `json:"advertisement"`
+	Status                     string    `json:"status"`
+	Confidence                 string    `json:"confidence"`
+	CoverageConfidence         string    `json:"coverage_confidence"`
+	Basis                      string    `json:"basis"`
+	Evidence                   string    `json:"evidence"`
+	EvidenceSources            []string  `json:"evidence_sources"`
+	Advertised                 int       `json:"advertised"`
+	ObservedAdvertisedSessions *int      `json:"observed_advertised_sessions,omitempty"`
+	Loaded                     int       `json:"loaded"`
+	InvocationCount            int       `json:"invocation_count"`
+	DistinctSessionCount       int       `json:"distinct_sessions"`
+	FirstObservedAt            *string   `json:"first_observed_at"`
+	LastObservedAt             *string   `json:"last_observed_at"`
+	FirstEffectiveActivityAt   *string   `json:"first_effective_activity_at"`
+	LastEffectiveActivityAt    *string   `json:"last_effective_activity_at"`
+	FirstInvocationObservedAt  *string   `json:"first_invocation_observed_at"`
+	LastInvocationObservedAt   *string   `json:"last_invocation_observed_at"`
+	FirstInvocationEffectiveAt *string   `json:"first_invocation_effective_at"`
+	LastInvocationEffectiveAt  *string   `json:"last_invocation_effective_at"`
+	LastInvocationAge          *string   `json:"last_invocation_age"`
+	LastInvocationInFuture     bool      `json:"last_invocation_in_future"`
+	Coverage                   *Coverage `json:"coverage,omitempty"`
+}
+
+// Coverage contains only nullable observation windows. It intentionally has
+// no paths, session identifiers, source identities, or fingerprints, and it
+// must never be interpreted as continuity or lifetime completeness.
+type Coverage struct {
+	FirstInventoryObservedAt  *string `json:"first_inventory_observed_at,omitempty"`
+	LastInventoryObservedAt   *string `json:"last_inventory_observed_at,omitempty"`
+	FirstUsageObservedAt      *string `json:"first_usage_observed_at,omitempty"`
+	LastUsageObservedAt       *string `json:"last_usage_observed_at,omitempty"`
+	FirstDirectHookObservedAt *string `json:"first_direct_hook_observed_at,omitempty"`
+	LastDirectHookObservedAt  *string `json:"last_direct_hook_observed_at,omitempty"`
 }
 
 // UsageOnly represents observed usage with no matching current inventory.
 // It keeps the same event distinctions as Capability without exposing event
 // identifiers.
 type UsageOnly struct {
-	Runtime                    string   `json:"runtime"`
-	Type                       string   `json:"type"`
-	Name                       string   `json:"name"`
-	Advertised                 int      `json:"advertised"`
-	Loaded                     int      `json:"loaded"`
-	InvocationCount            int      `json:"invocation_count"`
-	DistinctSessionCount       int      `json:"distinct_sessions"`
-	EvidenceSources            []string `json:"evidence_sources"`
-	FirstObservedAt            *string  `json:"first_observed_at"`
-	LastObservedAt             *string  `json:"last_observed_at"`
-	FirstEffectiveActivityAt   *string  `json:"first_effective_activity_at"`
-	LastEffectiveActivityAt    *string  `json:"last_effective_activity_at"`
-	FirstInvocationObservedAt  *string  `json:"first_invocation_observed_at"`
-	LastInvocationObservedAt   *string  `json:"last_invocation_observed_at"`
-	FirstInvocationEffectiveAt *string  `json:"first_invocation_effective_at"`
-	LastInvocationEffectiveAt  *string  `json:"last_invocation_effective_at"`
+	Runtime                    string    `json:"runtime"`
+	Type                       string    `json:"type"`
+	Name                       string    `json:"name"`
+	Advertised                 int       `json:"advertised"`
+	ObservedAdvertisedSessions *int      `json:"observed_advertised_sessions,omitempty"`
+	Loaded                     int       `json:"loaded"`
+	InvocationCount            int       `json:"invocation_count"`
+	DistinctSessionCount       int       `json:"distinct_sessions"`
+	EvidenceSources            []string  `json:"evidence_sources"`
+	FirstObservedAt            *string   `json:"first_observed_at"`
+	LastObservedAt             *string   `json:"last_observed_at"`
+	FirstEffectiveActivityAt   *string   `json:"first_effective_activity_at"`
+	LastEffectiveActivityAt    *string   `json:"last_effective_activity_at"`
+	FirstInvocationObservedAt  *string   `json:"first_invocation_observed_at"`
+	LastInvocationObservedAt   *string   `json:"last_invocation_observed_at"`
+	FirstInvocationEffectiveAt *string   `json:"first_invocation_effective_at"`
+	LastInvocationEffectiveAt  *string   `json:"last_invocation_effective_at"`
+	Coverage                   *Coverage `json:"coverage,omitempty"`
 }
 
 // Finding is a safe, deterministic diagnostic.  Definitions is a count, not
@@ -135,6 +154,14 @@ type observationSummary struct {
 	counts   map[domain.EventType]int
 	source   map[domain.Provenance]struct{}
 	sessions map[string]struct{}
+	// Aggregate history has no session identifiers. distinctSessions carries
+	// the already-safe subtotal without manufacturing identities.
+	distinctSessions           int
+	observedAdvertisedSessions *int64
+	coverage                   *history.Coverage
+	installed                  bool
+	installedScopes            []domain.Scope
+	aggregate                  bool
 
 	hasObserved         bool
 	firstObserved       time.Time
@@ -199,6 +226,85 @@ func (s *observationSummary) add(event domain.UsageEvent) {
 	s.hasInvocation = true
 }
 
+func (s *observationSummary) addAggregate(aggregate history.Aggregate) {
+	s.aggregate = true
+	s.installed = s.installed || aggregate.Installed
+	s.installedScopes = mergeScopes(s.installedScopes, aggregate.InstalledScopes)
+	if aggregate.ObservedAdvertisedSessions != nil {
+		value := *aggregate.ObservedAdvertisedSessions
+		s.observedAdvertisedSessions = sumOptionalCounts(s.observedAdvertisedSessions, &value)
+		s.counts[domain.EventAdvertised] = addCount(s.counts[domain.EventAdvertised], value)
+	}
+	s.counts[domain.EventInvoked] = addCount(s.counts[domain.EventInvoked], aggregate.Uses)
+	s.distinctSessions = addCount(s.distinctSessions, aggregate.DistinctInvocationSessions)
+	for provenance, count := range aggregate.InvocationEvidence {
+		if count > 0 {
+			s.source[provenance] = struct{}{}
+		}
+	}
+	if aggregate.Uses > 0 {
+		s.hasInvocation = true
+		s.hasActivity = true
+		s.firstObserved = timePointerValue(aggregate.FirstObservedAt, s.firstObserved, true)
+		s.lastObserved = timePointerValue(aggregate.LastObservedAt, s.lastObserved, false)
+		s.firstActivity = timePointerValue(aggregate.FirstEffectiveActivityAt, s.firstActivity, true)
+		s.lastActivity = timePointerValue(aggregate.LastEffectiveActivityAt, s.lastActivity, false)
+		s.firstInvocationSeen = s.firstObserved
+		s.lastInvocationSeen = s.lastObserved
+		s.firstInvocation = s.firstActivity
+		s.lastInvocation = s.lastActivity
+	}
+	s.coverage = mergeCoverage(s.coverage, aggregate.Coverage)
+}
+
+func addCount(current int, value int64) int {
+	if value <= 0 {
+		return current
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if value > maxInt || int64(current) > maxInt-value {
+		return int(maxInt)
+	}
+	return current + int(value)
+}
+
+func sumOptionalCounts(left, right *int64) *int64 {
+	if left == nil {
+		if right == nil {
+			return nil
+		}
+		value := *right
+		return &value
+	}
+	if right == nil || *right <= 0 || *left > maxInt64Value-*right {
+		value := *left
+		return &value
+	}
+	value := *left + *right
+	return &value
+}
+
+const maxInt64Value = int64(^uint64(0) >> 1)
+
+func mergeScopes(left, right []domain.Scope) []domain.Scope {
+	if len(left) == 0 && len(right) == 0 {
+		return nil
+	}
+	set := make(map[domain.Scope]struct{}, len(left)+len(right))
+	for _, scope := range left {
+		set[scope] = struct{}{}
+	}
+	for _, scope := range right {
+		set[scope] = struct{}{}
+	}
+	result := make([]domain.Scope, 0, len(set))
+	for scope := range set {
+		result = append(result, scope)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
 func (s *observationSummary) sourceNames() []string {
 	result := make([]string, 0, len(s.source))
 	for source := range s.source {
@@ -222,12 +328,111 @@ func buildSummaries(events []domain.UsageEvent) map[capabilityKey]*observationSu
 	return result
 }
 
+func buildAggregateSummaries(aggregates []history.Aggregate) map[capabilityKey]*observationSummary {
+	result := make(map[capabilityKey]*observationSummary, len(aggregates))
+	for _, aggregate := range aggregates {
+		key := capabilityKey{runtime: aggregate.Runtime, typ: aggregate.CapabilityType, name: aggregate.CapabilityName}
+		summary := result[key]
+		if summary == nil {
+			summary = newObservationSummary()
+			result[key] = summary
+		}
+		summary.addAggregate(aggregate)
+	}
+	return result
+}
+
+func timePointerValue(value *time.Time, current time.Time, minimum bool) time.Time {
+	if value == nil {
+		return current
+	}
+	clone := value.UTC()
+	if current.IsZero() {
+		return clone
+	}
+	if minimum && clone.Before(current) {
+		return clone
+	}
+	if !minimum && clone.After(current) {
+		return clone
+	}
+	return current
+}
+
 func timestamp(value time.Time, ok bool) *string {
 	if !ok || value.IsZero() {
 		return nil
 	}
 	formatted := value.UTC().Format(time.RFC3339Nano)
 	return &formatted
+}
+
+func cloneCoverage(coverage *history.Coverage) *history.Coverage {
+	if coverage == nil {
+		return nil
+	}
+	cloneTime := func(value *time.Time) *time.Time {
+		if value == nil {
+			return nil
+		}
+		cloned := value.UTC()
+		return &cloned
+	}
+	return &history.Coverage{
+		FirstInventoryObservedAt:  cloneTime(coverage.FirstInventoryObservedAt),
+		LastInventoryObservedAt:   cloneTime(coverage.LastInventoryObservedAt),
+		FirstUsageObservedAt:      cloneTime(coverage.FirstUsageObservedAt),
+		LastUsageObservedAt:       cloneTime(coverage.LastUsageObservedAt),
+		FirstDirectHookObservedAt: cloneTime(coverage.FirstDirectHookObservedAt),
+		LastDirectHookObservedAt:  cloneTime(coverage.LastDirectHookObservedAt),
+	}
+}
+
+func mergeCoverage(left, right *history.Coverage) *history.Coverage {
+	if left == nil {
+		return cloneCoverage(right)
+	}
+	if right == nil {
+		return cloneCoverage(left)
+	}
+	minTime := func(first, second *time.Time) *time.Time {
+		if first == nil {
+			if second == nil {
+				return nil
+			}
+			value := second.UTC()
+			return &value
+		}
+		if second == nil || !second.Before(*first) {
+			value := first.UTC()
+			return &value
+		}
+		value := second.UTC()
+		return &value
+	}
+	maxTime := func(first, second *time.Time) *time.Time {
+		if first == nil {
+			if second == nil {
+				return nil
+			}
+			value := second.UTC()
+			return &value
+		}
+		if second == nil || !second.After(*first) {
+			value := first.UTC()
+			return &value
+		}
+		value := second.UTC()
+		return &value
+	}
+	return &history.Coverage{
+		FirstInventoryObservedAt:  minTime(left.FirstInventoryObservedAt, right.FirstInventoryObservedAt),
+		LastInventoryObservedAt:   maxTime(left.LastInventoryObservedAt, right.LastInventoryObservedAt),
+		FirstUsageObservedAt:      minTime(left.FirstUsageObservedAt, right.FirstUsageObservedAt),
+		LastUsageObservedAt:       maxTime(left.LastUsageObservedAt, right.LastUsageObservedAt),
+		FirstDirectHookObservedAt: minTime(left.FirstDirectHookObservedAt, right.FirstDirectHookObservedAt),
+		LastDirectHookObservedAt:  maxTime(left.LastDirectHookObservedAt, right.LastDirectHookObservedAt),
+	}
 }
 
 func safeText(value string) string {
@@ -279,11 +484,86 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 	if summary == nil {
 		summary = newObservationSummary()
 	}
+	installed := evidence.Installed
+	if !installed {
+		// Every CapabilityEvidence row represents current inventory. The
+		// explicit field is still useful to aggregate callers, while this
+		// fallback keeps the legacy event wrapper's DTO compatible.
+		installed = true
+	}
+	installedScopes := evidence.InstalledScopes
+	if len(installedScopes) == 0 {
+		installedScopes = summary.installedScopes
+	}
+	if len(installedScopes) == 0 && evidence.Capability.Scope.Valid() {
+		installedScopes = []domain.Scope{evidence.Capability.Scope}
+	}
+	observedAdvertised := evidence.ObservedAdvertisedSessions
+	if observedAdvertised == nil {
+		observedAdvertised = summary.observedAdvertisedSessions
+	}
+	advertised := summary.counts[domain.EventAdvertised]
+	loaded := summary.counts[domain.EventLoaded]
+	invocationCount := evidence.InvocationCount
+	distinctSessions := evidence.DistinctSessionCount
+	firstObserved := summary.firstObserved
+	lastObserved := summary.lastObserved
+	firstActivity := summary.firstActivity
+	lastActivity := summary.lastActivity
+	hasObserved := summary.hasObserved
+	hasActivity := summary.hasActivity
+	firstInvocationSeen := summary.firstInvocationSeen
+	lastInvocationSeen := summary.lastInvocationSeen
+	firstInvocation := summary.firstInvocation
+	lastInvocation := summary.lastInvocation
+	hasInvocation := summary.hasInvocation
+	coverage := summary.coverage
+	if coverage == nil {
+		coverage = evidence.Coverage
+	}
+	if evidence.FirstObservedAt != nil {
+		firstObserved = evidence.FirstObservedAt.UTC()
+		hasObserved = true
+	}
+	if evidence.LastObservedAt != nil {
+		lastObserved = evidence.LastObservedAt.UTC()
+		hasObserved = true
+	}
+	if evidence.FirstEffectiveActivityAt != nil {
+		firstActivity = evidence.FirstEffectiveActivityAt.UTC()
+		hasActivity = true
+		firstInvocation = firstActivity
+		firstInvocationSeen = firstObserved
+		hasInvocation = true
+	}
+	if evidence.LastEffectiveActivityAt != nil {
+		lastActivity = evidence.LastEffectiveActivityAt.UTC()
+		hasActivity = true
+		lastInvocation = lastActivity
+		lastInvocationSeen = lastObserved
+		hasInvocation = true
+	}
+	if summary.aggregate {
+		advertised = summary.counts[domain.EventAdvertised]
+		loaded = 0
+		invocationCount = summary.counts[domain.EventInvoked]
+		distinctSessions = summary.distinctSessions
+		coverage = summary.coverage
+	}
+	scopes := make([]string, 0, len(installedScopes))
+	for _, scope := range installedScopes {
+		if scope.Valid() {
+			scopes = append(scopes, string(scope))
+		}
+	}
+	sort.Strings(scopes)
 	return Capability{
 		Runtime:                    string(evidence.Capability.Runtime),
 		Type:                       string(evidence.Capability.Type),
 		Name:                       safeText(evidence.Capability.Name),
+		Installed:                  installed,
 		Scope:                      string(evidence.Capability.Scope),
+		InstalledScopes:            scopes,
 		Enabled:                    string(evidence.Capability.Enabled),
 		Advertisement:              string(evidence.Capability.Advertisement),
 		Status:                     string(evidence.Classification),
@@ -292,21 +572,53 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 		Basis:                      safeBasis(evidence.Basis),
 		Evidence:                   safeBasis(evidence.EvidenceCoverage),
 		EvidenceSources:            summary.sourceNames(),
-		Advertised:                 summary.counts[domain.EventAdvertised],
-		Loaded:                     summary.counts[domain.EventLoaded],
-		InvocationCount:            evidence.InvocationCount,
-		DistinctSessionCount:       evidence.DistinctSessionCount,
-		FirstObservedAt:            timestamp(summary.firstObserved, summary.hasObserved),
-		LastObservedAt:             timestamp(summary.lastObserved, summary.hasObserved),
-		FirstEffectiveActivityAt:   timestamp(summary.firstActivity, summary.hasActivity),
-		LastEffectiveActivityAt:    timestamp(summary.lastActivity, summary.hasActivity),
-		FirstInvocationObservedAt:  timestamp(summary.firstInvocationSeen, summary.hasInvocation),
-		LastInvocationObservedAt:   timestamp(summary.lastInvocationSeen, summary.hasInvocation),
-		FirstInvocationEffectiveAt: timestamp(summary.firstInvocation, summary.hasInvocation),
-		LastInvocationEffectiveAt:  timestamp(summary.lastInvocation, summary.hasInvocation),
+		Advertised:                 advertised,
+		ObservedAdvertisedSessions: intPointer(observedAdvertised),
+		Loaded:                     loaded,
+		InvocationCount:            invocationCount,
+		DistinctSessionCount:       distinctSessions,
+		FirstObservedAt:            timestamp(firstObserved, hasObserved),
+		LastObservedAt:             timestamp(lastObserved, hasObserved),
+		FirstEffectiveActivityAt:   timestamp(firstActivity, hasActivity),
+		LastEffectiveActivityAt:    timestamp(lastActivity, hasActivity),
+		FirstInvocationObservedAt:  timestamp(firstInvocationSeen, hasInvocation),
+		LastInvocationObservedAt:   timestamp(lastInvocationSeen, hasInvocation),
+		FirstInvocationEffectiveAt: timestamp(firstInvocation, hasInvocation),
+		LastInvocationEffectiveAt:  timestamp(lastInvocation, hasInvocation),
 		LastInvocationAge:          durationPointer(evidence.LastUsedAge, evidence.HasLastUsed),
 		LastInvocationInFuture:     evidence.LastUsedInFuture,
+		Coverage:                   coverageDTO(coverage),
 	}
+}
+
+func intPointer(value *int64) *int {
+	if value == nil || *value < 0 || *value > int64(^uint(0)>>1) {
+		return nil
+	}
+	converted := int(*value)
+	return &converted
+}
+
+func coverageDTO(coverage *history.Coverage) *Coverage {
+	if coverage == nil {
+		return nil
+	}
+	return &Coverage{
+		FirstInventoryObservedAt:  timestampPointer(coverage.FirstInventoryObservedAt),
+		LastInventoryObservedAt:   timestampPointer(coverage.LastInventoryObservedAt),
+		FirstUsageObservedAt:      timestampPointer(coverage.FirstUsageObservedAt),
+		LastUsageObservedAt:       timestampPointer(coverage.LastUsageObservedAt),
+		FirstDirectHookObservedAt: timestampPointer(coverage.FirstDirectHookObservedAt),
+		LastDirectHookObservedAt:  timestampPointer(coverage.LastDirectHookObservedAt),
+	}
+}
+
+func timestampPointer(value *time.Time) *string {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339Nano)
+	return &formatted
 }
 
 func durationPointer(value time.Duration, ok bool) *string {
@@ -317,20 +629,36 @@ func durationPointer(value time.Duration, ok bool) *string {
 	return &formatted
 }
 
-func runtimeDTO(runtimeName domain.Runtime, result analysis.Report, events []domain.UsageEvent, now time.Time) Runtime {
+func runtimeDTO(runtimeName domain.Runtime, result analysis.Report, observations any, now time.Time) Runtime {
 	dto := Runtime{Runtime: string(runtimeName)}
-	for _, event := range events {
-		if event.Runtime != runtimeName {
-			continue
+	if events, ok := observations.([]domain.UsageEvent); ok {
+		for _, event := range events {
+			if event.Runtime != runtimeName {
+				continue
+			}
+			dto.UsageEvents++
+			switch event.EventType {
+			case domain.EventAdvertised:
+				dto.Advertised++
+			case domain.EventLoaded:
+				dto.Loaded++
+			case domain.EventInvoked:
+				dto.Invoked++
+			}
 		}
-		dto.UsageEvents++
-		switch event.EventType {
-		case domain.EventAdvertised:
-			dto.Advertised++
-		case domain.EventLoaded:
-			dto.Loaded++
-		case domain.EventInvoked:
-			dto.Invoked++
+	} else if aggregates, ok := observations.([]history.Aggregate); ok {
+		// Aggregate history intentionally exposes canonical invocation counts
+		// and explicit advertised-session counts only. Loaded and raw event
+		// totals remain zero because they are not present in this contract.
+		for _, aggregate := range aggregates {
+			if aggregate.Runtime != runtimeName {
+				continue
+			}
+			dto.Invoked += nonNegativeInt(aggregate.Uses)
+			if aggregate.ObservedAdvertisedSessions != nil {
+				dto.Advertised += nonNegativeInt(*aggregate.ObservedAdvertisedSessions)
+			}
+			dto.UsageEvents += nonNegativeInt(aggregate.Uses)
 		}
 	}
 	for _, evidence := range result.Capabilities {
@@ -349,6 +677,13 @@ func runtimeDTO(runtimeName domain.Runtime, result analysis.Report, events []dom
 		}
 	}
 	return dto
+}
+
+func nonNegativeInt(value int64) int {
+	if value <= 0 || value > int64(^uint(0)>>1) {
+		return 0
+	}
+	return int(value)
 }
 
 func findingDTO(duplicate analysis.DuplicateName) Finding {
@@ -404,14 +739,24 @@ func buildUsageOnly(installed []analysis.CapabilityEvidence, summaries map[capab
 	result := make([]UsageOnly, 0, len(keys))
 	for _, key := range keys {
 		summary := summaries[key]
+		advertised := summary.counts[domain.EventAdvertised]
+		loaded := summary.counts[domain.EventLoaded]
+		invocationCount := summary.counts[domain.EventInvoked]
+		distinctSessions := len(summary.sessions)
+		if summary.aggregate {
+			loaded = 0
+			invocationCount = summary.counts[domain.EventInvoked]
+			distinctSessions = summary.distinctSessions
+		}
 		result = append(result, UsageOnly{
 			Runtime:                    string(key.runtime),
 			Type:                       string(key.typ),
 			Name:                       safeText(key.name),
-			Advertised:                 summary.counts[domain.EventAdvertised],
-			Loaded:                     summary.counts[domain.EventLoaded],
-			InvocationCount:            summary.counts[domain.EventInvoked],
-			DistinctSessionCount:       len(summary.sessions),
+			Advertised:                 advertised,
+			ObservedAdvertisedSessions: intPointer(summary.observedAdvertisedSessions),
+			Loaded:                     loaded,
+			InvocationCount:            invocationCount,
+			DistinctSessionCount:       distinctSessions,
 			EvidenceSources:            summary.sourceNames(),
 			FirstObservedAt:            timestamp(summary.firstObserved, summary.hasObserved),
 			LastObservedAt:             timestamp(summary.lastObserved, summary.hasObserved),
@@ -421,20 +766,31 @@ func buildUsageOnly(installed []analysis.CapabilityEvidence, summaries map[capab
 			LastInvocationObservedAt:   timestamp(summary.lastInvocationSeen, summary.hasInvocation),
 			FirstInvocationEffectiveAt: timestamp(summary.firstInvocation, summary.hasInvocation),
 			LastInvocationEffectiveAt:  timestamp(summary.lastInvocation, summary.hasInvocation),
+			Coverage:                   coverageDTO(summary.coverage),
 		})
 	}
 	return result
 }
 
-func buildCommon(result analysis.Report, events []domain.UsageEvent, now time.Time) (string, []Runtime, []Capability, []Finding, map[capabilityKey]*observationSummary, error) {
+func buildCommon(result analysis.Report, observations any, now time.Time) (string, []Runtime, []Capability, []Finding, map[capabilityKey]*observationSummary, error) {
 	if now.IsZero() {
 		return "", nil, nil, nil, nil, errors.New("report generation time is required")
 	}
 	now = now.UTC()
-	summaries := buildSummaries(events)
+	var summaries map[capabilityKey]*observationSummary
+	switch values := observations.(type) {
+	case nil:
+		summaries = buildAggregateSummaries(nil)
+	case []history.Aggregate:
+		summaries = buildAggregateSummaries(values)
+	case []domain.UsageEvent:
+		summaries = buildSummaries(values)
+	default:
+		return "", nil, nil, nil, nil, fmt.Errorf("unsupported report observations %T; want []history.Aggregate", observations)
+	}
 	runtimes := make([]Runtime, 0, 2)
 	for _, runtimeName := range []domain.Runtime{domain.RuntimeClaudeCode, domain.RuntimeCodex} {
-		runtimes = append(runtimes, runtimeDTO(runtimeName, result, events, now))
+		runtimes = append(runtimes, runtimeDTO(runtimeName, result, observations, now))
 	}
 	capabilities := make([]Capability, 0, len(result.Capabilities))
 	for _, evidence := range result.Capabilities {
@@ -445,9 +801,11 @@ func buildCommon(result analysis.Report, events []domain.UsageEvent, now time.Ti
 	return now.Format(time.RFC3339Nano), runtimes, capabilities, findings, summaries, nil
 }
 
-// BuildReport maps analysis and persisted events to the report JSON contract.
-func BuildReport(result analysis.Report, events []domain.UsageEvent, now time.Time, staleDays int) (ReportDocument, error) {
-	generatedAt, runtimes, capabilities, findings, summaries, err := buildCommon(result, events, now)
+// BuildReport maps analysis and bounded history aggregates to the report JSON
+// contract. []domain.UsageEvent remains accepted only for compatibility tests;
+// normal report callers should pass []history.Aggregate.
+func BuildReport(result analysis.Report, observations any, now time.Time, staleDays int) (ReportDocument, error) {
+	generatedAt, runtimes, capabilities, findings, summaries, err := buildCommon(result, observations, now)
 	if err != nil {
 		return ReportDocument{}, err
 	}
@@ -466,9 +824,10 @@ func BuildReport(result analysis.Report, events []domain.UsageEvent, now time.Ti
 	}, nil
 }
 
-// BuildStale maps analysis and persisted events to the stale JSON contract.
-func BuildStale(result analysis.Report, events []domain.UsageEvent, now time.Time, staleDays int) (StaleDocument, error) {
-	generatedAt, runtimes, capabilities, findings, _, err := buildCommon(result, events, now)
+// BuildStale maps analysis and bounded history aggregates to the stale JSON
+// contract. It never needs the complete usage event table.
+func BuildStale(result analysis.Report, observations any, now time.Time, staleDays int) (StaleDocument, error) {
+	generatedAt, runtimes, capabilities, findings, _, err := buildCommon(result, observations, now)
 	if err != nil {
 		return StaleDocument{}, err
 	}
