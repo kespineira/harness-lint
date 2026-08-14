@@ -41,7 +41,7 @@ func TestIngestUsageEventUpdatesHealthAtomicallyAndDeduplicatesRetry(t *testing.
 	if err != nil {
 		t.Fatalf("GetCaptureHealth(): %v", err)
 	}
-	if health.ConsecutiveFailures != 0 || health.RecentFailureCount != 0 || health.LastSuccessfulDelivery == nil || !health.LastSuccessfulDelivery.Equal(retry.ObservedAt) {
+	if health.ConsecutiveFailures != 0 || health.LastSuccessfulDelivery == nil || !health.LastSuccessfulDelivery.Equal(retry.ObservedAt) {
 		t.Fatalf("capture health after retry = %#v", health)
 	}
 	if health.LastFailedDelivery != nil || health.LastFailureKind != nil {
@@ -76,7 +76,7 @@ func TestCaptureHealthBoundedFailureThenSuccessAndPrivacySafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCaptureHealth(): %v", err)
 	}
-	if health.ConsecutiveFailures != capture.MaxConsecutiveFailures || health.RecentFailureCount != capture.MaxConsecutiveFailures {
+	if health.ConsecutiveFailures != capture.MaxConsecutiveFailures {
 		t.Fatalf("bounded failures = %#v, want max %d", health, capture.MaxConsecutiveFailures)
 	}
 	if health.LastFailedDelivery == nil || !health.LastFailedDelivery.Equal(base.Add(time.Duration(capture.MaxConsecutiveFailures+4)*time.Minute)) {
@@ -129,6 +129,43 @@ func TestCaptureHealthBoundedFailureThenSuccessAndPrivacySafe(t *testing.T) {
 	}
 }
 
+func TestSelfTestCaptureIngestAlwaysRollsBackUsageEvidenceAndHealth(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	seed := testUsageEvent(time.Date(2026, 8, 14, 10, 30, 0, 0, time.UTC), "existing", domain.EventInvoked)
+	seed.Provenance = domain.ProvenanceHook
+	seed.SourceIdentity = "existing-hook"
+	if err := s.IngestUsageEvent(ctx, seed); err != nil {
+		t.Fatalf("seed IngestUsageEvent(): %v", err)
+	}
+	if err := s.RecordCaptureFailure(ctx, capture.CaptureFailure{Runtime: domain.RuntimeCodex, FailedAt: seed.ObservedAt.Add(time.Minute), Kind: capture.FailureDatabaseBusy}); err != nil {
+		t.Fatalf("seed RecordCaptureFailure(): %v", err)
+	}
+	before, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		t.Fatalf("capture self-test state before: %v", err)
+	}
+	if err := s.SelfTestCaptureIngest(ctx); err != nil {
+		t.Fatalf("SelfTestCaptureIngest(): %v", err)
+	}
+	after, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		t.Fatalf("capture self-test state after: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("self-test changed persisted state: before=%#v after=%#v", before, after)
+	}
+	for _, table := range []string{"usage_events", "usage_event_evidence", "capture_delivery_health"} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatalf("count %s after self-test: %v", table, err)
+		}
+		if count == 0 && table != "capture_delivery_health" {
+			t.Fatalf("expected seeded rows in %s", table)
+		}
+	}
+}
+
 func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -176,7 +213,10 @@ func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing
 	if !installed.Installed || !reflect.DeepEqual(installed.InstalledScopes, []domain.Scope{domain.ScopeProject}) || installed.Uses != 0 {
 		t.Fatalf("installed zero-use aggregate = %#v", installed)
 	}
-	if used.Installed || used.Uses != 1 || used.InvocationUses != 1 || used.DistinctInvocationSessions != 1 {
+	if installed.Coverage == nil || installed.Coverage.FirstInventoryObservedAt == nil || !installed.Coverage.FirstInventoryObservedAt.Equal(observed) || installed.Coverage.LastInventoryObservedAt == nil || !installed.Coverage.LastInventoryObservedAt.Equal(observed) || installed.Coverage.FirstUsageObservedAt != nil || installed.Coverage.LastUsageObservedAt != nil || installed.Coverage.FirstDirectHookObservedAt != nil || installed.Coverage.LastDirectHookObservedAt != nil {
+		t.Fatalf("installed zero-use coverage = %#v", installed.Coverage)
+	}
+	if used.Installed || used.Uses != 1 || used.DistinctInvocationSessions != 1 {
 		t.Fatalf("usage aggregate identity counts = %#v", used)
 	}
 	if used.InvocationEvidence[domain.ProvenanceHook] != 1 || used.InvocationEvidence[domain.ProvenanceTranscript] != 1 {
@@ -188,6 +228,9 @@ func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing
 	if used.FirstObservedAt == nil || !used.FirstObservedAt.Equal(hook.ObservedAt) || used.FirstEffectiveActivityAt == nil || !used.FirstEffectiveActivityAt.Equal(sourceAt) {
 		t.Fatalf("canonical observed/effective times = %#v/%#v", used.FirstObservedAt, used.FirstEffectiveActivityAt)
 	}
+	if used.Coverage == nil || used.Coverage.FirstInventoryObservedAt != nil || used.Coverage.LastInventoryObservedAt != nil || used.Coverage.FirstUsageObservedAt == nil || !used.Coverage.FirstUsageObservedAt.Equal(hook.ObservedAt) || used.Coverage.LastUsageObservedAt == nil || !used.Coverage.LastUsageObservedAt.Equal(advertised.ObservedAt) || used.Coverage.FirstDirectHookObservedAt == nil || !used.Coverage.FirstDirectHookObservedAt.Equal(hook.ObservedAt) || used.Coverage.LastDirectHookObservedAt == nil || !used.Coverage.LastDirectHookObservedAt.Equal(hook.ObservedAt) {
+		t.Fatalf("usage-only coverage = %#v", used.Coverage)
+	}
 	if _, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill}); err != nil {
 		t.Fatalf("runtime/type composed filter: %v", err)
 	}
@@ -197,6 +240,79 @@ func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing
 	}
 	if len(evidence) != 2 || evidence[0].Provenance != domain.ProvenanceHook || evidence[1].Provenance != domain.ProvenanceTranscript {
 		t.Fatalf("normalized evidence = %#v", evidence)
+	}
+}
+
+func TestHistoryCoverageUnknownRemainsNil(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	capability := testCapability("unknown-coverage", time.Time{}, time.Time{})
+	if err := s.UpsertCapabilities(ctx, []domain.Capability{capability}); err != nil {
+		t.Fatalf("UpsertCapabilities(): %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO current_inventory(runtime, capability_type, name, scope, source) VALUES (?, ?, ?, ?, ?)`, capability.Runtime, capability.Type, capability.Name, capability.Scope, capability.Source); err != nil {
+		t.Fatalf("seed current inventory without observation: %v", err)
+	}
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Coverage != nil {
+		t.Fatalf("unknown coverage = %#v, want nil", rows)
+	}
+}
+
+func TestHistoryInvocationTimesExcludeNonInvocationsAndCoverageUsesAllRecordedHistory(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	invocation := old.Add(24 * time.Hour)
+	hookAt := old.Add(48 * time.Hour)
+	advertised := old.Add(72 * time.Hour)
+	laterInventory := old.Add(96 * time.Hour)
+	capability := testCapability("covered", old, old)
+	capability.Type = domain.CapabilityTool
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, old, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(old): %v", err)
+	}
+	loaded := testUsageEvent(old, "covered", domain.EventLoaded)
+	olderInvocation := testUsageEvent(invocation, "covered", domain.EventInvoked)
+	advertisedEvent := testUsageEvent(advertised, "covered", domain.EventAdvertised)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{loaded, olderInvocation, advertisedEvent}); err != nil {
+		t.Fatalf("InsertUsageEvents(history): %v", err)
+	}
+	hook := testUsageEvent(hookAt, "covered", domain.EventInvoked)
+	hook.Provenance = domain.ProvenanceHook
+	hook.SourceIdentity = "coverage-hook"
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("IngestUsageEvent(hook): %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, laterInventory, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(later): %v", err)
+	}
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "covered", Start: hookAt, End: hookAt})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(narrow): %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("narrow history rows = %#v", rows)
+	}
+	aggregate := rows[0]
+	if aggregate.Uses != 1 || aggregate.FirstObservedAt == nil || !aggregate.FirstObservedAt.Equal(hookAt) || aggregate.LastObservedAt == nil || !aggregate.LastObservedAt.Equal(hookAt) || aggregate.FirstEffectiveActivityAt == nil || !aggregate.FirstEffectiveActivityAt.Equal(hookAt) || aggregate.LastEffectiveActivityAt == nil || !aggregate.LastEffectiveActivityAt.Equal(hookAt) {
+		t.Fatalf("invocation timestamps include non-invocations or wrong period = %#v", aggregate)
+	}
+	if aggregate.Coverage == nil {
+		t.Fatal("coverage is nil for recorded history")
+	}
+	coverage := aggregate.Coverage
+	if coverage.FirstInventoryObservedAt == nil || !coverage.FirstInventoryObservedAt.Equal(old) || coverage.LastInventoryObservedAt == nil || !coverage.LastInventoryObservedAt.Equal(laterInventory) {
+		t.Fatalf("inventory coverage = %#v", coverage)
+	}
+	if coverage.FirstUsageObservedAt == nil || !coverage.FirstUsageObservedAt.Equal(old) || coverage.LastUsageObservedAt == nil || !coverage.LastUsageObservedAt.Equal(advertised) {
+		t.Fatalf("usage coverage = %#v", coverage)
+	}
+	if coverage.FirstDirectHookObservedAt == nil || !coverage.FirstDirectHookObservedAt.Equal(hookAt) || coverage.LastDirectHookObservedAt == nil || !coverage.LastDirectHookObservedAt.Equal(hookAt) {
+		t.Fatalf("direct-hook coverage = %#v", coverage)
 	}
 }
 
@@ -236,12 +352,24 @@ func TestMonthlyHistoryUsesClosedUTCIntervalAndQueryPlanIndex(t *testing.T) {
 			t.Fatalf("InsertUsageEvents(%d): %v", index, err)
 		}
 	}
+	otherName := testUsageEvent(start, "other-monthly", domain.EventInvoked)
+	otherName.SourceIdentity = "other-monthly-0"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{otherName}); err != nil {
+		t.Fatalf("InsertUsageEvents(other name): %v", err)
+	}
 	monthly, err := s.QueryMonthlyInvocations(ctx, history.Query{Start: start, End: end, Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool})
 	if err != nil {
 		t.Fatalf("QueryMonthlyInvocations(): %v", err)
 	}
-	if len(monthly) != 2 || monthly[0].Uses != 1 || monthly[1].Uses != 1 || !monthly[0].Month.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)) || !monthly[1].Month.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)) {
+	if len(monthly) != 3 {
 		t.Fatalf("monthly closed-boundary rows = %#v", monthly)
+	}
+	monthlyByNameMonth := make(map[string]int64, len(monthly))
+	for _, aggregate := range monthly {
+		monthlyByNameMonth[aggregate.CapabilityName+"/"+aggregate.Month.Format("2006-01")] = aggregate.Uses
+	}
+	if monthlyByNameMonth["monthly/2026-08"] != 1 || monthlyByNameMonth["monthly/2026-09"] != 1 || monthlyByNameMonth["other-monthly/2026-08"] != 1 {
+		t.Fatalf("monthly name/month buckets = %#v", monthlyByNameMonth)
 	}
 	plan, err := s.ExplainHistoryQueryPlan(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, Start: start, End: end})
 	if err != nil {
@@ -280,9 +408,9 @@ func TestHistoryAggregationHandlesMultipleRuntimesAndThousandsOfRows(t *testing.
 	if len(rowsByRuntime) != 1 || rowsByRuntime[0].Uses != rows || rowsByRuntime[0].DistinctInvocationSessions != 17 {
 		t.Fatalf("bulk aggregate = %#v, want %d uses and 17 sessions", rowsByRuntime, rows)
 	}
-	allRows, err := s.QueryUsageHistory(ctx, history.Query{CapabilityType: domain.CapabilityTool, CapabilityName: "bulk"})
+	allRows, err := s.QueryInvocationHistory(ctx, history.Query{CapabilityType: domain.CapabilityTool, CapabilityName: "bulk"})
 	if err != nil {
-		t.Fatalf("QueryUsageHistory(all runtimes): %v", err)
+		t.Fatalf("QueryInvocationHistory(all runtimes): %v", err)
 	}
 	if len(allRows) != 2 || allRows[0].Runtime != domain.RuntimeClaude || allRows[1].Runtime != domain.RuntimeCodex {
 		t.Fatalf("multiple-runtime history rows = %#v", allRows)
@@ -307,6 +435,21 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 			t.Fatalf("apply migration %s: %v", name, execErr)
 		}
 	}
+	firstSeen := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	lastSeen := time.Date(2026, 8, 14, 8, 0, 0, 0, time.UTC)
+	legacyCapability := testCapability("legacy", firstSeen, lastSeen)
+	if _, err := seed.ExecContext(ctx, `INSERT INTO capabilities(runtime, capability_type, name, scope, source, enabled_state, advertisement_state, hash, metadata_tokens_value, metadata_tokens_confidence, metadata_tokens_basis, body_tokens_value, body_tokens_confidence, body_tokens_basis, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, legacyCapability.Runtime, legacyCapability.Type, legacyCapability.Name, legacyCapability.Scope, legacyCapability.Source, legacyCapability.Enabled, legacyCapability.Advertisement, legacyCapability.Hash, legacyCapability.MetadataTokens.Value, legacyCapability.MetadataTokens.Confidence, legacyCapability.MetadataTokens.Basis, legacyCapability.BodyTokens.Value, legacyCapability.BodyTokens.Confidence, legacyCapability.BodyTokens.Basis, legacyCapability.FirstSeen.Format(time.RFC3339Nano), legacyCapability.LastSeen.Format(time.RFC3339Nano)); err != nil {
+		seed.Close()
+		t.Fatalf("seed v5 capability: %v", err)
+	}
+	if _, err := seed.ExecContext(ctx, `INSERT INTO inventory_scans(runtime, observed_at) VALUES (?, ?)`, legacyCapability.Runtime, legacyCapability.LastSeen.Format(time.RFC3339Nano)); err != nil {
+		seed.Close()
+		t.Fatalf("seed v5 inventory scan: %v", err)
+	}
+	if _, err := seed.ExecContext(ctx, `INSERT INTO current_inventory(runtime, capability_type, name, scope, source) VALUES (?, ?, ?, ?, ?)`, legacyCapability.Runtime, legacyCapability.Type, legacyCapability.Name, legacyCapability.Scope, legacyCapability.Source); err != nil {
+		seed.Close()
+		t.Fatalf("seed v5 current inventory: %v", err)
+	}
 	event := testUsageEvent(time.Date(2026, 8, 14, 13, 0, 0, 0, time.UTC), "legacy", domain.EventInvoked)
 	if _, err := seed.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('version', '5')`); err != nil {
 		seed.Close()
@@ -323,6 +466,34 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(v5): %v", err)
 	}
+	status, err := s.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus(v5 upgrade): %v", err)
+	}
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("v5 upgraded schema status = %#v, want 6/6", status)
+	}
+	capabilities, err := s.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities(v5 upgrade): %v", err)
+	}
+	if len(capabilities) != 1 || !reflect.DeepEqual(capabilities[0], legacyCapability) {
+		t.Fatalf("v5 capabilities after upgrade = %#v, want %#v", capabilities, []domain.Capability{legacyCapability})
+	}
+	current, err := s.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(v5 upgrade): %v", err)
+	}
+	if len(current) != 1 || !reflect.DeepEqual(current[0], legacyCapability) {
+		t.Fatalf("v5 current inventory after upgrade = %#v, want %#v", current, []domain.Capability{legacyCapability})
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(v5 upgrade): %v", err)
+	}
+	if len(events) != 1 || events[0].Fingerprint != "legacy-v5-fingerprint" || events[0].CapabilityName != "legacy" {
+		t.Fatalf("v5 usage after upgrade = %#v", events)
+	}
 	countEvidence := func() int {
 		var count int
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&count); err != nil {
@@ -333,6 +504,13 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 	if count := countEvidence(); count != 1 {
 		t.Fatalf("evidence count after v5 upgrade = %d, want 1", count)
 	}
+	evidence, err := s.ListUsageEventEvidence(ctx, "legacy-v5-fingerprint")
+	if err != nil {
+		t.Fatalf("ListUsageEventEvidence(v5 upgrade): %v", err)
+	}
+	if len(evidence) != 1 || evidence[0].Provenance != domain.ProvenanceImport {
+		t.Fatalf("v5 evidence after upgrade = %#v", evidence)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("close upgraded db: %v", err)
 	}
@@ -341,6 +519,37 @@ func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
 		t.Fatalf("reopen upgraded db: %v", err)
 	}
 	defer reopened.Close()
+	status, err = reopened.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus(second open): %v", err)
+	}
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("schema status after reopen = %#v, want 6/6", status)
+	}
+	if err := reopened.migrate(ctx); err != nil {
+		t.Fatalf("second no-op migration: %v", err)
+	}
+	reopenedCapabilities, err := reopened.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities(after no-op): %v", err)
+	}
+	if !reflect.DeepEqual(reopenedCapabilities, capabilities) {
+		t.Fatalf("capabilities after reopen/no-op = %#v, want %#v", reopenedCapabilities, capabilities)
+	}
+	reopenedCurrent, err := reopened.ListCurrentCapabilities(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCurrentCapabilities(after no-op): %v", err)
+	}
+	if !reflect.DeepEqual(reopenedCurrent, current) {
+		t.Fatalf("current inventory after reopen/no-op = %#v, want %#v", reopenedCurrent, current)
+	}
+	reopenedEvents, err := reopened.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(after no-op): %v", err)
+	}
+	if !reflect.DeepEqual(reopenedEvents, events) {
+		t.Fatalf("usage after reopen/no-op = %#v, want %#v", reopenedEvents, events)
+	}
 	var count int
 	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&count); err != nil {
 		t.Fatalf("evidence count after second migration run: %v", err)

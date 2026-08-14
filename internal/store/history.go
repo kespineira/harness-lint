@@ -13,13 +13,6 @@ import (
 	"github.com/kespineira/harness-lint/internal/history"
 )
 
-// These aliases keep the store-facing API discoverable while the DTOs remain
-// neutral and reusable by later analysis/report layers.
-type HistoryQuery = history.Query
-type HistoryAggregate = history.Aggregate
-type MonthlyHistoryAggregate = history.MonthlyAggregate
-type UsageEventEvidence = history.EventEvidence
-
 type historyKey struct {
 	runtime domain.Runtime
 	typ     domain.CapabilityType
@@ -40,7 +33,6 @@ func (s *Store) QueryInvocationHistory(ctx context.Context, query history.Query)
 	}
 	usageClause, usageArgs := historyUsageFilters("u", query)
 	currentClause, currentArgs := historyCurrentFilters("c", query)
-	activityClause, activityArgs := historyUsageFilters("u", query)
 	invocationClause, invocationArgs := historyUsageFilters("u", query)
 	evidenceClause, evidenceArgs := historyUsageFilters("u", query)
 	advertisedClause, advertisedArgs := historyUsageFilters("u", query)
@@ -59,14 +51,6 @@ SELECT c.runtime, c.capability_type, c.name
 		AND c.name = ci.name
 		AND c.scope = ci.scope
 		AND c.source = ci.source` + currentClause + `
-), activity AS (
-	SELECT u.runtime, u.capability_type, u.capability_name,
-		MIN(u.observed_at) AS first_observed_at,
-		MAX(u.observed_at) AS last_observed_at,
-		MIN(COALESCE(u.source_timestamp, u.observed_at)) AS first_effective_at,
-		MAX(COALESCE(u.source_timestamp, u.observed_at)) AS last_effective_at
-	FROM usage_events AS u` + activityClause + `
-	GROUP BY u.runtime, u.capability_type, u.capability_name
 ), invocation AS (
 	SELECT u.runtime, u.capability_type, u.capability_name,
 		COUNT(*) AS uses,
@@ -93,21 +77,19 @@ SELECT c.runtime, c.capability_type, c.name
 )
 SELECT k.runtime, k.capability_type, k.capability_name,
 	COALESCE(i.uses, 0), COALESCE(i.distinct_sessions, 0),
-	activity.first_observed_at, activity.last_observed_at,
-	activity.first_effective_at, activity.last_effective_at,
+	i.first_observed_at, i.last_observed_at,
+	i.first_effective_at, i.last_effective_at,
 	COALESCE(e.hook_count, 0), COALESCE(e.transcript_count, 0), COALESCE(e.import_count, 0),
 	ad.advertised_sessions
 FROM keys AS k
-LEFT JOIN activity ON activity.runtime = k.runtime AND activity.capability_type = k.capability_type AND activity.capability_name = k.capability_name
 LEFT JOIN invocation AS i ON i.runtime = k.runtime AND i.capability_type = k.capability_type AND i.capability_name = k.capability_name
 LEFT JOIN evidence AS e ON e.runtime = k.runtime AND e.capability_type = k.capability_type AND e.capability_name = k.capability_name
 LEFT JOIN advertised AS ad ON ad.runtime = k.runtime AND ad.capability_type = k.capability_type AND ad.capability_name = k.capability_name
 ORDER BY k.runtime, k.capability_type, k.capability_name`
 
-	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(activityArgs)+len(invocationArgs)+len(evidenceArgs)+len(advertisedArgs))
+	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(invocationArgs)+len(evidenceArgs)+len(advertisedArgs))
 	args = append(args, usageArgs...)
 	args = append(args, currentArgs...)
-	args = append(args, activityArgs...)
 	args = append(args, invocationArgs...)
 	args = append(args, evidenceArgs...)
 	args = append(args, advertisedArgs...)
@@ -126,7 +108,6 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 			return nil, fmt.Errorf("scan invocation history: %w", err)
 		}
 		aggregate.Uses = uses
-		aggregate.InvocationUses = uses
 		aggregate.DistinctInvocationSessions = sessions
 		aggregate.FirstObservedAt, err = parseNullableTimestamp(firstObserved)
 		if err != nil {
@@ -163,6 +144,10 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 	if err != nil {
 		return nil, err
 	}
+	coverage, err := s.historyCoverage(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for index := range result {
 		key := historyKey{runtime: result[index].Runtime, typ: result[index].CapabilityType, name: result[index].CapabilityName}
 		scopes := installed[key]
@@ -170,24 +155,9 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 			result[index].Installed = true
 			result[index].InstalledScopes = scopes
 		}
-		result[index] = result[index].Normalize()
+		result[index].Coverage = coverage[key]
 	}
 	return result, nil
-}
-
-// ListHistoricalAggregates is an alias for QueryInvocationHistory.
-func (s *Store) ListHistoricalAggregates(ctx context.Context, query history.Query) ([]history.Aggregate, error) {
-	return s.QueryInvocationHistory(ctx, query)
-}
-
-// QueryHistoricalAggregates is an alias for QueryInvocationHistory.
-func (s *Store) QueryHistoricalAggregates(ctx context.Context, query history.Query) ([]history.Aggregate, error) {
-	return s.QueryInvocationHistory(ctx, query)
-}
-
-// QueryUsageHistory is a concise alias for QueryInvocationHistory.
-func (s *Store) QueryUsageHistory(ctx context.Context, query history.Query) ([]history.Aggregate, error) {
-	return s.QueryInvocationHistory(ctx, query)
 }
 
 func historyUsageFilters(alias string, query history.Query) (string, []any) {
@@ -197,13 +167,13 @@ func historyUsageFilters(alias string, query history.Query) (string, []any) {
 		conditions = append(conditions, alias+`.runtime = ?`)
 		args = append(args, query.Runtime)
 	}
-	if typ := query.ResolvedType(); typ != "" {
+	if query.CapabilityType != "" {
 		conditions = append(conditions, alias+`.capability_type = ?`)
-		args = append(args, typ)
+		args = append(args, query.CapabilityType)
 	}
-	if name := query.ResolvedName(); name != "" {
+	if query.CapabilityName != "" {
 		conditions = append(conditions, alias+`.capability_name = ?`)
-		args = append(args, name)
+		args = append(args, query.CapabilityName)
 	}
 	if !query.Start.IsZero() {
 		conditions = append(conditions, `COALESCE(`+alias+`.source_timestamp, `+alias+`.observed_at) >= ?`)
@@ -226,13 +196,13 @@ func historyCurrentFilters(alias string, query history.Query) (string, []any) {
 		conditions = append(conditions, alias+`.runtime = ?`)
 		args = append(args, query.Runtime)
 	}
-	if typ := query.ResolvedType(); typ != "" {
+	if query.CapabilityType != "" {
 		conditions = append(conditions, alias+`.capability_type = ?`)
-		args = append(args, typ)
+		args = append(args, query.CapabilityType)
 	}
-	if name := query.ResolvedName(); name != "" {
+	if query.CapabilityName != "" {
 		conditions = append(conditions, alias+`.name = ?`)
-		args = append(args, name)
+		args = append(args, query.CapabilityName)
 	}
 	if len(conditions) == 0 {
 		return "", args
@@ -293,6 +263,98 @@ func containsScope(scopes []domain.Scope, want domain.Scope) bool {
 	return false
 }
 
+// historyCoverage reads all recorded observation ranges without applying the
+// caller's activity interval. Inventory windows come from the capability
+// first_seen/last_seen fields; usage windows come from usage_events; direct
+// hook windows come from the normalized evidence relation. These are
+// observations only and never imply continuity or lifetime completeness.
+func (s *Store) historyCoverage(ctx context.Context) (map[historyKey]*history.Coverage, error) {
+	rows, err := s.db.QueryContext(ctx, `WITH inventory AS (
+	SELECT runtime, capability_type, name,
+		MIN(NULLIF(first_seen, '')) AS first_inventory,
+		MAX(NULLIF(last_seen, '')) AS last_inventory
+	FROM capabilities
+	GROUP BY runtime, capability_type, name
+), usage AS (
+	SELECT runtime, capability_type, capability_name,
+		MIN(observed_at) AS first_usage,
+		MAX(observed_at) AS last_usage
+	FROM usage_events
+	GROUP BY runtime, capability_type, capability_name
+), direct_hook AS (
+	SELECT u.runtime, u.capability_type, u.capability_name,
+		MIN(e.observed_at) AS first_hook,
+		MAX(e.observed_at) AS last_hook
+	FROM usage_events AS u
+	INNER JOIN usage_event_evidence AS e ON e.fingerprint = u.fingerprint
+	WHERE e.provenance = 'hook'
+	GROUP BY u.runtime, u.capability_type, u.capability_name
+), keys AS (
+	SELECT runtime, capability_type, name AS capability_name FROM inventory
+	UNION
+	SELECT runtime, capability_type, capability_name FROM usage
+	UNION
+	SELECT runtime, capability_type, capability_name FROM direct_hook
+)
+SELECT k.runtime, k.capability_type, k.capability_name,
+	i.first_inventory, i.last_inventory,
+	u.first_usage, u.last_usage,
+	h.first_hook, h.last_hook
+FROM keys AS k
+LEFT JOIN inventory AS i ON i.runtime = k.runtime AND i.capability_type = k.capability_type AND i.name = k.capability_name
+LEFT JOIN usage AS u ON u.runtime = k.runtime AND u.capability_type = k.capability_type AND u.capability_name = k.capability_name
+LEFT JOIN direct_hook AS h ON h.runtime = k.runtime AND h.capability_type = k.capability_type AND h.capability_name = k.capability_name
+ORDER BY k.runtime, k.capability_type, k.capability_name`)
+	if err != nil {
+		return nil, fmt.Errorf("query history coverage: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[historyKey]*history.Coverage)
+	for rows.Next() {
+		var runtime domain.Runtime
+		var typ domain.CapabilityType
+		var name string
+		var firstInventory, lastInventory, firstUsage, lastUsage, firstHook, lastHook sql.NullString
+		if err := rows.Scan(&runtime, &typ, &name, &firstInventory, &lastInventory, &firstUsage, &lastUsage, &firstHook, &lastHook); err != nil {
+			return nil, fmt.Errorf("scan history coverage: %w", err)
+		}
+		coverage := &history.Coverage{}
+		var err error
+		coverage.FirstInventoryObservedAt, err = parseNullableTimestamp(firstInventory)
+		if err != nil {
+			return nil, fmt.Errorf("parse first inventory coverage: %w", err)
+		}
+		coverage.LastInventoryObservedAt, err = parseNullableTimestamp(lastInventory)
+		if err != nil {
+			return nil, fmt.Errorf("parse last inventory coverage: %w", err)
+		}
+		coverage.FirstUsageObservedAt, err = parseNullableTimestamp(firstUsage)
+		if err != nil {
+			return nil, fmt.Errorf("parse first usage coverage: %w", err)
+		}
+		coverage.LastUsageObservedAt, err = parseNullableTimestamp(lastUsage)
+		if err != nil {
+			return nil, fmt.Errorf("parse last usage coverage: %w", err)
+		}
+		coverage.FirstDirectHookObservedAt, err = parseNullableTimestamp(firstHook)
+		if err != nil {
+			return nil, fmt.Errorf("parse first direct-hook coverage: %w", err)
+		}
+		coverage.LastDirectHookObservedAt, err = parseNullableTimestamp(lastHook)
+		if err != nil {
+			return nil, fmt.Errorf("parse last direct-hook coverage: %w", err)
+		}
+		if coverage.FirstInventoryObservedAt == nil && coverage.LastInventoryObservedAt == nil && coverage.FirstUsageObservedAt == nil && coverage.LastUsageObservedAt == nil && coverage.FirstDirectHookObservedAt == nil && coverage.LastDirectHookObservedAt == nil {
+			continue
+		}
+		result[historyKey{runtime: runtime, typ: typ, name: name}] = coverage
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate history coverage: %w", err)
+	}
+	return result, nil
+}
+
 // ListUsageEventEvidence returns all normalized evidence sources for one
 // canonical fingerprint in deterministic provenance order.
 func (s *Store) ListUsageEventEvidence(ctx context.Context, fingerprint string) ([]history.EventEvidence, error) {
@@ -338,11 +400,6 @@ func (s *Store) ListUsageEventEvidence(ctx context.Context, fingerprint string) 
 	return result, nil
 }
 
-// ListEventEvidence is a descriptive alias for ListUsageEventEvidence.
-func (s *Store) ListEventEvidence(ctx context.Context, fingerprint string) ([]history.EventEvidence, error) {
-	return s.ListUsageEventEvidence(ctx, fingerprint)
-}
-
 // QueryMonthlyInvocations returns UTC calendar-month usage subtotals. Query's
 // Start and End remain closed [Start, End] boundaries, and runtime/type/name
 // filters compose with them.
@@ -355,12 +412,12 @@ func (s *Store) QueryMonthlyInvocations(ctx context.Context, query history.Query
 	}
 	clause, args := historyUsageFilters("u", query)
 	clause += historyEventTypeFilter(clause, "invoked")
-	rows, err := s.db.QueryContext(ctx, `SELECT u.runtime, u.capability_type,
+	rows, err := s.db.QueryContext(ctx, `SELECT u.runtime, u.capability_type, u.capability_name,
 	strftime('%Y-%m-01T00:00:00Z', COALESCE(u.source_timestamp, u.observed_at)) AS month,
 	COUNT(*) AS uses, COUNT(DISTINCT u.session_id) AS distinct_sessions
 	FROM usage_events AS u`+clause+`
-	GROUP BY u.runtime, u.capability_type, month
-	ORDER BY month, u.runtime, u.capability_type`, args...)
+	GROUP BY u.runtime, u.capability_type, u.capability_name, month
+	ORDER BY u.runtime, u.capability_type, u.capability_name, month`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query monthly invocations: %w", err)
 	}
@@ -369,7 +426,7 @@ func (s *Store) QueryMonthlyInvocations(ctx context.Context, query history.Query
 	for rows.Next() {
 		var aggregate history.MonthlyAggregate
 		var month string
-		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &month, &aggregate.Uses, &aggregate.DistinctInvocationSessions); err != nil {
+		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &aggregate.CapabilityName, &month, &aggregate.Uses, &aggregate.DistinctInvocationSessions); err != nil {
 			return nil, fmt.Errorf("scan monthly invocations: %w", err)
 		}
 		parsed, err := time.Parse(time.RFC3339, month)
@@ -377,24 +434,12 @@ func (s *Store) QueryMonthlyInvocations(ctx context.Context, query history.Query
 			return nil, fmt.Errorf("parse monthly invocation month: %w", err)
 		}
 		aggregate.Month = parsed.UTC()
-		aggregate.InvocationUses = aggregate.Uses
-		aggregate.DistinctSessions = aggregate.DistinctInvocationSessions
 		result = append(result, aggregate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate monthly invocations: %w", err)
 	}
 	return result, nil
-}
-
-// MonthlyInvocationAggregates is an alias for QueryMonthlyInvocations.
-func (s *Store) MonthlyInvocationAggregates(ctx context.Context, query history.Query) ([]history.MonthlyAggregate, error) {
-	return s.QueryMonthlyInvocations(ctx, query)
-}
-
-// QueryMonthlyUsage is a concise alias for QueryMonthlyInvocations.
-func (s *Store) QueryMonthlyUsage(ctx context.Context, query history.Query) ([]history.MonthlyAggregate, error) {
-	return s.QueryMonthlyInvocations(ctx, query)
 }
 
 // ExplainHistoryQueryPlan returns the SQLite plan for the primary filtered

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"time"
 
@@ -42,6 +43,85 @@ func (s *Store) IngestUsageEvent(ctx context.Context, event domain.UsageEvent) e
 	return nil
 }
 
+// SelfTestCaptureIngest exercises the metadata-only direct-hook write path
+// and its delivery-health update inside a transaction that is always rolled
+// back. It compares usage, evidence, and health state before and after so a
+// startup diagnostic can prove the schema and write path without invoking a
+// model, runtime, network, or MCP operation.
+func (s *Store) SelfTestCaptureIngest(ctx context.Context) error {
+	if s.isClosed() {
+		return errors.New("store is closed")
+	}
+	before, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		return fmt.Errorf("read capture self-test state: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin capture self-test: %w", err)
+	}
+	event := domain.UsageEvent{
+		ObservedAt:       time.Now().UTC(),
+		Runtime:          domain.RuntimeCodex,
+		SessionID:        "capture-self-test-session",
+		ProjectID:        "capture-self-test-project",
+		CapabilityType:   domain.CapabilityTool,
+		CapabilityName:   "capture-self-test",
+		EventType:        domain.EventInvoked,
+		Provenance:       domain.ProvenanceHook,
+		InvocationOrigin: domain.InvocationOriginUnknown,
+		SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+		SourceIdentity:   "capture-self-test-delivery",
+	}
+	normalized, err := insertUsageEventTx(ctx, tx, event)
+	if err != nil {
+		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test event: %w", err))
+	}
+	if err := markCaptureSuccessTx(ctx, tx, normalized.Runtime, normalized.ObservedAt); err != nil {
+		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test health: %w", err))
+	}
+	if err := tx.Rollback(); err != nil {
+		return fmt.Errorf("rollback capture self-test: %w", err)
+	}
+	after, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		return fmt.Errorf("read capture self-test state after rollback: %w", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		return errors.New("capture self-test changed persisted state after rollback")
+	}
+	return nil
+}
+
+type captureSelfTestState struct {
+	UsageCount    int64
+	EvidenceCount int64
+	Health        []capture.DeliveryHealth
+}
+
+func (s *Store) captureSelfTestState(ctx context.Context) (captureSelfTestState, error) {
+	var state captureSelfTestState
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_events`).Scan(&state.UsageCount); err != nil {
+		return captureSelfTestState{}, fmt.Errorf("count usage events: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&state.EvidenceCount); err != nil {
+		return captureSelfTestState{}, fmt.Errorf("count usage evidence: %w", err)
+	}
+	health, err := s.ListCaptureHealth(ctx)
+	if err != nil {
+		return captureSelfTestState{}, fmt.Errorf("read capture health: %w", err)
+	}
+	state.Health = health
+	return state, nil
+}
+
+func rollbackCaptureSelfTest(tx *sql.Tx, cause error) error {
+	if err := tx.Rollback(); err != nil {
+		return fmt.Errorf("%w; rollback capture self-test: %v", cause, err)
+	}
+	return cause
+}
+
 // RecordCaptureFailure records only a coarse, bounded failure category. It
 // does not accept an error value, so raw error text cannot cross the
 // diagnostic persistence boundary.
@@ -64,12 +144,6 @@ func (s *Store) RecordCaptureFailure(ctx context.Context, failure capture.Captur
 		return fmt.Errorf("commit capture failure: %w", err)
 	}
 	return nil
-}
-
-// RecordCaptureFailureAt is a convenience boundary for callers that already
-// have separate runtime/time/category values.
-func (s *Store) RecordCaptureFailureAt(ctx context.Context, runtime domain.Runtime, failedAt time.Time, kind capture.FailureKind) error {
-	return s.RecordCaptureFailure(ctx, capture.CaptureFailure{Runtime: runtime, FailedAt: failedAt, Kind: kind})
 }
 
 func markCaptureSuccessTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime, deliveredAt time.Time) error {
@@ -96,11 +170,7 @@ func markCaptureSuccessTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtim
 }
 
 func recordCaptureFailureTx(ctx context.Context, tx *sql.Tx, failure capture.CaptureFailure) error {
-	failedAt := failure.FailedAt
-	if failedAt.IsZero() {
-		failedAt = failure.At
-	}
-	failedAt = failedAt.UTC()
+	failedAt := failure.FailedAt.UTC()
 	kind, err := failure.Kind.FailureKindText()
 	if err != nil {
 		return err
@@ -141,7 +211,7 @@ func (s *Store) GetCaptureHealth(ctx context.Context, runtime domain.Runtime) (c
 	if err != nil {
 		return capture.DeliveryHealth{}, fmt.Errorf("read capture health: %w", err)
 	}
-	health := capture.DeliveryHealth{Runtime: runtime, ConsecutiveFailures: count, RecentFailureCount: count}
+	health := capture.DeliveryHealth{Runtime: runtime, ConsecutiveFailures: count}
 	health.LastSuccessfulDelivery, err = parseNullableTimestamp(successful)
 	if err != nil {
 		return capture.DeliveryHealth{}, fmt.Errorf("parse last successful delivery: %w", err)
@@ -157,20 +227,10 @@ func (s *Store) GetCaptureHealth(ctx context.Context, runtime domain.Runtime) (c
 		}
 		health.LastFailureKind = &failureKind
 	}
-	if _, err := health.Normalize(); err != nil {
+	if err := health.Validate(); err != nil {
 		return capture.DeliveryHealth{}, fmt.Errorf("validate persisted capture health: %w", err)
 	}
 	return health, nil
-}
-
-// GetDeliveryHealth is a descriptive alias for GetCaptureHealth.
-func (s *Store) GetDeliveryHealth(ctx context.Context, runtime domain.Runtime) (capture.DeliveryHealth, error) {
-	return s.GetCaptureHealth(ctx, runtime)
-}
-
-// GetCaptureDeliveryHealth is a fully-qualified alias for GetCaptureHealth.
-func (s *Store) GetCaptureDeliveryHealth(ctx context.Context, runtime domain.Runtime) (capture.DeliveryHealth, error) {
-	return s.GetCaptureHealth(ctx, runtime)
 }
 
 // ListCaptureHealth returns persisted runtime rows in deterministic runtime
@@ -193,7 +253,7 @@ func (s *Store) ListCaptureHealth(ctx context.Context) ([]capture.DeliveryHealth
 		if err := rows.Scan(&runtime, &successful, &failed, &count, &kind); err != nil {
 			return nil, fmt.Errorf("scan capture health: %w", err)
 		}
-		health := capture.DeliveryHealth{Runtime: runtime, ConsecutiveFailures: count, RecentFailureCount: count}
+		health := capture.DeliveryHealth{Runtime: runtime, ConsecutiveFailures: count}
 		health.LastSuccessfulDelivery, err = parseNullableTimestamp(successful)
 		if err != nil {
 			return nil, fmt.Errorf("parse capture success time: %w", err)
@@ -209,7 +269,7 @@ func (s *Store) ListCaptureHealth(ctx context.Context) ([]capture.DeliveryHealth
 			}
 			health.LastFailureKind = &failureKind
 		}
-		if _, err := health.Normalize(); err != nil {
+		if err := health.Validate(); err != nil {
 			return nil, fmt.Errorf("validate persisted capture health: %w", err)
 		}
 		result = append(result, health)
@@ -219,16 +279,6 @@ func (s *Store) ListCaptureHealth(ctx context.Context) ([]capture.DeliveryHealth
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Runtime < result[j].Runtime })
 	return result, nil
-}
-
-// ListDeliveryHealth is a descriptive alias for ListCaptureHealth.
-func (s *Store) ListDeliveryHealth(ctx context.Context) ([]capture.DeliveryHealth, error) {
-	return s.ListCaptureHealth(ctx)
-}
-
-// ListCaptureDeliveryHealth is a fully-qualified alias for ListCaptureHealth.
-func (s *Store) ListCaptureDeliveryHealth(ctx context.Context) ([]capture.DeliveryHealth, error) {
-	return s.ListCaptureHealth(ctx)
 }
 
 func parseNullableTimestamp(value sql.NullString) (*time.Time, error) {
