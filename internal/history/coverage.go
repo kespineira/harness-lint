@@ -70,6 +70,34 @@ func (k CoverageKey) Validate() error {
 	return nil
 }
 
+// CaptureStartReason identifies the evidence that opened a reliable capture
+// epoch. The contract is intentionally extensible, but currently only a
+// confirmed direct delivery proves that capture began.
+type CaptureStartReason string
+
+const (
+	CaptureStartReasonConfirmedDirectDelivery CaptureStartReason = "confirmed_direct_delivery"
+)
+
+func (r CaptureStartReason) Valid() bool {
+	return r == CaptureStartReasonConfirmedDirectDelivery
+}
+
+// CaptureEndReason identifies the lifecycle evidence that closed a reliable
+// capture epoch. Only confirmed capture failure and managed hook uninstall are
+// currently allow-listed; installation and configuration are not lifecycle
+// reasons for a reliable capture epoch.
+type CaptureEndReason string
+
+const (
+	CaptureEndReasonConfirmedCaptureFailure CaptureEndReason = "confirmed_capture_failure"
+	CaptureEndReasonManagedHookUninstall    CaptureEndReason = "managed_hook_uninstall"
+)
+
+func (r CaptureEndReason) Valid() bool {
+	return r == CaptureEndReasonConfirmedCaptureFailure || r == CaptureEndReasonManagedHookUninstall
+}
+
 // CaptureEpoch is a confirmed direct-capture interval for one runtime. An
 // epoch begins only after a real hook delivery is confirmed. Installation,
 // configuration, or a merely advertised hook never creates this value.
@@ -78,14 +106,34 @@ func (k CoverageKey) Validate() error {
 type CaptureEpoch struct {
 	Runtime domain.Runtime
 	Interval
+	StartReason CaptureStartReason
+	EndReason   CaptureEndReason
 }
 
 func (e CaptureEpoch) Validate() error {
 	if !e.Runtime.Valid() {
 		return fmt.Errorf("invalid capture epoch runtime %q", e.Runtime)
 	}
+	if !e.StartReason.Valid() {
+		if e.StartReason == "" {
+			return errors.New("capture epoch start reason is required")
+		}
+		return fmt.Errorf("invalid capture epoch start reason %q", e.StartReason)
+	}
 	if err := e.Interval.Validate(); err != nil {
 		return fmt.Errorf("invalid capture epoch interval: %w", err)
+	}
+	if e.Interval.IsOpen() {
+		if e.EndReason != "" {
+			return fmt.Errorf("open capture epoch cannot have end reason %q", e.EndReason)
+		}
+		return nil
+	}
+	if !e.EndReason.Valid() {
+		if e.EndReason == "" {
+			return errors.New("closed capture epoch end reason is required")
+		}
+		return fmt.Errorf("invalid capture epoch end reason %q", e.EndReason)
 	}
 	return nil
 }
@@ -284,8 +332,11 @@ func ClipIntervalsAsOf(intervals []Interval, asOf time.Time) ([]Interval, error)
 // ComputeEffectiveCoverage computes coverage for one capability key. Capture
 // epochs are unioned by runtime, matching presence epochs are unioned by key,
 // and their intersections are optionally clipped by a closed or open query
-// interval. No intersection produces unknown; every positive result is
-// partial, including a result derived from an open epoch or as-of clipping.
+// interval. Existing history.Query event boundaries remain closed; these
+// modeled duration intervals are half-open and this clipping does not change
+// user-facing event filtering. No intersection produces unknown; every
+// positive result is partial, including a result derived from an open epoch or
+// as-of clipping.
 func ComputeEffectiveCoverage(key CoverageKey, captureEpochs []CaptureEpoch, presenceEpochs []CapabilityPresenceEpoch, clip *Interval) (EffectiveCoverage, error) {
 	if err := key.Validate(); err != nil {
 		return EffectiveCoverage{}, err

@@ -74,10 +74,10 @@ func TestComputeEffectiveCoverageIntersectsEpochsAndPreservesGaps(t *testing.T) 
 	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	key := CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "formatter"}
 	capture := []CaptureEpoch{
-		{Runtime: key.Runtime, Interval: Interval{Start: base, End: base.Add(2 * time.Hour)}},
+		{Runtime: key.Runtime, Interval: Interval{Start: base, End: base.Add(2 * time.Hour)}, StartReason: CaptureStartReasonConfirmedDirectDelivery, EndReason: CaptureEndReasonConfirmedCaptureFailure},
 		// This is a new epoch after a confirmed failure; it must not bridge
 		// the gap between the two deliveries.
-		{Runtime: key.Runtime, Interval: Interval{Start: base.Add(4 * time.Hour), End: base.Add(6 * time.Hour)}},
+		{Runtime: key.Runtime, Interval: Interval{Start: base.Add(4 * time.Hour), End: base.Add(6 * time.Hour)}, StartReason: CaptureStartReasonConfirmedDirectDelivery, EndReason: CaptureEndReasonManagedHookUninstall},
 	}
 	presence := []CapabilityPresenceEpoch{
 		{CoverageKey: key, Interval: Interval{Start: base.Add(time.Hour), End: base.Add(5 * time.Hour)}},
@@ -98,7 +98,7 @@ func TestComputeEffectiveCoverageIntersectsEpochsAndPreservesGaps(t *testing.T) 
 func TestComputeEffectiveCoverageClipsToQueryAndAsOf(t *testing.T) {
 	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	key := CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "formatter"}
-	capture := []CaptureEpoch{{Runtime: key.Runtime, Interval: Interval{Start: base, End: time.Time{}}}}
+	capture := []CaptureEpoch{{Runtime: key.Runtime, Interval: Interval{Start: base, End: time.Time{}}, StartReason: CaptureStartReasonConfirmedDirectDelivery}}
 	presence := []CapabilityPresenceEpoch{{CoverageKey: key, Interval: Interval{Start: base, End: time.Time{}}}}
 	asOf := base.Add(3 * time.Hour)
 	clip := Interval{Start: base.Add(time.Hour), End: base.Add(4 * time.Hour)}
@@ -136,7 +136,7 @@ func TestComputeEffectiveCoverageUnknownWithoutProvableIntersection(t *testing.T
 	// capability presence. Installation/configuration therefore cannot start
 	// coverage.
 	got, err := ComputeEffectiveCoverage(key,
-		[]CaptureEpoch{{Runtime: key.Runtime, Interval: Interval{Start: base, End: base.Add(time.Hour)}}},
+		[]CaptureEpoch{{Runtime: key.Runtime, Interval: Interval{Start: base, End: base.Add(time.Hour)}, StartReason: CaptureStartReasonConfirmedDirectDelivery, EndReason: CaptureEndReasonConfirmedCaptureFailure}},
 		[]CapabilityPresenceEpoch{{CoverageKey: key, Interval: Interval{Start: base.Add(2 * time.Hour), End: base.Add(3 * time.Hour)}}},
 		nil,
 	)
@@ -169,5 +169,82 @@ func TestCoverageContractRejectsReservedCompleteAndKeepsIdentityIndependent(t *t
 	}
 	if err := (EffectiveCoverage{Key: key, Status: CoverageUnknown, Intervals: []Interval{{Start: time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC), End: time.Date(2026, 8, 14, 11, 0, 0, 0, time.UTC)}}}).Validate(); err == nil {
 		t.Fatal("unknown status with positive coverage validated, want status/evidence mismatch")
+	}
+}
+
+func TestCaptureEpochValidationRequiresConfirmedDirectDeliveryStartReason(t *testing.T) {
+	start := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	base := CaptureEpoch{
+		Runtime:  domain.RuntimeCodex,
+		Interval: Interval{Start: start},
+	}
+	for name, reason := range map[string]CaptureStartReason{
+		"missing": "",
+		"invalid": "configuration",
+	} {
+		t.Run(name, func(t *testing.T) {
+			epoch := base
+			epoch.StartReason = reason
+			if err := epoch.Validate(); err == nil {
+				t.Fatalf("CaptureEpoch.Validate() = nil for %s start reason", name)
+			}
+		})
+	}
+
+	base.StartReason = CaptureStartReasonConfirmedDirectDelivery
+	if err := base.Validate(); err != nil {
+		t.Fatalf("CaptureEpoch.Validate() with confirmed direct delivery = %v", err)
+	}
+}
+
+func TestCaptureEpochValidationRequiresEndReasonOnlyWhenClosed(t *testing.T) {
+	start := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	confirmed := CaptureStartReasonConfirmedDirectDelivery
+
+	closedWithoutEnd := CaptureEpoch{
+		Runtime:     domain.RuntimeCodex,
+		Interval:    Interval{Start: start, End: start.Add(time.Hour)},
+		StartReason: confirmed,
+	}
+	if err := closedWithoutEnd.Validate(); err == nil {
+		t.Fatal("closed CaptureEpoch.Validate() = nil without end reason")
+	}
+
+	openWithEnd := CaptureEpoch{
+		Runtime:     domain.RuntimeCodex,
+		Interval:    Interval{Start: start},
+		StartReason: confirmed,
+		EndReason:   CaptureEndReasonConfirmedCaptureFailure,
+	}
+	if err := openWithEnd.Validate(); err == nil {
+		t.Fatal("open CaptureEpoch.Validate() = nil with end reason")
+	}
+}
+
+func TestCaptureEpochValidationAllowsConfirmedFailureAndManagedUninstall(t *testing.T) {
+	start := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	for _, reason := range []CaptureEndReason{
+		CaptureEndReasonConfirmedCaptureFailure,
+		CaptureEndReasonManagedHookUninstall,
+	} {
+		epoch := CaptureEpoch{
+			Runtime:     domain.RuntimeCodex,
+			Interval:    Interval{Start: start, End: start.Add(time.Hour)},
+			StartReason: CaptureStartReasonConfirmedDirectDelivery,
+			EndReason:   reason,
+		}
+		if err := epoch.Validate(); err != nil {
+			t.Fatalf("CaptureEpoch.Validate() with end reason %q = %v", reason, err)
+		}
+	}
+
+	invalid := CaptureEpoch{
+		Runtime:     domain.RuntimeCodex,
+		Interval:    Interval{Start: start, End: start.Add(time.Hour)},
+		StartReason: CaptureStartReasonConfirmedDirectDelivery,
+		EndReason:   "configuration",
+	}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("CaptureEpoch.Validate() = nil with invalid end reason")
 	}
 }
