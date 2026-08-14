@@ -44,6 +44,7 @@ const sqliteBusyTimeoutMilliseconds = 5000
 // each public write operation uses one transaction.
 type Store struct {
 	db     *sql.DB
+	path   string
 	closed atomic.Bool
 }
 
@@ -64,7 +65,7 @@ func openWithMigrationFS(path string, migrationFS fs.FS) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrateWithFS(context.Background(), migrationFS); err != nil {
 		_ = db.Close()
 		return nil, err
