@@ -93,10 +93,7 @@ func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, a
 			coverage = formatObservationCoverage(aggregate.Coverage)
 		}
 		evidence := cleanText(capability.Evidence)
-		if capability.InvocationCount == 0 && capability.Advertised == 0 && capability.Loaded == 0 {
-			evidence = "never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient; " + evidence
-		}
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d advertised-sessions=%s efficiency=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s evidence-sources=%s exposure=%s used-last-30d=%s first-seen=%s last-seen=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s metadata-exposure=%s body-footprint=%s context-footprint-confidence=%s confidence=%s coverage-confidence=%s coverage=%s effective-coverage=%s basis=%s evidence=%s\n",
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d advertised-sessions=%s efficiency=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s evidence-sources=%s exposure=%s used-last-30d=%s first-seen=%s last-seen=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s metadata-exposure=%s body-footprint=%s confidence=%s coverage-confidence=%s coverage=%s effective-coverage=%s basis=%s evidence=%s\n",
 			capability.Runtime,
 			capability.Type,
 			cleanText(capability.Name),
@@ -119,7 +116,6 @@ func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, a
 			humanInvocationTimestamp(capability.LastInvocationEffectiveAt),
 			formatReportMeasurement(capability.MetadataExposure),
 			formatReportMeasurement(capability.LoadedBodyFootprint),
-			capability.ContextFootprintConfidence,
 			capability.Confidence,
 			capability.CoverageConfidence,
 			coverage,

@@ -126,6 +126,12 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 			t.Fatalf("human report = %q, missing %q", human.String(), want)
 		}
 	}
+	if !strings.Contains(human.String(), "invoked in 0 / 1 advertised sessions") {
+		t.Fatalf("human report omitted exact advertised-session relation: %s", human.String())
+	}
+	if strings.Contains(human.String(), "context-footprint-confidence") || strings.Contains(first, "context_footprint_confidence") {
+		t.Fatalf("human/JSON output collapsed independent footprint confidences: human=%s json=%s", human.String(), first)
+	}
 }
 
 func TestReportAndStaleJSONEmptyDatasetsAreValid(t *testing.T) {

@@ -1,12 +1,1 @@
-{
-  "schema_version": 2,
-  "generated_at": "2026-08-14T12:00:00Z",
-  "period": {
-    "days": 60,
-    "start": "2026-06-15T12:00:00Z",
-    "end": "2026-08-14T12:00:00Z",
-    "inclusive": true
-  },
-  "filters": {"runtime": null, "type": null},
-  "capabilities": [{"runtime": "codex", "name": "Bash", "advertised_sessions": null, "invoked_in_advertised_sessions": null, "effective_coverage": {"status": "unknown", "covered_duration": null}}, {"runtime": "codex", "name": "update_plan", "advertised_sessions": null, "invoked_in_advertised_sessions": null, "effective_coverage": {"status": "unknown", "covered_duration": null}}]
-}
+{"schema_version":2,"generated_at":"2026-08-14T12:00:00Z","period":{"days":60,"start":"2026-06-15T12:00:00Z","end":"2026-08-14T12:00:00Z","inclusive":true},"filters":{"runtime":null,"type":null},"capabilities":[{"runtime":"codex","type":"tool","name":"Bash","installed":true,"installed_scopes":["user"],"uses":1,"distinct_sessions":1,"first_observed_at":"2026-08-14T12:00:00Z","last_observed_at":"2026-08-14T12:00:00Z","first_effective_activity_at":"2026-08-14T12:00:00Z","last_effective_activity_at":"2026-08-14T12:00:00Z","provenance":{"hook":1,"transcript":0,"import":0,"sources":["hook"]},"advertised_observations":0,"advertised_sessions":null,"invoked_in_advertised_sessions":null,"loaded_observations":0,"effective_coverage":{"status":"unknown","covered_duration":null},"observation_only_coverage":{"first_inventory_observed_at":"2026-08-13T12:00:00Z","last_inventory_observed_at":"2026-08-14T12:00:00Z","first_usage_observed_at":"2026-08-14T12:00:00Z","last_usage_observed_at":"2026-08-14T12:00:00Z","first_direct_hook_observed_at":"2026-08-14T12:00:00Z","last_direct_hook_observed_at":"2026-08-14T12:00:00Z"}},{"runtime":"codex","type":"tool","name":"update_plan","installed":false,"installed_scopes":[],"uses":1,"distinct_sessions":1,"first_observed_at":"2026-08-14T12:00:00Z","last_observed_at":"2026-08-14T12:00:00Z","first_effective_activity_at":"2026-08-14T12:00:00Z","last_effective_activity_at":"2026-08-14T12:00:00Z","provenance":{"hook":1,"transcript":0,"import":0,"sources":["hook"]},"advertised_observations":0,"advertised_sessions":null,"invoked_in_advertised_sessions":null,"loaded_observations":0,"effective_coverage":{"status":"unknown","covered_duration":null},"observation_only_coverage":{"first_inventory_observed_at":null,"last_inventory_observed_at":null,"first_usage_observed_at":"2026-08-14T12:00:00Z","last_usage_observed_at":"2026-08-14T12:00:00Z","first_direct_hook_observed_at":"2026-08-14T12:00:00Z","last_direct_hook_observed_at":"2026-08-14T12:00:00Z"}}]}

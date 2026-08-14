@@ -165,6 +165,7 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 		capability("dead", domain.Measurement{Confidence: domain.ConfidenceUnknown}),
 		capability("stale", domain.Measurement{Confidence: domain.ConfidenceUnknown}),
 		capability("boundary", domain.Measurement{Confidence: domain.ConfidenceUnknown}),
+		capability("future", domain.Measurement{Confidence: domain.ConfidenceUnknown}),
 		capability("review", domain.Measurement{Value: 1200, Confidence: domain.ConfidenceEstimated, Basis: "fixture"}),
 		capability("keep", domain.Measurement{Value: 10, Confidence: domain.ConfidenceExact, Basis: "fixture"}),
 	}
@@ -189,6 +190,7 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 	events := []domain.UsageEvent{
 		event("stale", now.Add(-61*24*time.Hour), domain.EventInvoked, "stale-event"),
 		event("boundary", now.Add(-60*24*time.Hour), domain.EventInvoked, "boundary-event"),
+		event("future", now.Add(time.Hour), domain.EventInvoked, "future-event"),
 		event("review", now.Add(-24*time.Hour), domain.EventInvoked, "review-event"),
 		event("keep", now.Add(-24*time.Hour), domain.EventLoaded, "keep-event"),
 	}
@@ -208,6 +210,9 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stale output = %q, missing %q", output, want)
 		}
+	}
+	if !strings.Contains(output, "name=future status=KEEP") || !strings.Contains(output, "first-invocation-effective=2026-08-13T16:00:00Z") {
+		t.Fatalf("stale output omitted future event evidence/diagnostics: %q", output)
 	}
 	if strings.Contains(strings.ToLower(output), "score") {
 		t.Fatalf("stale output = %q, must not contain numeric scores", output)

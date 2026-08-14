@@ -88,7 +88,6 @@ type Capability struct {
 	Status                      string             `json:"status"`
 	Confidence                  string             `json:"confidence"`
 	CoverageConfidence          string             `json:"coverage_confidence"`
-	ContextFootprintConfidence  string             `json:"context_footprint_confidence"`
 	Basis                       string             `json:"basis"`
 	Evidence                    string             `json:"evidence"`
 	EvidenceSources             []string           `json:"evidence_sources"`
@@ -711,14 +710,8 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 	if effectiveCoverage == nil {
 		effectiveCoverage = summary.effectiveCoverage
 	}
-	firstSeen := evidence.FirstSeen
-	lastSeen := evidence.LastSeen
-	if firstSeen == nil {
-		firstSeen = timestampValue(evidence.Capability.FirstSeen)
-	}
-	if lastSeen == nil {
-		lastSeen = timestampValue(evidence.Capability.LastSeen)
-	}
+	firstSeen := timestampValue(evidence.Capability.FirstSeen)
+	lastSeen := timestampValue(evidence.Capability.LastSeen)
 	scopes := make([]string, 0, len(installedScopes))
 	for _, scope := range installedScopes {
 		if scope.Valid() {
@@ -740,7 +733,6 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 		Status:                      string(evidence.Classification),
 		Confidence:                  string(evidence.Confidence),
 		CoverageConfidence:          string(evidence.CoverageConfidence),
-		ContextFootprintConfidence:  string(evidence.ContextFootprintConfidence),
 		Basis:                       safeBasis(evidence.Basis),
 		Evidence:                    safeBasis(evidence.EvidenceCoverage),
 		EvidenceSources:             summary.sourceNames(),

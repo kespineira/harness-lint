@@ -46,8 +46,8 @@ func TestAnalyzeHistoryEffectiveCoverageIsAsOfClippedAndUnknownWhenFuture(t *tes
 	if err != nil {
 		t.Fatalf("AnalyzeHistory(future) error = %v", err)
 	}
-	if got := result.Capabilities[0]; got.ModeledCoverageStatus != history.CoverageUnknown || got.ModeledCoveredDuration != 0 || got.Classification != REVIEW {
-		t.Fatalf("future modeled coverage = %#v, want unknown/zero and REVIEW", got)
+	if got := result.Capabilities[0]; got.Classification != REVIEW || !strings.Contains(got.Basis, "modeled coverage status=unknown") {
+		t.Fatalf("future modeled coverage = %#v, want unknown and REVIEW", got)
 	}
 	aggregate.EffectiveCoverage = partial
 	result, err = AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
@@ -55,14 +55,32 @@ func TestAnalyzeHistoryEffectiveCoverageIsAsOfClippedAndUnknownWhenFuture(t *tes
 		t.Fatalf("AnalyzeHistory(partial) error = %v", err)
 	}
 	got := result.Capabilities[0]
-	if got.ModeledCoverageStatus != history.CoveragePartial || got.ModeledCoveredDuration != 2*time.Hour {
-		t.Fatalf("as-of modeled coverage = %s/%s, want partial/2h", got.ModeledCoverageStatus, got.ModeledCoveredDuration)
+	if got.Classification != REVIEW || got.Classification == DEAD {
+		t.Fatalf("positive modeled coverage with zero uses = %q, want REVIEW and never DEAD", got.Classification)
 	}
-	if got.FirstSeen == nil || !got.FirstSeen.Equal(capability.FirstSeen) || got.LastSeen == nil || !got.LastSeen.Equal(capability.LastSeen) {
-		t.Fatalf("inventory bounds = %v/%v, want domain capability bounds", got.FirstSeen, got.LastSeen)
+	if !strings.Contains(got.Basis, "modeled coverage status=partial duration=2h") {
+		t.Fatalf("as-of modeled coverage basis = %q, want partial/2h", got.Basis)
 	}
 	if !strings.Contains(got.Basis, "modeled coverage status=partial") || !strings.Contains(got.Basis, "no invocation evidence") {
 		t.Fatalf("basis = %q, want classification and coverage explanation", got.Basis)
+	}
+}
+
+func TestAnalyzeHistoryLongPositiveCoverageWithZeroUsesRemainsReview(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("long-positive-zero-use")
+	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	aggregate := history.Aggregate{
+		Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
+		EffectiveCoverage: &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now.Add(-7 * 24 * time.Hour), End: now.Add(time.Hour)}}},
+	}
+	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.Classification != REVIEW || evidence.Classification == DEAD || !strings.Contains(evidence.Basis, "modeled coverage status=partial duration=168h0m0s") {
+		t.Fatalf("long positive coverage with zero uses = %q/%q, want partial coverage and REVIEW", evidence.Classification, evidence.Basis)
 	}
 }
 

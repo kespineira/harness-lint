@@ -218,6 +218,12 @@ func assertPublicJSONGolden(t *testing.T, name, root, output string) {
 	if err := json.Unmarshal([]byte(strings.ReplaceAll(output, root, "<ROOT>")), &got); err != nil {
 		t.Fatalf("decode normalized %s: %v", name, err)
 	}
+	if strings.HasSuffix(name, "-v2.json") {
+		if !reflect.DeepEqual(want, got) {
+			t.Fatalf("%s full v2 document differs:\nwant=%s\n got=%s", name, string(wantData), strings.ReplaceAll(output, root, "<ROOT>"))
+		}
+		return
+	}
 	assertJSONSubset(t, name, want, got, "$")
 }
 
