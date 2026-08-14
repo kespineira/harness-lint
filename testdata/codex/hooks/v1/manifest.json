@@ -1,0 +1,36 @@
+{
+  "runtime": "codex",
+  "fixture_schema": "runtime-conformance/hooks-v1",
+  "source_documentation_url": "https://learn.chatgpt.com/docs/hooks",
+  "as_of": "2026-08-14",
+  "release_behavior_note": "Synthetic command-hook payloads follow the current Codex hooks release documentation. The page is the release reference: generated schemas on the main branch may contain fields that are ahead of a released Codex build. Direct parsing is intentionally limited to metadata-only PostToolUse observations; lifecycle and prompt events remain unsupported usage evidence.",
+  "expectation_policy": {
+    "valid": "The parser must accept the documented PostToolUse shape and emit one valid metadata-only invocation.",
+    "malformed": "Empty or syntactically malformed JSON must be rejected without echoing payload content.",
+    "unknown_event": "Well-formed events outside the parser's PostToolUse usage scope must be rejected safely.",
+    "additive": "Unknown or undocumented additive fields must be tolerated and must not change normalized metadata.",
+    "optional": "Documented optional fields may be absent; the event remains valid and missing identity evidence stays conservative.",
+    "duplicate": "Entries sharing a documented tool_use_id in the same session and turn represent one delivery identity; a distinct tool_use_id remains a distinct invocation. Missing IDs use the conservative fallback."
+  },
+  "identity_policy": {
+    "same": "PostToolUse deliveries with the same session_id, turn_id, and tool_use_id have the same hashed source identity and fingerprint.",
+    "distinct": "A different tool_use_id must not collapse into the same fingerprint.",
+    "missing": "Without tool_use_id, direct-hook identity is unavailable and the normalized fingerprint is time-dependent."
+  },
+  "fixtures": [
+    {"file": "valid_builtin.json", "expectation": "valid", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "valid_mcp.json", "expectation": "valid", "capability_type": "mcp_tool", "capability_name": "mcp__filesystem__read_file", "source_identity": "present"},
+    {"file": "valid_agent.json", "expectation": "valid", "capability_type": "agent", "capability_name": "spawn_agent", "source_identity": "present"},
+    {"file": "skill_not_proven.json", "expectation": "valid", "capability_type": "tool", "capability_name": "Skill", "source_identity": "present"},
+    {"file": "missing_optional.json", "expectation": "optional", "capability_type": "tool", "capability_name": "update_plan", "source_identity": "absent", "optional_fields": ["turn_id", "tool_use_id"]},
+    {"file": "extra_fields.json", "expectation": "additive", "capability_type": "tool", "capability_name": "update_plan", "source_identity": "present", "strip_fields": ["future_field"]},
+    {"file": "undocumented_timestamp_ignored.json", "expectation": "additive", "capability_type": "tool", "capability_name": "apply_patch", "source_identity": "present", "optional_fields": ["source_timestamp"], "strip_fields": ["timestamp", "source_timestamp"]},
+    {"file": "privacy_sentinel.json", "expectation": "valid", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "duplicate_a.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "same", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "duplicate_b.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "same", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "distinct_id.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "distinct", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "empty.json", "expectation": "malformed"},
+    {"file": "malformed.json", "expectation": "malformed"},
+    {"file": "unknown_event.json", "expectation": "unknown_event"}
+  ]
+}

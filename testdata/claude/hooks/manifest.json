@@ -1,0 +1,40 @@
+{
+  "runtime": "claude-code",
+  "fixture_schema": "runtime-conformance/hooks-v1",
+  "source_documentation_url": "https://code.claude.com/docs/en/hooks",
+  "as_of": "2026-08-14",
+  "release_behavior_note": "Synthetic command-hook payloads follow the current Claude Code hooks reference. Direct parsing is intentionally limited to metadata-only PostToolUse, PostToolUseFailure, and slash-command UserPromptExpansion observations; SubagentStart and SubagentStop remain lifecycle evidence rather than invocation events.",
+  "expectation_policy": {
+    "valid": "The parser must accept the documented event shape and emit one valid metadata-only invocation.",
+    "malformed": "Empty or syntactically malformed JSON must be rejected without echoing payload content.",
+    "unknown_event": "Well-formed events outside the parser's usage scope must be rejected safely.",
+    "additive": "Unknown or undocumented additive fields must be tolerated and must not change normalized metadata.",
+    "optional": "Documented optional fields may be absent; the event remains valid and missing identity evidence stays conservative.",
+    "duplicate": "Entries sharing a documented tool_use_id represent one delivery identity; a distinct tool_use_id remains a distinct invocation. Missing IDs use the conservative fallback."
+  },
+  "identity_policy": {
+    "same": "PostToolUse and PostToolUseFailure with the same session_id and tool_use_id have the same hashed source identity and fingerprint.",
+    "distinct": "A different tool_use_id must not collapse into the same fingerprint.",
+    "missing": "Without tool_use_id, direct-hook identity is unavailable and the normalized fingerprint is time-dependent."
+  },
+  "fixtures": [
+    {"file": "v1-post-tool-use-builtin.json", "expectation": "valid", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "v1-post-tool-use-mcp.json", "expectation": "valid", "capability_type": "mcp_tool", "capability_name": "mcp__fixture__search", "source_identity": "present"},
+    {"file": "v1-post-tool-use-skill-model-selected.json", "expectation": "valid", "capability_type": "skill", "capability_name": "fixture-review", "source_identity": "present"},
+    {"file": "v1-post-tool-use-agent.json", "expectation": "valid", "capability_type": "agent", "capability_name": "fixture-explore", "source_identity": "present"},
+    {"file": "v1-user-prompt-expansion-slash-command-explicit.json", "expectation": "valid", "capability_type": "command", "capability_name": "fixture-review", "source_identity": "absent"},
+    {"file": "v1-post-tool-use-failure.json", "expectation": "valid", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "v1-missing-optional-fields.json", "expectation": "optional", "capability_type": "tool", "capability_name": "Read", "source_identity": "absent", "optional_fields": ["tool_input", "tool_use_id"]},
+    {"file": "v1-unknown-extra-fields.json", "expectation": "additive", "capability_type": "tool", "capability_name": "Glob", "source_identity": "present", "strip_fields": ["extra"]},
+    {"file": "v1-undocumented-timestamps-ignored.json", "expectation": "additive", "capability_type": "tool", "capability_name": "Read", "source_identity": "present", "optional_fields": ["source_timestamp"], "strip_fields": ["timestamp", "event_timestamp"]},
+    {"file": "v1-post-tool-use-id-success.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "same", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "v1-post-tool-use-id-failure.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "same", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "v1-post-tool-use-id-different.json", "expectation": "duplicate", "duplicate_group": "tool-use-retry", "identity": "distinct", "capability_type": "tool", "capability_name": "Bash", "source_identity": "present"},
+    {"file": "v1-empty.json", "expectation": "malformed"},
+    {"file": "v1-malformed.json", "expectation": "malformed"},
+    {"file": "v1-unknown-event.json", "expectation": "unknown_event"},
+    {"file": "v1-wrong-event.json", "expectation": "unknown_event"},
+    {"file": "v1-subagent-start.json", "expectation": "unknown_event"},
+    {"file": "v1-subagent-stop.json", "expectation": "unknown_event"}
+  ]
+}
