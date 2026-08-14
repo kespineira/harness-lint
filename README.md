@@ -85,7 +85,10 @@ harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint context [--db PATH] [--days N] [--now RFC3339]
 harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint hooks   <status|test|install|uninstall> [claude|codex] [--json] [--dry-run] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks status    [claude|codex] [--json] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks test      [claude|codex] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks install   [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks uninstall [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint ingest  --runtime <claude|codex> [--event EVENT] [--managed-by harness-lint-hooks/v1] [--db PATH] < one JSON document on stdin
 ```
 
