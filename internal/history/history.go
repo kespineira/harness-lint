@@ -112,6 +112,11 @@ type Aggregate struct {
 	// evidence exists; it is non-nil only when such evidence exists in the
 	// selected interval.
 	ObservedAdvertisedSessions *int64
+	// InvokedInAdvertisedSessions is nil when no explicit advertised-event
+	// evidence exists; otherwise it is the distinct-session intersection of
+	// advertised and invoked events for this canonical key in the interval.
+	// A known zero is meaningful when advertised sessions were never invoked.
+	InvokedInAdvertisedSessions *int64
 
 	Installed       bool
 	InstalledScopes []domain.Scope

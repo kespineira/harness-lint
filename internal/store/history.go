@@ -36,8 +36,10 @@ func (s *Store) QueryInvocationHistory(ctx context.Context, query history.Query)
 	invocationClause, invocationArgs := historyUsageFilters("u", query)
 	evidenceClause, evidenceArgs := historyUsageFilters("u", query)
 	stateClause, stateArgs := historyUsageFilters("u", query)
+	advertisedClause, advertisedArgs := historyUsageFilters("u", query)
 	invocationClause += historyEventTypeFilter(invocationClause, "invoked")
 	evidenceClause += historyEventTypeFilter(evidenceClause, "invoked")
+	advertisedClause += historyEventTypeFilter(advertisedClause, "advertised")
 	statement := `WITH keys AS (
 	SELECT u.runtime, u.capability_type, u.capability_name
 	FROM usage_events AS u` + usageClause + `
@@ -75,6 +77,22 @@ SELECT c.runtime, c.capability_type, c.name
 		NULLIF(COUNT(DISTINCT CASE WHEN u.event_type = 'advertised' THEN u.session_id END), 0) AS advertised_sessions
 	FROM usage_events AS u` + stateClause + `
 	GROUP BY u.runtime, u.capability_type, u.capability_name
+), advertised_sessions AS (
+	SELECT DISTINCT u.runtime, u.capability_type, u.capability_name, u.session_id
+	FROM usage_events AS u` + advertisedClause + `
+), invoked_sessions AS (
+	SELECT DISTINCT u.runtime, u.capability_type, u.capability_name, u.session_id
+	FROM usage_events AS u` + invocationClause + `
+), session_relationship AS (
+	SELECT a.runtime, a.capability_type, a.capability_name,
+		COUNT(DISTINCT i.session_id) AS invoked_in_advertised_sessions
+	FROM advertised_sessions AS a
+	LEFT JOIN invoked_sessions AS i
+		ON i.runtime = a.runtime
+		AND i.capability_type = a.capability_type
+		AND i.capability_name = a.capability_name
+		AND i.session_id = a.session_id
+	GROUP BY a.runtime, a.capability_type, a.capability_name
 )
 SELECT k.runtime, k.capability_type, k.capability_name,
 	COALESCE(i.uses, 0), COALESCE(i.distinct_sessions, 0),
@@ -82,19 +100,22 @@ SELECT k.runtime, k.capability_type, k.capability_name,
 	i.first_effective_at, i.last_effective_at,
 	COALESCE(e.hook_count, 0), COALESCE(e.transcript_count, 0), COALESCE(e.import_count, 0),
 	COALESCE(sc.advertised_observations, 0), COALESCE(sc.loaded_observations, 0),
-	sc.advertised_sessions
+	sc.advertised_sessions, sr.invoked_in_advertised_sessions
 FROM keys AS k
 LEFT JOIN invocation AS i ON i.runtime = k.runtime AND i.capability_type = k.capability_type AND i.capability_name = k.capability_name
 LEFT JOIN evidence AS e ON e.runtime = k.runtime AND e.capability_type = k.capability_type AND e.capability_name = k.capability_name
 LEFT JOIN state_counts AS sc ON sc.runtime = k.runtime AND sc.capability_type = k.capability_type AND sc.capability_name = k.capability_name
+LEFT JOIN session_relationship AS sr ON sr.runtime = k.runtime AND sr.capability_type = k.capability_type AND sr.capability_name = k.capability_name
 ORDER BY k.runtime, k.capability_type, k.capability_name`
 
-	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(invocationArgs)+len(evidenceArgs)+len(stateArgs))
+	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(invocationArgs)+len(evidenceArgs)+len(stateArgs)+len(advertisedArgs)+len(invocationArgs))
 	args = append(args, usageArgs...)
 	args = append(args, currentArgs...)
 	args = append(args, invocationArgs...)
 	args = append(args, evidenceArgs...)
 	args = append(args, stateArgs...)
+	args = append(args, advertisedArgs...)
+	args = append(args, invocationArgs...)
 	rows, err := s.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query invocation history: %w", err)
@@ -106,8 +127,8 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 		var firstObserved, lastObserved, firstEffective, lastEffective sql.NullString
 		var uses, sessions, hookCount, transcriptCount, importCount int64
 		var advertisedObservations, loadedObservations int64
-		var advertisedSessions sql.NullInt64
-		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &aggregate.CapabilityName, &uses, &sessions, &firstObserved, &lastObserved, &firstEffective, &lastEffective, &hookCount, &transcriptCount, &importCount, &advertisedObservations, &loadedObservations, &advertisedSessions); err != nil {
+		var advertisedSessions, invokedInAdvertisedSessions sql.NullInt64
+		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &aggregate.CapabilityName, &uses, &sessions, &firstObserved, &lastObserved, &firstEffective, &lastEffective, &hookCount, &transcriptCount, &importCount, &advertisedObservations, &loadedObservations, &advertisedSessions, &invokedInAdvertisedSessions); err != nil {
 			return nil, fmt.Errorf("scan invocation history: %w", err)
 		}
 		aggregate.Uses = uses
@@ -138,6 +159,10 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 		if advertisedSessions.Valid {
 			value := advertisedSessions.Int64
 			aggregate.ObservedAdvertisedSessions = &value
+		}
+		if invokedInAdvertisedSessions.Valid {
+			value := invokedInAdvertisedSessions.Int64
+			aggregate.InvokedInAdvertisedSessions = &value
 		}
 		result = append(result, aggregate)
 	}

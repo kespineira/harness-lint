@@ -332,6 +332,134 @@ func TestHistoryStateObservationCountsUseClosedIntervalAndStayIndependent(t *tes
 	}
 }
 
+func TestHistoryObservationEfficiencyUsesBoundedCanonicalSessionIntersection(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	start := time.Date(2026, 8, 14, 13, 0, 0, 0, time.UTC)
+	end := start.Add(2 * time.Minute)
+	makeEvent := func(at time.Time, runtime domain.Runtime, typ domain.CapabilityType, name string, session string, eventType domain.EventType) domain.UsageEvent {
+		event := testUsageEvent(at, name, eventType)
+		event.Runtime = runtime
+		event.CapabilityType = typ
+		event.SessionID = session
+		event.ProjectID = "efficiency-project"
+		return event
+	}
+
+	// Repeated advertisements with no invocation prove that a known zero is
+	// retained rather than being confused with an unknown relationship.
+	neverInvokedAtStart := makeEvent(start, domain.RuntimeCodex, domain.CapabilityTool, "never-invoked", "advertised-only", domain.EventAdvertised)
+	neverInvokedAtStart.SourceIdentity = "never-advertised-start"
+	neverInvokedAtEnd := neverInvokedAtStart
+	neverInvokedAtEnd.ObservedAt = end
+	neverInvokedAtEnd.SourceIdentity = "never-advertised-end"
+
+	sharedAdvertised := makeEvent(start, domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "shared-session", domain.EventAdvertised)
+	sharedAdvertised.SourceIdentity = "efficiency-advertised-start"
+	sharedAdvertisedAgain := sharedAdvertised
+	sharedAdvertisedAgain.ObservedAt = end
+	sharedAdvertisedAgain.SourceIdentity = "efficiency-advertised-end"
+	advertisedOnly := makeEvent(end, domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "advertised-only-efficiency", domain.EventAdvertised)
+	advertisedOnly.SourceIdentity = "efficiency-advertised-only"
+	invokedOnly := makeEvent(end, domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "invoked-only-session", domain.EventInvoked)
+	invokedOnly.SourceIdentity = "efficiency-invoked-only"
+	sharedInvocationHook := makeEvent(start.Add(time.Minute), domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "shared-session", domain.EventInvoked)
+	sharedInvocationHook.Provenance = domain.ProvenanceHook
+	sharedInvocationHook.SourceIdentity = "efficiency-canonical-invocation"
+	sharedInvocationTranscript := sharedInvocationHook
+	sharedInvocationTranscript.ObservedAt = end
+	sharedInvocationTranscript.Provenance = domain.ProvenanceTranscript
+	// Same stable source identity is one canonical usage row, despite two
+	// provenance paths and different local observation times.
+	sharedInvocationOutside := makeEvent(end.Add(time.Second), domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "shared-session", domain.EventInvoked)
+	sharedInvocationOutside.SourceIdentity = "efficiency-invocation-outside"
+
+	// This event is observed in the interval but its effective source time is
+	// before it, so it must not contribute to either relationship side.
+	advertisedBefore := makeEvent(start, domain.RuntimeCodex, domain.CapabilityTool, "efficiency", "shared-session", domain.EventAdvertised)
+	advertisedBefore.SourceIdentity = "efficiency-advertised-before"
+	before := start.Add(-time.Nanosecond)
+	advertisedBefore.SourceTimestamp = &before
+
+	claudeAdvertised := makeEvent(start, domain.RuntimeClaude, domain.CapabilityTool, "efficiency", "claude-shared", domain.EventAdvertised)
+	claudeAdvertised.SourceIdentity = "claude-efficiency-advertised"
+	claudeInvoked := makeEvent(end, domain.RuntimeClaude, domain.CapabilityTool, "efficiency", "claude-shared", domain.EventInvoked)
+	claudeInvoked.SourceIdentity = "claude-efficiency-invoked"
+	otherCapability := makeEvent(end, domain.RuntimeCodex, domain.CapabilitySkill, "efficiency", "skill-session", domain.EventAdvertised)
+	otherCapability.SourceIdentity = "skill-efficiency-advertised"
+
+	invokedWithoutAdvertisement := makeEvent(start, domain.RuntimeCodex, domain.CapabilityTool, "invoked-only", "invoked-only-session", domain.EventInvoked)
+	invokedWithoutAdvertisement.SourceIdentity = "invoked-only-event"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{
+		neverInvokedAtStart, neverInvokedAtEnd,
+		sharedAdvertised, sharedAdvertisedAgain, advertisedOnly, invokedOnly,
+		sharedInvocationHook, sharedInvocationTranscript, sharedInvocationOutside,
+		advertisedBefore, claudeAdvertised, claudeInvoked,
+		otherCapability, invokedWithoutAdvertisement,
+	}); err != nil {
+		t.Fatalf("InsertUsageEvents(efficiency relation): %v", err)
+	}
+
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Start: start, End: end})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(efficiency relation): %v", err)
+	}
+	byKey := make(map[string]history.Aggregate, len(rows))
+	for _, row := range rows {
+		byKey[string(row.Runtime)+"/"+string(row.CapabilityType)+"/"+row.CapabilityName] = row
+	}
+	if len(byKey) != 5 {
+		t.Fatalf("efficiency relation rows = %#v, want five canonical runtime/type/name keys", rows)
+	}
+
+	never := byKey["codex/tool/never-invoked"]
+	if never.ObservedAdvertisedSessions == nil || *never.ObservedAdvertisedSessions != 1 || never.InvokedInAdvertisedSessions == nil || *never.InvokedInAdvertisedSessions != 0 {
+		var advertised, invoked any
+		if never.ObservedAdvertisedSessions != nil {
+			advertised = *never.ObservedAdvertisedSessions
+		}
+		if never.InvokedInAdvertisedSessions != nil {
+			invoked = *never.InvokedInAdvertisedSessions
+		}
+		t.Fatalf("advertised-but-never-invoked relation = %#v (advertised=%v invoked=%v), want advertised=1 invoked-in-advertised=0", never, advertised, invoked)
+	}
+
+	efficiency := byKey["codex/tool/efficiency"]
+	if efficiency.AdvertisedObservations != 3 || efficiency.ObservedAdvertisedSessions == nil || *efficiency.ObservedAdvertisedSessions != 2 || efficiency.InvokedInAdvertisedSessions == nil || *efficiency.InvokedInAdvertisedSessions != 1 {
+		t.Fatalf("codex efficiency relation = %#v, want observations=3 advertised sessions=2 intersection=1", efficiency)
+	}
+	if efficiency.Uses != 2 || efficiency.DistinctInvocationSessions != 2 || efficiency.InvocationEvidence[domain.ProvenanceHook] != 1 || efficiency.InvocationEvidence[domain.ProvenanceTranscript] != 1 {
+		t.Fatalf("canonical invocation aggregation = %#v, want two bounded rows/two sessions and two evidence paths", efficiency)
+	}
+
+	claude := byKey["claude-code/tool/efficiency"]
+	if claude.ObservedAdvertisedSessions == nil || *claude.ObservedAdvertisedSessions != 1 || claude.InvokedInAdvertisedSessions == nil || *claude.InvokedInAdvertisedSessions != 1 {
+		t.Fatalf("claude efficiency relation = %#v, want one advertised and one intersecting session", claude)
+	}
+	if other := byKey["codex/skill/efficiency"]; other.InvokedInAdvertisedSessions == nil || *other.InvokedInAdvertisedSessions != 0 {
+		t.Fatalf("capability type isolation = %#v, want known zero intersection", other)
+	}
+	invokedOnlyRow := byKey["codex/tool/invoked-only"]
+	if invokedOnlyRow.ObservedAdvertisedSessions != nil || invokedOnlyRow.InvokedInAdvertisedSessions != nil {
+		t.Fatalf("advertisement-absent relation = %#v, want both relationship fields unknown", invokedOnlyRow)
+	}
+
+	for key, row := range byKey {
+		if row.ObservedAdvertisedSessions == nil {
+			if row.InvokedInAdvertisedSessions != nil {
+				t.Fatalf("relationship invariant for %s = %#v, invoked numerator must be nil when denominator is unknown", key, row)
+			}
+			continue
+		}
+		if *row.ObservedAdvertisedSessions < 0 || *row.InvokedInAdvertisedSessions < 0 || *row.InvokedInAdvertisedSessions > *row.ObservedAdvertisedSessions {
+			t.Fatalf("relationship invariant for %s = %#v", key, row)
+		}
+	}
+	if strings.Contains(fmt.Sprintf("%#v", rows), "advertised-only") || strings.Contains(fmt.Sprintf("%#v", rows), "efficiency-project") {
+		t.Fatal("history aggregate leaked raw session or project identifiers")
+	}
+}
+
 func TestHistoryCoverageUnknownRemainsNil(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
