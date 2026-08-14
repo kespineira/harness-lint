@@ -226,17 +226,16 @@ func (s *observationSummary) add(event domain.UsageEvent) {
 	s.hasInvocation = true
 }
 
-func (s *observationSummary) addAggregate(aggregate history.Aggregate) {
+func (s *observationSummary) setAggregate(aggregate history.Aggregate) {
 	s.aggregate = true
-	s.installed = s.installed || aggregate.Installed
-	s.installedScopes = mergeScopes(s.installedScopes, aggregate.InstalledScopes)
-	if aggregate.ObservedAdvertisedSessions != nil {
-		value := *aggregate.ObservedAdvertisedSessions
-		s.observedAdvertisedSessions = sumOptionalCounts(s.observedAdvertisedSessions, &value)
-		s.counts[domain.EventAdvertised] = addCount(s.counts[domain.EventAdvertised], value)
-	}
-	s.counts[domain.EventInvoked] = addCount(s.counts[domain.EventInvoked], aggregate.Uses)
-	s.distinctSessions = addCount(s.distinctSessions, aggregate.DistinctInvocationSessions)
+	s.installed = aggregate.Installed
+	s.installedScopes = append([]domain.Scope(nil), aggregate.InstalledScopes...)
+	sort.Slice(s.installedScopes, func(i, j int) bool { return s.installedScopes[i] < s.installedScopes[j] })
+	s.observedAdvertisedSessions = aggregate.ObservedAdvertisedSessions
+	s.counts[domain.EventAdvertised] = int(aggregate.AdvertisedObservations)
+	s.counts[domain.EventLoaded] = int(aggregate.LoadedObservations)
+	s.counts[domain.EventInvoked] = int(aggregate.Uses)
+	s.distinctSessions = int(aggregate.DistinctInvocationSessions)
 	for provenance, count := range aggregate.InvocationEvidence {
 		if count > 0 {
 			s.source[provenance] = struct{}{}
@@ -245,64 +244,18 @@ func (s *observationSummary) addAggregate(aggregate history.Aggregate) {
 	if aggregate.Uses > 0 {
 		s.hasInvocation = true
 		s.hasActivity = true
-		s.firstObserved = timePointerValue(aggregate.FirstObservedAt, s.firstObserved, true)
-		s.lastObserved = timePointerValue(aggregate.LastObservedAt, s.lastObserved, false)
-		s.firstActivity = timePointerValue(aggregate.FirstEffectiveActivityAt, s.firstActivity, true)
-		s.lastActivity = timePointerValue(aggregate.LastEffectiveActivityAt, s.lastActivity, false)
+		s.firstObserved = aggregate.FirstObservedAt.UTC()
+		s.lastObserved = aggregate.LastObservedAt.UTC()
+		s.firstActivity = aggregate.FirstEffectiveActivityAt.UTC()
+		s.lastActivity = aggregate.LastEffectiveActivityAt.UTC()
 		s.firstInvocationSeen = s.firstObserved
 		s.lastInvocationSeen = s.lastObserved
 		s.firstInvocation = s.firstActivity
 		s.lastInvocation = s.lastActivity
+	} else if aggregate.LoadedObservations > 0 {
+		s.hasActivity = true
 	}
-	s.coverage = mergeCoverage(s.coverage, aggregate.Coverage)
-}
-
-func addCount(current int, value int64) int {
-	if value <= 0 {
-		return current
-	}
-	maxInt := int64(^uint(0) >> 1)
-	if value > maxInt || int64(current) > maxInt-value {
-		return int(maxInt)
-	}
-	return current + int(value)
-}
-
-func sumOptionalCounts(left, right *int64) *int64 {
-	if left == nil {
-		if right == nil {
-			return nil
-		}
-		value := *right
-		return &value
-	}
-	if right == nil || *right <= 0 || *left > maxInt64Value-*right {
-		value := *left
-		return &value
-	}
-	value := *left + *right
-	return &value
-}
-
-const maxInt64Value = int64(^uint64(0) >> 1)
-
-func mergeScopes(left, right []domain.Scope) []domain.Scope {
-	if len(left) == 0 && len(right) == 0 {
-		return nil
-	}
-	set := make(map[domain.Scope]struct{}, len(left)+len(right))
-	for _, scope := range left {
-		set[scope] = struct{}{}
-	}
-	for _, scope := range right {
-		set[scope] = struct{}{}
-	}
-	result := make([]domain.Scope, 0, len(set))
-	for scope := range set {
-		result = append(result, scope)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	return result
+	s.coverage = aggregate.Coverage
 }
 
 func (s *observationSummary) sourceNames() []string {
@@ -332,31 +285,211 @@ func buildAggregateSummaries(aggregates []history.Aggregate) map[capabilityKey]*
 	result := make(map[capabilityKey]*observationSummary, len(aggregates))
 	for _, aggregate := range aggregates {
 		key := capabilityKey{runtime: aggregate.Runtime, typ: aggregate.CapabilityType, name: aggregate.CapabilityName}
-		summary := result[key]
-		if summary == nil {
-			summary = newObservationSummary()
-			result[key] = summary
-		}
-		summary.addAggregate(aggregate)
+		summary := newObservationSummary()
+		summary.setAggregate(aggregate)
+		result[key] = summary
 	}
 	return result
 }
 
-func timePointerValue(value *time.Time, current time.Time, minimum bool) time.Time {
-	if value == nil {
-		return current
+type reportRuntimeTotals struct {
+	advertised int64
+	loaded     int64
+	invoked    int64
+	usage      int64
+}
+
+// validateReportAggregates protects the typed history report API when called
+// independently of AnalyzeHistory. QueryInvocationHistory supplies one row
+// per key, so duplicate rows are rejected rather than merged: session totals
+// cannot safely be added across duplicate buckets.
+func validateReportAggregates(input []history.Aggregate) error {
+	ordered := append([]history.Aggregate(nil), input...)
+	totals := make(map[domain.Runtime]reportRuntimeTotals)
+	for index, aggregate := range ordered {
+		if err := validateReportAggregate(aggregate); err != nil {
+			return fmt.Errorf("invalid history aggregate at index %d: %w", index, err)
+		}
+		runtimeTotals := totals[aggregate.Runtime]
+		var err error
+		if runtimeTotals.advertised, err = addReportCount(runtimeTotals.advertised, aggregate.AdvertisedObservations, "advertised runtime total"); err != nil {
+			return err
+		}
+		if runtimeTotals.loaded, err = addReportCount(runtimeTotals.loaded, aggregate.LoadedObservations, "loaded runtime total"); err != nil {
+			return err
+		}
+		if runtimeTotals.invoked, err = addReportCount(runtimeTotals.invoked, aggregate.Uses, "invocation runtime total"); err != nil {
+			return err
+		}
+		usageEvents, err := addReportCount(aggregate.AdvertisedObservations, aggregate.LoadedObservations, "aggregate usage event total")
+		if err != nil {
+			return err
+		}
+		if usageEvents, err = addReportCount(usageEvents, aggregate.Uses, "aggregate usage event total"); err != nil {
+			return err
+		}
+		if runtimeTotals.usage, err = addReportCount(runtimeTotals.usage, usageEvents, "usage event runtime total"); err != nil {
+			return err
+		}
+		totals[aggregate.Runtime] = runtimeTotals
 	}
-	clone := value.UTC()
-	if current.IsZero() {
-		return clone
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return reportAggregateLess(ordered[i], ordered[j])
+	})
+	for index := 1; index < len(ordered); index++ {
+		if reportAggregateKeyEqual(ordered[index-1], ordered[index]) {
+			return fmt.Errorf("duplicate history aggregate key %s/%s/%s", ordered[index].Runtime, ordered[index].CapabilityType, ordered[index].CapabilityName)
+		}
 	}
-	if minimum && clone.Before(current) {
-		return clone
+	return nil
+}
+
+func validateReportAggregate(aggregate history.Aggregate) error {
+	if !aggregate.Runtime.Valid() {
+		return fmt.Errorf("invalid runtime %q", aggregate.Runtime)
 	}
-	if !minimum && clone.After(current) {
-		return clone
+	if !aggregate.CapabilityType.Valid() {
+		return fmt.Errorf("invalid capability type %q", aggregate.CapabilityType)
 	}
-	return current
+	if strings.TrimSpace(aggregate.CapabilityName) == "" {
+		return errors.New("capability name is required")
+	}
+	counts := []struct {
+		name  string
+		value int64
+	}{
+		{name: "invocation use count", value: aggregate.Uses},
+		{name: "distinct invocation sessions", value: aggregate.DistinctInvocationSessions},
+		{name: "advertised observation count", value: aggregate.AdvertisedObservations},
+		{name: "loaded observation count", value: aggregate.LoadedObservations},
+	}
+	for _, count := range counts {
+		if err := validateReportCount(count.name, count.value); err != nil {
+			return err
+		}
+	}
+	if aggregate.DistinctInvocationSessions > aggregate.Uses {
+		return errors.New("distinct invocation session count exceeds invocation use count")
+	}
+	if aggregate.Uses == 0 && aggregate.DistinctInvocationSessions != 0 {
+		return errors.New("zero-use aggregate cannot have invocation sessions")
+	}
+	if aggregate.Uses == 0 && (aggregate.FirstObservedAt != nil || aggregate.LastObservedAt != nil || aggregate.FirstEffectiveActivityAt != nil || aggregate.LastEffectiveActivityAt != nil) {
+		return errors.New("zero-use aggregate cannot have invocation timestamps")
+	}
+	if err := validateReportTimePair("invocation observed", aggregate.FirstObservedAt, aggregate.LastObservedAt, aggregate.Uses > 0); err != nil {
+		return err
+	}
+	if err := validateReportTimePair("invocation effective", aggregate.FirstEffectiveActivityAt, aggregate.LastEffectiveActivityAt, aggregate.Uses > 0); err != nil {
+		return err
+	}
+	if err := validateReportCoverage(aggregate.Coverage); err != nil {
+		return err
+	}
+	if aggregate.ObservedAdvertisedSessions != nil {
+		if err := validateReportCount("observed advertised session count", *aggregate.ObservedAdvertisedSessions); err != nil {
+			return err
+		}
+	}
+	seenScopes := make(map[domain.Scope]struct{}, len(aggregate.InstalledScopes))
+	for _, scope := range aggregate.InstalledScopes {
+		if !scope.Valid() {
+			return fmt.Errorf("invalid installed scope %q", scope)
+		}
+		if _, found := seenScopes[scope]; found {
+			return fmt.Errorf("duplicate installed scope %q", scope)
+		}
+		seenScopes[scope] = struct{}{}
+	}
+	for provenance, count := range aggregate.InvocationEvidence {
+		if !provenance.Valid() {
+			return fmt.Errorf("invalid invocation evidence provenance %q", provenance)
+		}
+		if err := validateReportCount("invocation evidence count", count); err != nil {
+			return err
+		}
+		if count > aggregate.Uses {
+			return fmt.Errorf("invocation evidence count for %q exceeds invocation uses", provenance)
+		}
+	}
+	return nil
+}
+
+func validateReportCount(name string, value int64) error {
+	if value < 0 {
+		return fmt.Errorf("%s cannot be negative", name)
+	}
+	if value > maxReportInt64() {
+		return fmt.Errorf("%s does not fit int", name)
+	}
+	return nil
+}
+
+func addReportCount(current, value int64, name string) (int64, error) {
+	if err := validateReportCount(name, value); err != nil {
+		return 0, err
+	}
+	if current > maxReportInt64()-value {
+		return 0, fmt.Errorf("%s overflows int", name)
+	}
+	return current + value, nil
+}
+
+func maxReportInt64() int64 {
+	return int64(^uint(0) >> 1)
+}
+
+func validateReportCoverage(coverage *history.Coverage) error {
+	if coverage == nil {
+		return nil
+	}
+	pairs := []struct {
+		name        string
+		first, last *time.Time
+	}{
+		{name: "inventory coverage", first: coverage.FirstInventoryObservedAt, last: coverage.LastInventoryObservedAt},
+		{name: "usage coverage", first: coverage.FirstUsageObservedAt, last: coverage.LastUsageObservedAt},
+		{name: "direct-hook coverage", first: coverage.FirstDirectHookObservedAt, last: coverage.LastDirectHookObservedAt},
+	}
+	for _, pair := range pairs {
+		if err := validateReportTimePair(pair.name, pair.first, pair.last, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateReportTimePair(name string, first, last *time.Time, required bool) error {
+	if (first == nil) != (last == nil) {
+		return fmt.Errorf("%s first and last timestamps must both be set or both be nil", name)
+	}
+	if required && first == nil {
+		return fmt.Errorf("%s timestamps are required for invocation use", name)
+	}
+	if first == nil {
+		return nil
+	}
+	if first.IsZero() || last.IsZero() {
+		return fmt.Errorf("%s timestamps cannot be zero", name)
+	}
+	if last.Before(*first) {
+		return fmt.Errorf("%s last timestamp precedes first timestamp", name)
+	}
+	return nil
+}
+
+func reportAggregateLess(left, right history.Aggregate) bool {
+	if left.Runtime != right.Runtime {
+		return left.Runtime < right.Runtime
+	}
+	if left.CapabilityType != right.CapabilityType {
+		return left.CapabilityType < right.CapabilityType
+	}
+	return left.CapabilityName < right.CapabilityName
+}
+
+func reportAggregateKeyEqual(left, right history.Aggregate) bool {
+	return left.Runtime == right.Runtime && left.CapabilityType == right.CapabilityType && left.CapabilityName == right.CapabilityName
 }
 
 func timestamp(value time.Time, ok bool) *string {
@@ -365,74 +498,6 @@ func timestamp(value time.Time, ok bool) *string {
 	}
 	formatted := value.UTC().Format(time.RFC3339Nano)
 	return &formatted
-}
-
-func cloneCoverage(coverage *history.Coverage) *history.Coverage {
-	if coverage == nil {
-		return nil
-	}
-	cloneTime := func(value *time.Time) *time.Time {
-		if value == nil {
-			return nil
-		}
-		cloned := value.UTC()
-		return &cloned
-	}
-	return &history.Coverage{
-		FirstInventoryObservedAt:  cloneTime(coverage.FirstInventoryObservedAt),
-		LastInventoryObservedAt:   cloneTime(coverage.LastInventoryObservedAt),
-		FirstUsageObservedAt:      cloneTime(coverage.FirstUsageObservedAt),
-		LastUsageObservedAt:       cloneTime(coverage.LastUsageObservedAt),
-		FirstDirectHookObservedAt: cloneTime(coverage.FirstDirectHookObservedAt),
-		LastDirectHookObservedAt:  cloneTime(coverage.LastDirectHookObservedAt),
-	}
-}
-
-func mergeCoverage(left, right *history.Coverage) *history.Coverage {
-	if left == nil {
-		return cloneCoverage(right)
-	}
-	if right == nil {
-		return cloneCoverage(left)
-	}
-	minTime := func(first, second *time.Time) *time.Time {
-		if first == nil {
-			if second == nil {
-				return nil
-			}
-			value := second.UTC()
-			return &value
-		}
-		if second == nil || !second.Before(*first) {
-			value := first.UTC()
-			return &value
-		}
-		value := second.UTC()
-		return &value
-	}
-	maxTime := func(first, second *time.Time) *time.Time {
-		if first == nil {
-			if second == nil {
-				return nil
-			}
-			value := second.UTC()
-			return &value
-		}
-		if second == nil || !second.After(*first) {
-			value := first.UTC()
-			return &value
-		}
-		value := second.UTC()
-		return &value
-	}
-	return &history.Coverage{
-		FirstInventoryObservedAt:  minTime(left.FirstInventoryObservedAt, right.FirstInventoryObservedAt),
-		LastInventoryObservedAt:   maxTime(left.LastInventoryObservedAt, right.LastInventoryObservedAt),
-		FirstUsageObservedAt:      minTime(left.FirstUsageObservedAt, right.FirstUsageObservedAt),
-		LastUsageObservedAt:       maxTime(left.LastUsageObservedAt, right.LastUsageObservedAt),
-		FirstDirectHookObservedAt: minTime(left.FirstDirectHookObservedAt, right.FirstDirectHookObservedAt),
-		LastDirectHookObservedAt:  maxTime(left.LastDirectHookObservedAt, right.LastDirectHookObservedAt),
-	}
 }
 
 func safeText(value string) string {
@@ -545,7 +610,7 @@ func capabilityDTO(evidence analysis.CapabilityEvidence, summary *observationSum
 	}
 	if summary.aggregate {
 		advertised = summary.counts[domain.EventAdvertised]
-		loaded = 0
+		loaded = summary.counts[domain.EventLoaded]
 		invocationCount = summary.counts[domain.EventInvoked]
 		distinctSessions = summary.distinctSessions
 		coverage = summary.coverage
@@ -629,36 +694,20 @@ func durationPointer(value time.Duration, ok bool) *string {
 	return &formatted
 }
 
-func runtimeDTO(runtimeName domain.Runtime, result analysis.Report, observations any, now time.Time) Runtime {
+func runtimeEventsDTO(runtimeName domain.Runtime, result analysis.Report, events []domain.UsageEvent, now time.Time) Runtime {
 	dto := Runtime{Runtime: string(runtimeName)}
-	if events, ok := observations.([]domain.UsageEvent); ok {
-		for _, event := range events {
-			if event.Runtime != runtimeName {
-				continue
-			}
-			dto.UsageEvents++
-			switch event.EventType {
-			case domain.EventAdvertised:
-				dto.Advertised++
-			case domain.EventLoaded:
-				dto.Loaded++
-			case domain.EventInvoked:
-				dto.Invoked++
-			}
+	for _, event := range events {
+		if event.Runtime != runtimeName {
+			continue
 		}
-	} else if aggregates, ok := observations.([]history.Aggregate); ok {
-		// Aggregate history intentionally exposes canonical invocation counts
-		// and explicit advertised-session counts only. Loaded and raw event
-		// totals remain zero because they are not present in this contract.
-		for _, aggregate := range aggregates {
-			if aggregate.Runtime != runtimeName {
-				continue
-			}
-			dto.Invoked += nonNegativeInt(aggregate.Uses)
-			if aggregate.ObservedAdvertisedSessions != nil {
-				dto.Advertised += nonNegativeInt(*aggregate.ObservedAdvertisedSessions)
-			}
-			dto.UsageEvents += nonNegativeInt(aggregate.Uses)
+		dto.UsageEvents++
+		switch event.EventType {
+		case domain.EventAdvertised:
+			dto.Advertised++
+		case domain.EventLoaded:
+			dto.Loaded++
+		case domain.EventInvoked:
+			dto.Invoked++
 		}
 	}
 	for _, evidence := range result.Capabilities {
@@ -679,11 +728,33 @@ func runtimeDTO(runtimeName domain.Runtime, result analysis.Report, observations
 	return dto
 }
 
-func nonNegativeInt(value int64) int {
-	if value <= 0 || value > int64(^uint(0)>>1) {
-		return 0
+func runtimeHistoryDTO(runtimeName domain.Runtime, result analysis.Report, aggregates []history.Aggregate, now time.Time) Runtime {
+	dto := Runtime{Runtime: string(runtimeName)}
+	for _, aggregate := range aggregates {
+		if aggregate.Runtime != runtimeName {
+			continue
+		}
+		dto.Advertised += int(aggregate.AdvertisedObservations)
+		dto.Loaded += int(aggregate.LoadedObservations)
+		dto.Invoked += int(aggregate.Uses)
+		dto.UsageEvents += int(aggregate.AdvertisedObservations + aggregate.LoadedObservations + aggregate.Uses)
 	}
-	return int(value)
+	for _, evidence := range result.Capabilities {
+		if evidence.Capability.Runtime != runtimeName {
+			continue
+		}
+		dto.Installed++
+		if evidence.Capability.Advertisement == domain.AdvertisementStateFullyAdvertised || evidence.Capability.Advertisement == domain.AdvertisementStateNameOnly {
+			dto.ConfiguredAdvertised++
+		}
+		if evidence.ActivityCount == 0 {
+			dto.NoActivityObserved++
+		}
+		if evidence.HasLastUsed && !evidence.LastUsedInFuture && !evidence.LastUsedAt.Before(now.Add(-30*24*time.Hour)) && !evidence.LastUsedAt.After(now) {
+			dto.InvokedLast30Days++
+		}
+	}
+	return dto
 }
 
 func findingDTO(duplicate analysis.DuplicateName) Finding {
@@ -723,7 +794,7 @@ func buildUsageOnly(installed []analysis.CapabilityEvidence, summaries map[capab
 	}
 	keys := make([]capabilityKey, 0)
 	for key := range summaries {
-		if _, found := installedKeys[key]; !found {
+		if _, found := installedKeys[key]; !found && !summaries[key].installed {
 			keys = append(keys, key)
 		}
 	}
@@ -744,8 +815,6 @@ func buildUsageOnly(installed []analysis.CapabilityEvidence, summaries map[capab
 		invocationCount := summary.counts[domain.EventInvoked]
 		distinctSessions := len(summary.sessions)
 		if summary.aggregate {
-			loaded = 0
-			invocationCount = summary.counts[domain.EventInvoked]
 			distinctSessions = summary.distinctSessions
 		}
 		result = append(result, UsageOnly{
@@ -772,78 +841,148 @@ func buildUsageOnly(installed []analysis.CapabilityEvidence, summaries map[capab
 	return result
 }
 
-func buildCommon(result analysis.Report, observations any, now time.Time) (string, []Runtime, []Capability, []Finding, map[capabilityKey]*observationSummary, error) {
-	if now.IsZero() {
-		return "", nil, nil, nil, nil, errors.New("report generation time is required")
-	}
-	now = now.UTC()
-	var summaries map[capabilityKey]*observationSummary
-	switch values := observations.(type) {
-	case nil:
-		summaries = buildAggregateSummaries(nil)
-	case []history.Aggregate:
-		summaries = buildAggregateSummaries(values)
-	case []domain.UsageEvent:
-		summaries = buildSummaries(values)
-	default:
-		return "", nil, nil, nil, nil, fmt.Errorf("unsupported report observations %T; want []history.Aggregate", observations)
-	}
-	runtimes := make([]Runtime, 0, 2)
-	for _, runtimeName := range []domain.Runtime{domain.RuntimeClaudeCode, domain.RuntimeCodex} {
-		runtimes = append(runtimes, runtimeDTO(runtimeName, result, observations, now))
-	}
+type reportData struct {
+	generatedAt  string
+	runtimes     []Runtime
+	capabilities []Capability
+	findings     []Finding
+	summaries    map[capabilityKey]*observationSummary
+}
+
+func buildReportData(result analysis.Report, summaries map[capabilityKey]*observationSummary, runtimes []Runtime, now time.Time) reportData {
 	capabilities := make([]Capability, 0, len(result.Capabilities))
 	for _, evidence := range result.Capabilities {
 		key := capabilityKey{runtime: evidence.Capability.Runtime, typ: evidence.Capability.Type, name: evidence.Capability.Name}
 		capabilities = append(capabilities, capabilityDTO(evidence, summaries[key]))
 	}
-	findings := buildFindings(result)
-	return now.Format(time.RFC3339Nano), runtimes, capabilities, findings, summaries, nil
+	return reportData{
+		generatedAt:  now.Format(time.RFC3339Nano),
+		runtimes:     runtimes,
+		capabilities: capabilities,
+		findings:     buildFindings(result),
+		summaries:    summaries,
+	}
 }
 
-// BuildReport maps analysis and bounded history aggregates to the report JSON
-// contract. []domain.UsageEvent remains accepted only for compatibility tests;
-// normal report callers should pass []history.Aggregate.
-func BuildReport(result analysis.Report, observations any, now time.Time, staleDays int) (ReportDocument, error) {
-	generatedAt, runtimes, capabilities, findings, summaries, err := buildCommon(result, observations, now)
+func normalizedReportNow(now time.Time) (time.Time, error) {
+	if now.IsZero() {
+		return time.Time{}, errors.New("report generation time is required")
+	}
+	return now.UTC(), nil
+}
+
+func buildReportEvents(result analysis.Report, events []domain.UsageEvent, now time.Time) (reportData, error) {
+	now, err := normalizedReportNow(now)
+	if err != nil {
+		return reportData{}, err
+	}
+	summaries := buildSummaries(events)
+	runtimes := make([]Runtime, 0, 2)
+	for _, runtimeName := range []domain.Runtime{domain.RuntimeClaudeCode, domain.RuntimeCodex} {
+		runtimes = append(runtimes, runtimeEventsDTO(runtimeName, result, events, now))
+	}
+	return buildReportData(result, summaries, runtimes, now), nil
+}
+
+func buildReportHistory(result analysis.Report, aggregates []history.Aggregate, now time.Time) (reportData, error) {
+	now, err := normalizedReportNow(now)
+	if err != nil {
+		return reportData{}, err
+	}
+	if err := validateReportAggregates(aggregates); err != nil {
+		return reportData{}, err
+	}
+	summaries := buildAggregateSummaries(aggregates)
+	runtimes := make([]Runtime, 0, 2)
+	for _, runtimeName := range []domain.Runtime{domain.RuntimeClaudeCode, domain.RuntimeCodex} {
+		runtimes = append(runtimes, runtimeHistoryDTO(runtimeName, result, aggregates, now))
+	}
+	return buildReportData(result, summaries, runtimes, now), nil
+}
+
+// BuildReport maps analysis and persisted events to the report JSON contract.
+// The typed event signature remains the compatibility API; bounded history
+// callers should use BuildReportHistory.
+func BuildReport(result analysis.Report, events []domain.UsageEvent, now time.Time, staleDays int) (ReportDocument, error) {
+	data, err := buildReportEvents(result, events, now)
 	if err != nil {
 		return ReportDocument{}, err
 	}
-	usageOnly := buildUsageOnly(result.Capabilities, summaries)
+	usageOnly := buildUsageOnly(result.Capabilities, data.summaries)
 	if usageOnly == nil {
 		usageOnly = []UsageOnly{}
 	}
 	return ReportDocument{
 		SchemaVersion:  SchemaVersion,
-		GeneratedAt:    generatedAt,
+		GeneratedAt:    data.generatedAt,
 		StaleAfterDays: staleDays,
-		Runtimes:       runtimes,
-		Capabilities:   capabilities,
+		Runtimes:       data.runtimes,
+		Capabilities:   data.capabilities,
 		UsageOnly:      usageOnly,
-		Findings:       findings,
+		Findings:       data.findings,
 	}, nil
 }
 
-// BuildStale maps analysis and bounded history aggregates to the stale JSON
-// contract. It never needs the complete usage event table.
-func BuildStale(result analysis.Report, observations any, now time.Time, staleDays int) (StaleDocument, error) {
-	generatedAt, runtimes, capabilities, findings, _, err := buildCommon(result, observations, now)
+// BuildReportHistory maps analysis and bounded history aggregates to the
+// report JSON contract. It never needs the complete usage event table.
+func BuildReportHistory(result analysis.Report, aggregates []history.Aggregate, now time.Time, staleDays int) (ReportDocument, error) {
+	data, err := buildReportHistory(result, aggregates, now)
+	if err != nil {
+		return ReportDocument{}, err
+	}
+	usageOnly := buildUsageOnly(result.Capabilities, data.summaries)
+	if usageOnly == nil {
+		usageOnly = []UsageOnly{}
+	}
+	return ReportDocument{
+		SchemaVersion:  SchemaVersion,
+		GeneratedAt:    data.generatedAt,
+		StaleAfterDays: staleDays,
+		Runtimes:       data.runtimes,
+		Capabilities:   data.capabilities,
+		UsageOnly:      usageOnly,
+		Findings:       data.findings,
+	}, nil
+}
+
+// BuildStale maps analysis and persisted events to the stale JSON contract.
+// The typed event signature remains the compatibility API; bounded history
+// callers should use BuildStaleHistory.
+func BuildStale(result analysis.Report, events []domain.UsageEvent, now time.Time, staleDays int) (StaleDocument, error) {
+	data, err := buildReportEvents(result, events, now)
 	if err != nil {
 		return StaleDocument{}, err
 	}
 	return StaleDocument{
 		SchemaVersion:  SchemaVersion,
-		GeneratedAt:    generatedAt,
+		GeneratedAt:    data.generatedAt,
 		StaleAfterDays: staleDays,
-		Runtimes:       runtimes,
-		Capabilities:   capabilities,
-		Findings:       findings,
+		Runtimes:       data.runtimes,
+		Capabilities:   data.capabilities,
+		Findings:       data.findings,
+	}, nil
+}
+
+// BuildStaleHistory maps analysis and bounded history aggregates to the stale
+// JSON contract. It never needs the complete usage event table.
+func BuildStaleHistory(result analysis.Report, aggregates []history.Aggregate, now time.Time, staleDays int) (StaleDocument, error) {
+	data, err := buildReportHistory(result, aggregates, now)
+	if err != nil {
+		return StaleDocument{}, err
+	}
+	return StaleDocument{
+		SchemaVersion:  SchemaVersion,
+		GeneratedAt:    data.generatedAt,
+		StaleAfterDays: staleDays,
+		Runtimes:       data.runtimes,
+		Capabilities:   data.capabilities,
+		Findings:       data.findings,
 	}, nil
 }
 
 // WriteJSON writes a DTO using the same deterministic encoder convention as
 // hooks status JSON.
-func WriteJSON(out io.Writer, value any) error {
+func WriteJSON(out io.Writer, value interface{}) error {
 	encoder := json.NewEncoder(out)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(value)

@@ -33,6 +33,64 @@ func TestAnalyzeHistoryNoHistoryIsReviewWithoutUseClaims(t *testing.T) {
 	}
 }
 
+func TestAnalyzeHistorySeparatesAdvertisedLoadedAndInvocationCounts(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("state-counts")
+	observed := now.Add(-time.Hour)
+	effective := now.Add(-2 * time.Hour)
+	advertisedSessions := int64(1)
+	aggregate := history.Aggregate{
+		Runtime:                    capability.Runtime,
+		CapabilityType:             capability.Type,
+		CapabilityName:             capability.Name,
+		AdvertisedObservations:     2,
+		LoadedObservations:         1,
+		Uses:                       1,
+		DistinctInvocationSessions: 1,
+		FirstObservedAt:            &observed,
+		LastObservedAt:             &observed,
+		FirstEffectiveActivityAt:   &effective,
+		LastEffectiveActivityAt:    &effective,
+		ObservedAdvertisedSessions: &advertisedSessions,
+		InvocationEvidence:         map[domain.Provenance]int64{domain.ProvenanceHook: 1, domain.ProvenanceTranscript: 1},
+	}
+	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.EventCount(domain.EventAdvertised) != 2 || evidence.EventCount(domain.EventLoaded) != 1 || evidence.EventCount(domain.EventInvoked) != 1 {
+		t.Fatalf("history event counts = %#v, want advertised=2 loaded=1 invoked=1", evidence.EventCounts)
+	}
+	if evidence.ActivityCount != 2 || evidence.InvocationCount != 1 || evidence.DistinctSessionCount != 1 {
+		t.Fatalf("history activity counts = %d/%d/%d, want activity=2 invocation=1 sessions=1", evidence.ActivityCount, evidence.InvocationCount, evidence.DistinctSessionCount)
+	}
+	if evidence.ObservedAdvertisedSessions == nil || *evidence.ObservedAdvertisedSessions != 1 || !evidence.HasLastUsed || !evidence.LastUsedAt.Equal(effective) {
+		t.Fatalf("history advertisement/use evidence = %#v", evidence)
+	}
+}
+
+func TestAnalyzeHistoryLoadedOnlyDoesNotCreateInvocationTimes(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("loaded-only-history")
+	loadedAt := now.Add(-2 * DefaultStaleAfter)
+	aggregate := history.Aggregate{
+		Runtime:            capability.Runtime,
+		CapabilityType:     capability.Type,
+		CapabilityName:     capability.Name,
+		LoadedObservations: 1,
+		Coverage:           &history.Coverage{FirstInventoryObservedAt: &loadedAt, LastInventoryObservedAt: &now},
+	}
+	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	evidence := report.Capabilities[0]
+	if evidence.Classification != REVIEW || evidence.ActivityCount != 1 || evidence.InvocationCount != 0 || evidence.HasFirstUsed || evidence.HasLastUsed {
+		t.Fatalf("loaded-only history evidence = %#v, want REVIEW with no invocation timestamps", evidence)
+	}
+}
+
 func TestAnalyzeHistoryPreservesInvocationSourcesSessionsAndInvocationOnlyTimes(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("history-use")
@@ -58,7 +116,7 @@ func TestAnalyzeHistoryPreservesInvocationSourcesSessionsAndInvocationOnlyTimes(
 		InstalledScopes: []domain.Scope{domain.ScopeProject, domain.ScopeUser},
 	}
 
-	report, err := Analyze([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
 	if err != nil {
 		t.Fatalf("Analyze(history) error = %v", err)
 	}
@@ -86,32 +144,98 @@ func TestAnalyzeHistoryPreservesInvocationSourcesSessionsAndInvocationOnlyTimes(
 	}
 }
 
-func TestAnalyzeHistoryMergesRepeatedBucketsAndOrdersMultipleRuntimes(t *testing.T) {
+func TestAnalyzeHistoryRejectsDuplicateAggregateKeys(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	codex := testCapability("repeated")
-	claude := codex
-	claude.Runtime = domain.RuntimeClaude
-	claude.Name = "other-runtime"
+	observed := now.Add(-time.Hour)
+	effective := now.Add(-time.Hour)
 	first := history.Aggregate{
 		Runtime: codex.Runtime, CapabilityType: codex.Type, CapabilityName: codex.Name,
 		Uses: 1, DistinctInvocationSessions: 1,
+		FirstObservedAt: &observed, LastObservedAt: &observed,
+		FirstEffectiveActivityAt: &effective, LastEffectiveActivityAt: &effective,
 		InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceHook: 1},
 	}
 	second := first
 	second.Uses = 2
 	second.DistinctInvocationSessions = 2
 	second.InvocationEvidence = map[domain.Provenance]int64{domain.ProvenanceTranscript: 2}
+	if _, err := AnalyzeHistory([]domain.Capability{codex}, []history.Aggregate{first, second}, DefaultConfig(), now); err == nil || !strings.Contains(err.Error(), "duplicate history aggregate key") {
+		t.Fatalf("AnalyzeHistory() duplicate error = %v, want explicit duplicate-key rejection", err)
+	}
+}
+
+func TestAnalyzeHistoryRejectsInconsistentAggregateTimestampsAndCounts(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("invalid-history")
+	observed := now.Add(-time.Hour)
+	tests := []struct {
+		name      string
+		aggregate history.Aggregate
+		want      string
+	}{
+		{
+			name: "partial invocation timestamps",
+			aggregate: history.Aggregate{
+				Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
+				Uses: 1, FirstObservedAt: &observed,
+			},
+			want: "first and last timestamps",
+		},
+		{
+			name: "zero-use invocation timestamp",
+			aggregate: history.Aggregate{
+				Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
+				FirstObservedAt: &observed, LastObservedAt: &observed,
+			},
+			want: "zero-use aggregate",
+		},
+		{
+			name: "sessions exceed uses",
+			aggregate: history.Aggregate{
+				Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
+				Uses: 1, DistinctInvocationSessions: 2,
+			},
+			want: "exceeds invocation use count",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{test.aggregate}, DefaultConfig(), now); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("AnalyzeHistory() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestAnalyzeHistoryOrdersMultipleRuntimesDeterministically(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	codex := testCapability("codex-use")
+	claude := codex
+	claude.Runtime = domain.RuntimeClaude
+	claude.Name = "claude-use"
+	observed := now.Add(-time.Hour)
+	effective := now.Add(-time.Hour)
 	other := history.Aggregate{
 		Runtime: claude.Runtime, CapabilityType: claude.Type, CapabilityName: claude.Name,
 		Uses: 1, DistinctInvocationSessions: 1,
+		FirstObservedAt: &observed, LastObservedAt: &observed,
+		FirstEffectiveActivityAt: &effective, LastEffectiveActivityAt: &effective,
 		InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceImport: 1},
 	}
 
-	firstReport, err := AnalyzeHistory([]domain.Capability{claude, codex}, []history.Aggregate{other, second, first}, DefaultConfig(), now)
+	codexAggregate := history.Aggregate{
+		Runtime: codex.Runtime, CapabilityType: codex.Type, CapabilityName: codex.Name,
+		Uses: 3, DistinctInvocationSessions: 2,
+		FirstObservedAt: &observed, LastObservedAt: &observed,
+		FirstEffectiveActivityAt: &effective, LastEffectiveActivityAt: &effective,
+		InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceHook: 2, domain.ProvenanceTranscript: 1},
+	}
+	firstReport, err := AnalyzeHistory([]domain.Capability{claude, codex}, []history.Aggregate{other, codexAggregate}, DefaultConfig(), now)
 	if err != nil {
 		t.Fatalf("AnalyzeHistory() error = %v", err)
 	}
-	reversed, err := AnalyzeHistory([]domain.Capability{codex, claude}, []history.Aggregate{first, other, second}, DefaultConfig(), now)
+	reversed, err := AnalyzeHistory([]domain.Capability{codex, claude}, []history.Aggregate{codexAggregate, other}, DefaultConfig(), now)
 	if err != nil {
 		t.Fatalf("AnalyzeHistory(reversed) error = %v", err)
 	}
@@ -122,8 +246,8 @@ func TestAnalyzeHistoryMergesRepeatedBucketsAndOrdersMultipleRuntimes(t *testing
 		t.Fatalf("multiruntime ordering = %#v", firstReport.Capabilities)
 	}
 	codexEvidence := firstReport.Capabilities[1]
-	if codexEvidence.InvocationCount != 3 || codexEvidence.DistinctSessionCount != 3 {
-		t.Fatalf("repeated bucket counts = %#v", codexEvidence)
+	if codexEvidence.InvocationCount != 3 || codexEvidence.DistinctSessionCount != 2 {
+		t.Fatalf("multiruntime counts = %#v", codexEvidence)
 	}
 	if !reflect.DeepEqual(codexEvidence.EvidenceSources, []domain.Provenance{domain.ProvenanceHook, domain.ProvenanceTranscript}) {
 		t.Fatalf("repeated bucket sources = %#v", codexEvidence.EvidenceSources)
@@ -136,7 +260,7 @@ func TestAnalyzeHistoryAdvertisedExposureRetainsUnknownAndKnownStates(t *testing
 	unknownCapability := testCapability("unknown-advertised")
 	known := int64(2)
 	aggregates := []history.Aggregate{
-		{Runtime: knownCapability.Runtime, CapabilityType: knownCapability.Type, CapabilityName: knownCapability.Name, ObservedAdvertisedSessions: &known},
+		{Runtime: knownCapability.Runtime, CapabilityType: knownCapability.Type, CapabilityName: knownCapability.Name, AdvertisedObservations: known, ObservedAdvertisedSessions: &known},
 		{Runtime: unknownCapability.Runtime, CapabilityType: unknownCapability.Type, CapabilityName: unknownCapability.Name},
 	}
 

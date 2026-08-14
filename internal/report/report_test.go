@@ -25,6 +25,8 @@ func TestBuildReportHistoryUsesAggregatesWithoutEventTableAndKeepsPrivacy(t *tes
 			Runtime:                    capability.Runtime,
 			CapabilityType:             capability.Type,
 			CapabilityName:             capability.Name,
+			AdvertisedObservations:     2,
+			LoadedObservations:         1,
 			Uses:                       1,
 			DistinctInvocationSessions: 1,
 			FirstObservedAt:            &observed,
@@ -54,15 +56,15 @@ func TestBuildReportHistoryUsesAggregatesWithoutEventTableAndKeepsPrivacy(t *tes
 	if err != nil {
 		t.Fatalf("AnalyzeHistory() error = %v", err)
 	}
-	document, err := BuildReport(result, aggregates, now, 60)
+	document, err := BuildReportHistory(result, aggregates, now, 60)
 	if err != nil {
-		t.Fatalf("BuildReport() error = %v", err)
+		t.Fatalf("BuildReportHistory() error = %v", err)
 	}
 	if len(document.Capabilities) != 1 || len(document.UsageOnly) != 1 || len(document.Runtimes) != 2 {
 		t.Fatalf("document sizes = capabilities=%d usage-only=%d runtimes=%d", len(document.Capabilities), len(document.UsageOnly), len(document.Runtimes))
 	}
 	capabilityDTO := document.Capabilities[0]
-	if !capabilityDTO.Installed || capabilityDTO.Loaded != 0 || capabilityDTO.InvocationCount != 1 || capabilityDTO.DistinctSessionCount != 1 {
+	if !capabilityDTO.Installed || capabilityDTO.Loaded != 1 || capabilityDTO.InvocationCount != 1 || capabilityDTO.DistinctSessionCount != 1 {
 		t.Fatalf("aggregate capability DTO = %#v", capabilityDTO)
 	}
 	if capabilityDTO.ObservedAdvertisedSessions == nil || *capabilityDTO.ObservedAdvertisedSessions != 2 || capabilityDTO.Advertised != 2 {
@@ -77,6 +79,16 @@ func TestBuildReportHistoryUsesAggregatesWithoutEventTableAndKeepsPrivacy(t *tes
 	if document.UsageOnly[0].Loaded != 0 || document.UsageOnly[0].ObservedAdvertisedSessions != nil {
 		t.Fatalf("usage-only independently loaded/advertised DTO = %#v", document.UsageOnly[0])
 	}
+	var codexRuntime *Runtime
+	for index := range document.Runtimes {
+		if document.Runtimes[index].Runtime == string(domain.RuntimeCodex) {
+			codexRuntime = &document.Runtimes[index]
+			break
+		}
+	}
+	if codexRuntime == nil || codexRuntime.Advertised != 2 || codexRuntime.Loaded != 1 || codexRuntime.Invoked != 3 || codexRuntime.UsageEvents != 6 {
+		t.Fatalf("runtime history counts = %#v, want advertised=2 loaded=1 invoked=3 usage_events=6", codexRuntime)
+	}
 
 	var output bytes.Buffer
 	if err := WriteJSON(&output, document); err != nil {
@@ -88,6 +100,52 @@ func TestBuildReportHistoryUsesAggregatesWithoutEventTableAndKeepsPrivacy(t *tes
 	var decoded ReportDocument
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode report JSON: %v", err)
+	}
+}
+
+func TestHistoryReportRejectsDuplicateAggregateKeysAndKeepsTypedAPIs(t *testing.T) {
+	var _ func(analysis.Report, []domain.UsageEvent, time.Time, int) (ReportDocument, error) = BuildReport
+	var _ func(analysis.Report, []history.Aggregate, time.Time, int) (ReportDocument, error) = BuildReportHistory
+	var _ func(analysis.Report, []domain.UsageEvent, time.Time, int) (StaleDocument, error) = BuildStale
+	var _ func(analysis.Report, []history.Aggregate, time.Time, int) (StaleDocument, error) = BuildStaleHistory
+
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	base := history.Aggregate{
+		Runtime:        domain.RuntimeCodex,
+		CapabilityType: domain.CapabilitySkill,
+		CapabilityName: "duplicate",
+	}
+	if _, err := BuildReportHistory(analysis.Report{}, []history.Aggregate{base, base}, now, 0); err == nil || !strings.Contains(err.Error(), "duplicate history aggregate key") {
+		t.Fatalf("BuildReportHistory() duplicate error = %v, want explicit duplicate-key rejection", err)
+	}
+}
+
+func TestHistoryReportKeepsLoadedSeparateFromInvocationTimes(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := reportTestCapability("loaded-only")
+	aggregate := history.Aggregate{
+		Runtime:            capability.Runtime,
+		CapabilityType:     capability.Type,
+		CapabilityName:     capability.Name,
+		LoadedObservations: 1,
+		Installed:          true,
+		InstalledScopes:    []domain.Scope{domain.ScopeProject},
+	}
+	result, err := analysis.AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, analysis.DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	evidence := result.Capabilities[0]
+	if evidence.EventCount(domain.EventLoaded) != 1 || evidence.EventCount(domain.EventInvoked) != 0 || evidence.ActivityCount != 1 || evidence.HasLastUsed {
+		t.Fatalf("loaded-only analysis = %#v, want one loaded event and no invocation", evidence)
+	}
+	document, err := BuildReportHistory(result, []history.Aggregate{aggregate}, now, 0)
+	if err != nil {
+		t.Fatalf("BuildReportHistory() error = %v", err)
+	}
+	row := document.Capabilities[0]
+	if row.Loaded != 1 || row.InvocationCount != 0 || row.FirstInvocationObservedAt != nil || row.LastInvocationObservedAt != nil {
+		t.Fatalf("loaded-only report row = %#v, want loaded-only counts/times", row)
 	}
 }
 
@@ -116,9 +174,9 @@ func TestBuildStaleHistoryKeepsStrictClassificationBasisCoverageLimited(t *testi
 	if result.Capabilities[0].Classification != analysis.STALE {
 		t.Fatalf("classification = %q, want STALE", result.Capabilities[0].Classification)
 	}
-	document, err := BuildStale(result, []history.Aggregate{aggregate}, now, 60)
+	document, err := BuildStaleHistory(result, []history.Aggregate{aggregate}, now, 60)
 	if err != nil {
-		t.Fatalf("BuildStale() error = %v", err)
+		t.Fatalf("BuildStaleHistory() error = %v", err)
 	}
 	if len(document.Capabilities) != 1 || !strings.Contains(document.Capabilities[0].Basis, "coverage") || strings.Contains(strings.ToLower(document.Capabilities[0].Basis), "complete") {
 		t.Fatalf("stale DTO basis = %#v, want strict stale basis limited by observation coverage", document.Capabilities[0])

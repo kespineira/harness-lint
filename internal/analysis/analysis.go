@@ -254,30 +254,11 @@ type capabilityKey struct {
 	name    string
 }
 
-// Analyze validates inputs and returns deterministic per-definition evidence,
-// context totals, and duplicate-name findings. The observations argument is
-// normally []history.Aggregate. []domain.UsageEvent remains accepted only as
-// a compatibility wrapper for the pre-aggregate CLI/tests; normal report and
-// stale callers should pass the aggregate result of QueryInvocationHistory.
-// now is explicit so repeated runs at the same instant produce identical ages
-// and classifications.
-func Analyze(capabilities []domain.Capability, observations any, config Config, now time.Time) (Report, error) {
-	switch values := observations.(type) {
-	case nil:
-		return AnalyzeHistory(capabilities, nil, config, now)
-	case []history.Aggregate:
-		return AnalyzeHistory(capabilities, values, config, now)
-	case []domain.UsageEvent:
-		return AnalyzeEvents(capabilities, values, config, now)
-	default:
-		return Report{}, fmt.Errorf("unsupported analysis observations %T; want []history.Aggregate", observations)
-	}
-}
-
-// AnalyzeEvents is the compatibility wrapper for callers that still have the
-// complete normalized event table. New report/stale paths must use
-// AnalyzeHistory so they do not load that table.
-func AnalyzeEvents(capabilities []domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (Report, error) {
+// Analyze validates an event compatibility input and returns deterministic
+// per-definition evidence, context totals, and duplicate-name findings. New
+// history/report paths use AnalyzeHistory so they do not load the complete
+// usage event table.
+func Analyze(capabilities []domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (Report, error) {
 	config, err := config.withDefaults()
 	if err != nil {
 		return Report{}, fmt.Errorf("invalid analysis config: %w", err)
@@ -357,7 +338,7 @@ func AnalyzeHistory(capabilities []domain.Capability, aggregates []history.Aggre
 			return Report{}, fmt.Errorf("invalid capability at index %d (%q): %w", index, capability.Name, err)
 		}
 	}
-	orderedAggregates, err := normalizeAggregates(aggregates)
+	orderedAggregates, err := validateAggregates(aggregates)
 	if err != nil {
 		return Report{}, err
 	}
@@ -388,7 +369,7 @@ func AnalyzeHistory(capabilities []domain.Capability, aggregates []history.Aggre
 	for _, capability := range orderedCapabilities {
 		key := capabilityKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name}
 		aggregate, found := byKey[key]
-		evidence, err := analyzeAggregate(capability, aggregateOrZero(aggregate, found), found, config, now)
+		evidence, err := analyzeAggregate(capability, aggregate, found, config, now)
 		if err != nil {
 			return Report{}, fmt.Errorf("analyze capability %q: %w", capability.Name, err)
 		}
@@ -397,14 +378,7 @@ func AnalyzeHistory(capabilities []domain.Capability, aggregates []history.Aggre
 	return result, nil
 }
 
-func aggregateOrZero(aggregate history.Aggregate, found bool) history.Aggregate {
-	if !found {
-		return history.Aggregate{}
-	}
-	return aggregate
-}
-
-func normalizeAggregates(input []history.Aggregate) ([]history.Aggregate, error) {
+func validateAggregates(input []history.Aggregate) ([]history.Aggregate, error) {
 	ordered := append([]history.Aggregate(nil), input...)
 	for index, aggregate := range ordered {
 		if err := validateAggregate(aggregate); err != nil {
@@ -414,20 +388,12 @@ func normalizeAggregates(input []history.Aggregate) ([]history.Aggregate, error)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return aggregateLess(ordered[i], ordered[j])
 	})
-	if len(ordered) < 2 {
-		return ordered, nil
-	}
-	merged := make([]history.Aggregate, 0, len(ordered))
-	for _, aggregate := range ordered {
-		if len(merged) == 0 || !sameAggregateKey(merged[len(merged)-1], aggregate) {
-			merged = append(merged, cloneAggregate(aggregate))
-			continue
-		}
-		if err := mergeAggregate(&merged[len(merged)-1], aggregate); err != nil {
-			return nil, err
+	for index := 1; index < len(ordered); index++ {
+		if sameAggregateKey(ordered[index-1], ordered[index]) {
+			return nil, fmt.Errorf("duplicate history aggregate key %s/%s/%s", ordered[index].Runtime, ordered[index].CapabilityType, ordered[index].CapabilityName)
 		}
 	}
-	return merged, nil
+	return ordered, nil
 }
 
 func validateAggregate(aggregate history.Aggregate) error {
@@ -443,18 +409,121 @@ func validateAggregate(aggregate history.Aggregate) error {
 	if aggregate.Uses < 0 {
 		return errors.New("invocation use count cannot be negative")
 	}
+	if aggregate.Uses > maxPlatformInt64() {
+		return errors.New("invocation use count does not fit int")
+	}
 	if aggregate.DistinctInvocationSessions < 0 {
 		return errors.New("distinct invocation session count cannot be negative")
+	}
+	if aggregate.DistinctInvocationSessions > maxPlatformInt64() {
+		return errors.New("distinct invocation session count does not fit int")
+	}
+	if aggregate.DistinctInvocationSessions > aggregate.Uses {
+		return errors.New("distinct invocation session count exceeds invocation use count")
+	}
+	if aggregate.Uses == 0 && aggregate.DistinctInvocationSessions != 0 {
+		return errors.New("zero-use aggregate cannot have invocation sessions")
+	}
+	if err := validateInvocationTimes(aggregate); err != nil {
+		return err
+	}
+	if err := validateCoverage(aggregate.Coverage); err != nil {
+		return err
+	}
+	if aggregate.AdvertisedObservations < 0 {
+		return errors.New("advertised observation count cannot be negative")
+	}
+	if aggregate.LoadedObservations < 0 {
+		return errors.New("loaded observation count cannot be negative")
+	}
+	if aggregate.AdvertisedObservations > maxPlatformInt64() || aggregate.LoadedObservations > maxPlatformInt64() {
+		return errors.New("state observation count does not fit int")
+	}
+	if aggregate.LoadedObservations > maxPlatformInt64()-aggregate.Uses {
+		return errors.New("loaded and invocation activity count overflows int")
 	}
 	if aggregate.ObservedAdvertisedSessions != nil && *aggregate.ObservedAdvertisedSessions < 0 {
 		return errors.New("observed advertised session count cannot be negative")
 	}
+	if aggregate.ObservedAdvertisedSessions != nil && *aggregate.ObservedAdvertisedSessions > maxPlatformInt64() {
+		return errors.New("observed advertised session count does not fit int")
+	}
+	seenScopes := make(map[domain.Scope]struct{}, len(aggregate.InstalledScopes))
+	for _, scope := range aggregate.InstalledScopes {
+		if !scope.Valid() {
+			return fmt.Errorf("invalid installed scope %q", scope)
+		}
+		if _, found := seenScopes[scope]; found {
+			return fmt.Errorf("duplicate installed scope %q", scope)
+		}
+		seenScopes[scope] = struct{}{}
+	}
 	for provenance, count := range aggregate.InvocationEvidence {
+		if !provenance.Valid() {
+			return fmt.Errorf("invalid invocation evidence provenance %q", provenance)
+		}
 		if count < 0 {
 			return fmt.Errorf("invocation evidence count for %q cannot be negative", provenance)
 		}
+		if count > aggregate.Uses {
+			return fmt.Errorf("invocation evidence count for %q exceeds invocation uses", provenance)
+		}
 	}
 	return nil
+}
+
+func validateInvocationTimes(aggregate history.Aggregate) error {
+	if aggregate.Uses == 0 && (aggregate.FirstObservedAt != nil || aggregate.LastObservedAt != nil || aggregate.FirstEffectiveActivityAt != nil || aggregate.LastEffectiveActivityAt != nil) {
+		return errors.New("zero-use aggregate cannot have invocation timestamps")
+	}
+	required := aggregate.Uses > 0
+	if err := validateTimePair("invocation observed", aggregate.FirstObservedAt, aggregate.LastObservedAt, required); err != nil {
+		return err
+	}
+	return validateTimePair("invocation effective", aggregate.FirstEffectiveActivityAt, aggregate.LastEffectiveActivityAt, required)
+}
+
+func validateCoverage(coverage *history.Coverage) error {
+	if coverage == nil {
+		return nil
+	}
+	pairs := []struct {
+		name        string
+		first, last *time.Time
+	}{
+		{name: "inventory coverage", first: coverage.FirstInventoryObservedAt, last: coverage.LastInventoryObservedAt},
+		{name: "usage coverage", first: coverage.FirstUsageObservedAt, last: coverage.LastUsageObservedAt},
+		{name: "direct-hook coverage", first: coverage.FirstDirectHookObservedAt, last: coverage.LastDirectHookObservedAt},
+	}
+	for _, pair := range pairs {
+		if err := validateTimePair(pair.name, pair.first, pair.last, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTimePair(name string, first, last *time.Time, required bool) error {
+	if (first == nil) != (last == nil) {
+		return fmt.Errorf("%s first and last timestamps must both be set or both be nil", name)
+	}
+	if required && first == nil {
+		return fmt.Errorf("%s timestamps are required for invocation use", name)
+	}
+	if first == nil {
+		return nil
+	}
+	if first.IsZero() || last.IsZero() {
+		return fmt.Errorf("%s timestamps cannot be zero", name)
+	}
+	if last.Before(*first) {
+		return fmt.Errorf("%s last timestamp precedes first timestamp", name)
+	}
+	return nil
+}
+
+func maxPlatformInt64() int64 {
+	return int64(^uint(0) >> 1)
 }
 
 func aggregateLess(left, right history.Aggregate) bool {
@@ -471,165 +540,14 @@ func sameAggregateKey(left, right history.Aggregate) bool {
 	return left.Runtime == right.Runtime && left.CapabilityType == right.CapabilityType && left.CapabilityName == right.CapabilityName
 }
 
-func cloneAggregate(aggregate history.Aggregate) history.Aggregate {
-	clone := aggregate
-	clone.InvocationEvidence = make(map[domain.Provenance]int64, len(aggregate.InvocationEvidence))
-	for provenance, count := range aggregate.InvocationEvidence {
-		clone.InvocationEvidence[provenance] = count
-	}
-	clone.InstalledScopes = append([]domain.Scope(nil), aggregate.InstalledScopes...)
-	clone.ObservedAdvertisedSessions = cloneInt64Pointer(aggregate.ObservedAdvertisedSessions)
-	clone.FirstObservedAt = cloneTimePointer(aggregate.FirstObservedAt)
-	clone.LastObservedAt = cloneTimePointer(aggregate.LastObservedAt)
-	clone.FirstEffectiveActivityAt = cloneTimePointer(aggregate.FirstEffectiveActivityAt)
-	clone.LastEffectiveActivityAt = cloneTimePointer(aggregate.LastEffectiveActivityAt)
-	clone.Coverage = cloneCoverage(aggregate.Coverage)
-	return clone
-}
-
-func cloneInt64Pointer(value *int64) *int64 {
-	if value == nil {
-		return nil
-	}
-	clone := *value
-	return &clone
-}
-
-func cloneTimePointer(value *time.Time) *time.Time {
-	if value == nil {
-		return nil
-	}
-	clone := value.UTC()
-	return &clone
-}
-
-func cloneCoverage(coverage *history.Coverage) *history.Coverage {
-	if coverage == nil {
-		return nil
-	}
-	return &history.Coverage{
-		FirstInventoryObservedAt:  cloneTimePointer(coverage.FirstInventoryObservedAt),
-		LastInventoryObservedAt:   cloneTimePointer(coverage.LastInventoryObservedAt),
-		FirstUsageObservedAt:      cloneTimePointer(coverage.FirstUsageObservedAt),
-		LastUsageObservedAt:       cloneTimePointer(coverage.LastUsageObservedAt),
-		FirstDirectHookObservedAt: cloneTimePointer(coverage.FirstDirectHookObservedAt),
-		LastDirectHookObservedAt:  cloneTimePointer(coverage.LastDirectHookObservedAt),
-	}
-}
-
-func minTimePointer(left, right *time.Time) *time.Time {
-	if left == nil {
-		return cloneTimePointer(right)
-	}
-	if right == nil || !right.Before(*left) {
-		return cloneTimePointer(left)
-	}
-	return cloneTimePointer(right)
-}
-
-func maxTimePointer(left, right *time.Time) *time.Time {
-	if left == nil {
-		return cloneTimePointer(right)
-	}
-	if right == nil || !right.After(*left) {
-		return cloneTimePointer(left)
-	}
-	return cloneTimePointer(right)
-}
-
-func mergeCoverage(left, right *history.Coverage) *history.Coverage {
-	if left == nil {
-		return cloneCoverage(right)
-	}
-	if right == nil {
-		return cloneCoverage(left)
-	}
-	return &history.Coverage{
-		FirstInventoryObservedAt:  minTimePointer(left.FirstInventoryObservedAt, right.FirstInventoryObservedAt),
-		LastInventoryObservedAt:   maxTimePointer(left.LastInventoryObservedAt, right.LastInventoryObservedAt),
-		FirstUsageObservedAt:      minTimePointer(left.FirstUsageObservedAt, right.FirstUsageObservedAt),
-		LastUsageObservedAt:       maxTimePointer(left.LastUsageObservedAt, right.LastUsageObservedAt),
-		FirstDirectHookObservedAt: minTimePointer(left.FirstDirectHookObservedAt, right.FirstDirectHookObservedAt),
-		LastDirectHookObservedAt:  maxTimePointer(left.LastDirectHookObservedAt, right.LastDirectHookObservedAt),
-	}
-}
-
-func mergeAggregate(target *history.Aggregate, source history.Aggregate) error {
-	if source.Uses > maxInt64-target.Uses {
-		return errors.New("history aggregate invocation count overflows int64")
-	}
-	target.Uses += source.Uses
-	if source.DistinctInvocationSessions > maxInt64-target.DistinctInvocationSessions {
-		return errors.New("history aggregate distinct session count overflows int64")
-	}
-	target.DistinctInvocationSessions += source.DistinctInvocationSessions
-	for provenance, count := range source.InvocationEvidence {
-		if count > maxInt64-target.InvocationEvidence[provenance] {
-			return errors.New("history aggregate evidence count overflows int64")
-		}
-		target.InvocationEvidence[provenance] += count
-	}
-	target.Installed = target.Installed || source.Installed
-	target.InstalledScopes = mergeScopes(target.InstalledScopes, source.InstalledScopes)
-	mergedAdvertised, overflow := mergeOptionalCounts(target.ObservedAdvertisedSessions, source.ObservedAdvertisedSessions)
-	if overflow {
-		return errors.New("history aggregate advertised session count overflows int64")
-	}
-	target.ObservedAdvertisedSessions = mergedAdvertised
-	target.FirstObservedAt = minTimePointer(target.FirstObservedAt, source.FirstObservedAt)
-	target.LastObservedAt = maxTimePointer(target.LastObservedAt, source.LastObservedAt)
-	target.FirstEffectiveActivityAt = minTimePointer(target.FirstEffectiveActivityAt, source.FirstEffectiveActivityAt)
-	target.LastEffectiveActivityAt = maxTimePointer(target.LastEffectiveActivityAt, source.LastEffectiveActivityAt)
-	target.Coverage = mergeCoverage(target.Coverage, source.Coverage)
-	return nil
-}
-
-func mergeScopes(left, right []domain.Scope) []domain.Scope {
-	set := make(map[domain.Scope]struct{}, len(left)+len(right))
-	for _, scope := range left {
-		set[scope] = struct{}{}
-	}
-	for _, scope := range right {
-		set[scope] = struct{}{}
-	}
-	result := make([]domain.Scope, 0, len(set))
-	for scope := range set {
-		result = append(result, scope)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	return result
-}
-
-func mergeOptionalCounts(left, right *int64) (*int64, bool) {
-	if left == nil {
-		return cloneInt64Pointer(right), false
-	}
-	if right == nil {
-		return left, false
-	}
-	if *right > maxInt64-*left {
-		return left, true
-	}
-	value := *left + *right
-	return &value, false
-}
-
 func analyzeAggregate(capability domain.Capability, aggregate history.Aggregate, found bool, config Config, now time.Time) (CapabilityEvidence, error) {
-	invocationCount, err := safeInt(aggregate.Uses)
-	if err != nil {
-		return CapabilityEvidence{}, err
-	}
-	distinctSessions, err := safeInt(aggregate.DistinctInvocationSessions)
-	if err != nil {
-		return CapabilityEvidence{}, err
-	}
-	advertisedCount, err := safeOptionalInt(aggregate.ObservedAdvertisedSessions)
-	if err != nil {
-		return CapabilityEvidence{}, err
-	}
+	invocationCount := int(aggregate.Uses)
+	distinctSessions := int(aggregate.DistinctInvocationSessions)
+	advertisedCount := int(aggregate.AdvertisedObservations)
+	loadedCount := int(aggregate.LoadedObservations)
 	eventCounts := map[domain.EventType]int{
 		domain.EventAdvertised: advertisedCount,
-		domain.EventLoaded:     0,
+		domain.EventLoaded:     loadedCount,
 		domain.EventInvoked:    invocationCount,
 	}
 	sources := aggregateProvenanceSources(aggregate.InvocationEvidence)
@@ -637,31 +555,23 @@ func analyzeAggregate(capability domain.Capability, aggregate history.Aggregate,
 		Capability:                 capability,
 		Installed:                  true,
 		InstalledScopes:            aggregateScopes(capability, aggregate, found),
-		Coverage:                   cloneCoverage(aggregate.Coverage),
-		ObservedAdvertisedSessions: cloneInt64Pointer(aggregate.ObservedAdvertisedSessions),
+		Coverage:                   aggregate.Coverage,
+		ObservedAdvertisedSessions: aggregate.ObservedAdvertisedSessions,
 		EventCounts:                eventCounts,
 		InvocationCount:            invocationCount,
-		// Aggregate history has no loaded-event subtotal. Keeping this at zero
-		// is deliberate: Uses remains invocation-only and loading is not inferred.
-		ActivityCount:        invocationCount,
-		DistinctSessionCount: distinctSessions,
-		EvidenceSources:      sources,
-		MetadataTokens:       capability.MetadataTokens,
-		BodyTokens:           capability.BodyTokens,
-		Confidence:           domain.ConfidenceObserved,
-		CoverageConfidence:   domain.ConfidenceUnknown,
+		ActivityCount:              loadedCount + invocationCount,
+		DistinctSessionCount:       distinctSessions,
+		EvidenceSources:            sources,
+		MetadataTokens:             capability.MetadataTokens,
+		BodyTokens:                 capability.BodyTokens,
+		Confidence:                 domain.ConfidenceObserved,
+		CoverageConfidence:         domain.ConfidenceUnknown,
 	}
 	if found && aggregate.Uses > 0 {
-		evidence.FirstObservedAt = cloneTimePointer(aggregate.FirstObservedAt)
-		evidence.LastObservedAt = cloneTimePointer(aggregate.LastObservedAt)
-		evidence.FirstEffectiveActivityAt = cloneTimePointer(aggregate.FirstEffectiveActivityAt)
-		evidence.LastEffectiveActivityAt = cloneTimePointer(aggregate.LastEffectiveActivityAt)
-		if evidence.FirstEffectiveActivityAt == nil {
-			evidence.FirstEffectiveActivityAt = cloneTimePointer(evidence.FirstObservedAt)
-		}
-		if evidence.LastEffectiveActivityAt == nil {
-			evidence.LastEffectiveActivityAt = cloneTimePointer(evidence.LastObservedAt)
-		}
+		evidence.FirstObservedAt = aggregate.FirstObservedAt
+		evidence.LastObservedAt = aggregate.LastObservedAt
+		evidence.FirstEffectiveActivityAt = aggregate.FirstEffectiveActivityAt
+		evidence.LastEffectiveActivityAt = aggregate.LastEffectiveActivityAt
 	}
 	if evidence.FirstEffectiveActivityAt != nil {
 		lastEffective := *evidence.FirstEffectiveActivityAt
@@ -684,7 +594,9 @@ func analyzeAggregate(capability domain.Capability, aggregate history.Aggregate,
 
 func aggregateScopes(capability domain.Capability, aggregate history.Aggregate, found bool) []domain.Scope {
 	if found && aggregate.Installed && len(aggregate.InstalledScopes) > 0 {
-		return append([]domain.Scope(nil), aggregate.InstalledScopes...)
+		scopes := append([]domain.Scope(nil), aggregate.InstalledScopes...)
+		sort.Slice(scopes, func(i, j int) bool { return scopes[i] < scopes[j] })
+		return scopes
 	}
 	return []domain.Scope{capability.Scope}
 }
@@ -703,6 +615,9 @@ func aggregateCoverageWording(evidence CapabilityEvidence, found bool) string {
 	coverage := coverageDescription(evidence.Coverage)
 	if evidence.InvocationCount > 0 {
 		return fmt.Sprintf("observed invocation activity from %s; %s", provenanceWording(evidence.EvidenceSources), coverage)
+	}
+	if evidence.ActivityCount > 0 {
+		return "observed loaded activity; " + coverage
 	}
 	if evidence.ObservedAdvertisedSessions != nil {
 		return fmt.Sprintf("not observed in period; advertised evidence for %d observed session(s); %s", *evidence.ObservedAdvertisedSessions, coverage)
@@ -744,20 +659,6 @@ func formatCoverageRange(first, last *time.Time) string {
 		return "from " + first.UTC().Format(time.RFC3339Nano)
 	}
 	return first.UTC().Format(time.RFC3339Nano) + " to " + last.UTC().Format(time.RFC3339Nano)
-}
-
-func safeInt(value int64) (int, error) {
-	if value < 0 || value > int64(^uint(0)>>1) {
-		return 0, errors.New("history aggregate count does not fit int")
-	}
-	return int(value), nil
-}
-
-func safeOptionalInt(value *int64) (int, error) {
-	if value == nil {
-		return 0, nil
-	}
-	return safeInt(*value)
 }
 
 func analyzeCapability(capability domain.Capability, events []domain.UsageEvent, config Config, now time.Time) (CapabilityEvidence, error) {
@@ -888,6 +789,9 @@ func provenanceWording(sources []domain.Provenance) string {
 		default:
 			labels = append(labels, string(source))
 		}
+	}
+	if len(labels) == 0 {
+		return "unknown evidence source"
 	}
 	return strings.Join(labels, ", ")
 }
