@@ -1,8 +1,24 @@
 {
   "runtime": "codex",
+  "manifest_schema": "runtime-conformance/manifest-v2",
   "fixture_schema": "runtime-conformance/hooks-v1",
   "source_documentation_url": "https://learn.chatgpt.com/docs/hooks",
   "as_of": "2026-08-14",
+  "last_validated": "2026-08-14",
+  "runtime_version": null,
+  "runtime_version_provenance": {
+    "status": "unknown",
+    "source": "synthetic-fixture",
+    "evidence": "No live Codex installation was executed or captured; the fixture origin is intentionally unattributed."
+  },
+  "represented_event_schema": "codex/hooks/PostToolUse-v1",
+  "represented_config_schema": "codex/hooks-json-v1",
+  "documentation_provenance": {
+    "kind": "official-release-reference",
+    "url": "https://learn.chatgpt.com/docs/hooks",
+    "retrieved_at": "2026-08-14",
+    "release_scope": "Codex command hooks and documented PostToolUse event fields"
+  },
   "release_behavior_note": "Synthetic command-hook payloads follow the current Codex hooks release documentation. The page is the release reference: generated schemas on the main branch may contain fields that are ahead of a released Codex build. Direct parsing is intentionally limited to metadata-only PostToolUse observations; lifecycle and prompt events remain unsupported usage evidence.",
   "expectation_policy": {
     "valid": "The parser must accept the documented PostToolUse shape and emit one valid metadata-only invocation.",

@@ -25,14 +25,34 @@ type conformanceFixtureSuite struct {
 }
 
 type conformanceManifest struct {
-	Runtime                string               `json:"runtime"`
-	FixtureSchema          string               `json:"fixture_schema"`
-	SourceDocumentationURL string               `json:"source_documentation_url"`
-	AsOf                   string               `json:"as_of"`
-	ReleaseBehaviorNote    string               `json:"release_behavior_note"`
-	ExpectationPolicy      map[string]string    `json:"expectation_policy"`
-	IdentityPolicy         map[string]string    `json:"identity_policy"`
-	Fixtures               []conformanceFixture `json:"fixtures"`
+	ManifestSchema           string                             `json:"manifest_schema"`
+	Runtime                  string                             `json:"runtime"`
+	FixtureSchema            string                             `json:"fixture_schema"`
+	SourceDocumentationURL   string                             `json:"source_documentation_url"`
+	AsOf                     string                             `json:"as_of"`
+	LastValidated            string                             `json:"last_validated"`
+	RuntimeVersion           *string                            `json:"runtime_version"`
+	RuntimeVersionProvenance conformanceVersionProvenance       `json:"runtime_version_provenance"`
+	RepresentedEventSchema   string                             `json:"represented_event_schema"`
+	RepresentedConfigSchema  string                             `json:"represented_config_schema"`
+	DocumentationProvenance  conformanceDocumentationProvenance `json:"documentation_provenance"`
+	ReleaseBehaviorNote      string                             `json:"release_behavior_note"`
+	ExpectationPolicy        map[string]string                  `json:"expectation_policy"`
+	IdentityPolicy           map[string]string                  `json:"identity_policy"`
+	Fixtures                 []conformanceFixture               `json:"fixtures"`
+}
+
+type conformanceVersionProvenance struct {
+	Status   string `json:"status"`
+	Source   string `json:"source"`
+	Evidence string `json:"evidence"`
+}
+
+type conformanceDocumentationProvenance struct {
+	Kind         string `json:"kind"`
+	URL          string `json:"url"`
+	RetrievedAt  string `json:"retrieved_at"`
+	ReleaseScope string `json:"release_scope"`
 }
 
 type conformanceFixture struct {
@@ -147,6 +167,9 @@ func validateConformanceManifest(t *testing.T, suite conformanceFixtureSuite, ma
 	if manifest.Runtime != suite.runtime {
 		t.Fatalf("manifest runtime = %q, want %q", manifest.Runtime, suite.runtime)
 	}
+	if manifest.ManifestSchema != "runtime-conformance/manifest-v2" {
+		t.Fatalf("manifest schema = %q, want runtime-conformance/manifest-v2", manifest.ManifestSchema)
+	}
 	if manifest.FixtureSchema != "runtime-conformance/hooks-v1" {
 		t.Fatalf("fixture schema = %q, want runtime-conformance/hooks-v1", manifest.FixtureSchema)
 	}
@@ -155,6 +178,39 @@ func validateConformanceManifest(t *testing.T, suite conformanceFixtureSuite, ma
 	}
 	if _, err := time.Parse("2006-01-02", manifest.AsOf); err != nil {
 		t.Fatalf("manifest as_of = %q is not an ISO date: %v", manifest.AsOf, err)
+	}
+	if manifest.LastValidated != manifest.AsOf {
+		t.Fatalf("manifest last_validated = %q, want same date as as_of %q", manifest.LastValidated, manifest.AsOf)
+	}
+	if _, err := time.Parse("2006-01-02", manifest.LastValidated); err != nil {
+		t.Fatalf("manifest last_validated = %q is not an ISO date: %v", manifest.LastValidated, err)
+	}
+	if manifest.RuntimeVersion == nil && manifest.RuntimeVersionProvenance.Status != "unknown" {
+		t.Fatalf("runtime_version is unavailable but provenance status = %q, want unknown", manifest.RuntimeVersionProvenance.Status)
+	}
+	if manifest.RuntimeVersion != nil && strings.TrimSpace(*manifest.RuntimeVersion) == "" {
+		t.Fatal("manifest runtime_version must be non-empty when known")
+	}
+	if manifest.RuntimeVersionProvenance.Status != "unknown" && manifest.RuntimeVersionProvenance.Status != "known" {
+		t.Fatalf("unsupported runtime_version_provenance status %q", manifest.RuntimeVersionProvenance.Status)
+	}
+	if strings.TrimSpace(manifest.RuntimeVersionProvenance.Source) == "" || strings.TrimSpace(manifest.RuntimeVersionProvenance.Evidence) == "" {
+		t.Fatal("runtime_version_provenance must include source and evidence")
+	}
+	if strings.TrimSpace(manifest.RepresentedEventSchema) == "" || strings.TrimSpace(manifest.RepresentedConfigSchema) == "" {
+		t.Fatal("manifest represented event/config schemas must be non-empty")
+	}
+	if manifest.DocumentationProvenance.Kind != "official-release-reference" {
+		t.Fatalf("documentation provenance kind = %q, want official-release-reference", manifest.DocumentationProvenance.Kind)
+	}
+	if manifest.DocumentationProvenance.URL != manifest.SourceDocumentationURL || !strings.HasPrefix(manifest.DocumentationProvenance.URL, "https://") {
+		t.Fatalf("documentation provenance URL = %q, want HTTPS source URL %q", manifest.DocumentationProvenance.URL, manifest.SourceDocumentationURL)
+	}
+	if _, err := time.Parse("2006-01-02", manifest.DocumentationProvenance.RetrievedAt); err != nil {
+		t.Fatalf("documentation retrieved_at = %q is not an ISO date: %v", manifest.DocumentationProvenance.RetrievedAt, err)
+	}
+	if strings.TrimSpace(manifest.DocumentationProvenance.ReleaseScope) == "" {
+		t.Fatal("documentation provenance release_scope is empty")
 	}
 	if strings.TrimSpace(manifest.ReleaseBehaviorNote) == "" {
 		t.Fatal("manifest release_behavior_note is empty")

@@ -1,8 +1,24 @@
 {
   "runtime": "claude-code",
+  "manifest_schema": "runtime-conformance/manifest-v2",
   "fixture_schema": "runtime-conformance/hooks-v1",
   "source_documentation_url": "https://code.claude.com/docs/en/hooks",
   "as_of": "2026-08-14",
+  "last_validated": "2026-08-14",
+  "runtime_version": null,
+  "runtime_version_provenance": {
+    "status": "unknown",
+    "source": "synthetic-fixture",
+    "evidence": "No live Claude Code installation was executed or captured; the fixture origin is intentionally unattributed."
+  },
+  "represented_event_schema": "claude-code/hooks/PostToolUse-v1",
+  "represented_config_schema": "claude-code/settings-hooks-v1",
+  "documentation_provenance": {
+    "kind": "official-release-reference",
+    "url": "https://code.claude.com/docs/en/hooks",
+    "retrieved_at": "2026-08-14",
+    "release_scope": "Claude Code command hooks and documented hook event fields"
+  },
   "release_behavior_note": "Synthetic command-hook payloads follow the current Claude Code hooks reference. Direct parsing is intentionally limited to metadata-only PostToolUse, PostToolUseFailure, and slash-command UserPromptExpansion observations; SubagentStart and SubagentStop remain lifecycle evidence rather than invocation events.",
   "expectation_policy": {
     "valid": "The parser must accept the documented event shape and emit one valid metadata-only invocation.",
