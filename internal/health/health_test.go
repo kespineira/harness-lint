@@ -201,6 +201,18 @@ func TestEvaluateStaticFailuresAreDistinctAndBroken(t *testing.T) {
 	}
 }
 
+func TestEvaluateInstalledStatusWithoutConfigIsUnknown(t *testing.T) {
+	input, hooksFake, _ := installedInputs(domain.RuntimeCodex)
+	hooksFake.report.ConfigExists = false
+	got := evaluate(t, input)
+	if got.State != Unknown {
+		t.Fatalf("installed status without config = %q, want unknown", got.State)
+	}
+	if got.Components.Config.State != ComponentUnknown {
+		t.Fatalf("installed status without config component = %q, want unknown", got.Components.Config.State)
+	}
+}
+
 func TestEvaluateManagedCompletenessUsesReturnedStatusEntries(t *testing.T) {
 	input, hooksFake, _ := installedInputs(domain.RuntimeCodex)
 	hooksFake.report.ManagedEntries = append(hooksFake.report.ManagedEntries, hooks.ManagedEntry{State: hooks.ManagedEntryInstalled, ExactHandlers: 1})

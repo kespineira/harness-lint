@@ -250,11 +250,11 @@ func assessConfig(status hooks.StatusReport) Check {
 	if status.Code == hooks.StatusMalformed {
 		return Check{State: ComponentMalformed}
 	}
-	if status.Code == hooks.StatusInstalled || status.ConfigExists {
-		return Check{State: ComponentOK}
-	}
 	if status.Code == hooks.StatusUnsupported {
 		return Check{State: ComponentUnsupported}
+	}
+	if status.ConfigExists {
+		return Check{State: ComponentOK}
 	}
 	return Check{State: ComponentUnknown}
 }
