@@ -211,9 +211,10 @@ func historyCurrentFilters(alias string, query history.Query) (string, []any) {
 
 // coverageQueryForHistoryQuery translates the released closed event interval
 // [Start, End] to the explicit half-open coverage interval [Start, End+1ns).
-// A nanosecond is the store's timestamp precision. At the representable time
-// ceiling there is no greater endpoint; retaining End is the only safe
-// half-open bound and, importantly, avoids an overflow or an unbounded scan.
+// A nanosecond is the store's timestamp precision. The in-memory coverage
+// endpoint may therefore be year 10000 even though migration 007 cannot
+// persist that endpoint; coverage SQL omits only out-of-domain time
+// predicates and the final interval is clipped in memory.
 func coverageQueryForHistoryQuery(query history.Query) (history.CoverageQuery, error) {
 	coverage := history.CoverageQuery{
 		Start:          query.Start,
@@ -238,14 +239,7 @@ func addCoveragePrecision(value time.Time) (result time.Time) {
 			result = value
 		}
 	}()
-	next := value.Add(time.Nanosecond)
-	// Epoch persistence accepts the fixed four-digit UTC timestamp form. If
-	// the increment leaves that representable range, retain the finite bound
-	// rather than turning it into an open interval or an invalid SQL value.
-	if !next.After(value) || next.Year() < 0 || next.Year() > 9999 || len(next.Format(epochTimestampLayout)) != len(epochTimestampLayout) {
-		return value
-	}
-	return next
+	return value.Add(time.Nanosecond)
 }
 
 func cloneEffectiveCoverage(value history.EffectiveCoverage) *history.EffectiveCoverage {

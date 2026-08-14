@@ -40,10 +40,11 @@ func (q Query) Validate() error {
 }
 
 // CoverageQuery describes a half-open UTC coverage interval, [Start, End).
-// A zero endpoint is unbounded. Coverage identity is canonical runtime/type/
-// name only; presence definitions from every scope and source are unioned
-// before intersecting capture epochs because usage events cannot identify
-// either of those definition dimensions.
+// A zero endpoint is unbounded; equal non-zero endpoints are a valid empty
+// window and produce unknown coverage. Coverage identity is canonical
+// runtime/type/name only; presence definitions from every scope and source are
+// unioned before intersecting capture epochs because usage events cannot
+// identify either of those definition dimensions.
 type CoverageQuery struct {
 	Start time.Time
 	End   time.Time

@@ -54,8 +54,6 @@ func TestQueryEffectiveCoverageIntersectsSparseEpochsAndPreservesGaps(t *testing
 		t.Fatalf("effective coverage = %#v, status %q; want %#v partial", rows[0].Intervals, rows[0].Status, want)
 	}
 
-	// Querying by scope must not accidentally use an identically named epoch
-	// from another scope.
 	if rows[0].Key != (history.CoverageKey{Runtime: key.Runtime, CapabilityType: key.CapabilityType, CapabilityName: key.CapabilityName}) {
 		t.Fatalf("coverage identity = %#v", rows[0].Key)
 	}
@@ -95,6 +93,32 @@ func TestQueryCapabilityCoverageUnionsHomonymousDefinitionsAcrossScopeAndSource(
 	want := []history.Interval{{Start: base.UTC(), End: base.Add(time.Hour).UTC()}, {Start: base.Add(2 * time.Hour).UTC(), End: base.Add(3 * time.Hour).UTC()}}
 	if !reflect.DeepEqual(got.Intervals, want) || got.Status != history.CoveragePartial {
 		t.Fatalf("canonical homonymous coverage = %#v, status %q; want %#v, partial", got.Intervals, got.Status, want)
+	}
+}
+
+func TestQueryEffectiveCoverageEnumeratesPresenceKeysOutsideRequestedInterval(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	capability := testCapability("outside-window", time.Time{}, time.Time{})
+	if err := s.OpenCaptureEpoch(ctx, capability.Runtime, base, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("OpenCaptureEpoch(): %v", err)
+	}
+	if err := s.RecordInventory(ctx, capability.Runtime, base, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(present): %v", err)
+	}
+	if err := s.RecordInventory(ctx, capability.Runtime, base.Add(time.Hour), nil); err != nil {
+		t.Fatalf("RecordInventory(absent): %v", err)
+	}
+	if err := s.CloseCaptureEpoch(ctx, capability.Runtime, base.Add(time.Hour), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
+		t.Fatalf("CloseCaptureEpoch(): %v", err)
+	}
+	rows, err := s.QueryEffectiveCoverage(ctx, history.CoverageQuery{Runtime: capability.Runtime, Start: base.Add(2 * time.Hour), End: base.Add(3 * time.Hour)})
+	if err != nil {
+		t.Fatalf("QueryEffectiveCoverage(outside): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Key.CapabilityName != capability.Name || rows[0].Status != history.CoverageUnknown || len(rows[0].Intervals) != 0 {
+		t.Fatalf("outside-window coverage = %#v, want one unknown presence key", rows)
 	}
 }
 
@@ -186,7 +210,7 @@ func TestQueryInvocationHistoryTranslatesInclusiveEventEndToHalfOpenCoverage(t *
 	}
 }
 
-func TestCoverageQueryRejectsConflictingCanonicalKeyFiltersAndHandlesMaximumEnd(t *testing.T) {
+func TestCoverageQueryRejectsConflictingCanonicalKeyFiltersAndPreservesMaximumEnd(t *testing.T) {
 	key := history.CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "max-time"}
 	if _, err := coverageQueryForHistoryQuery(history.Query{End: time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.FixedZone("CET", 2*60*60))}); err != nil {
 		t.Fatalf("maximum event end translation: %v", err)
@@ -195,14 +219,59 @@ func TestCoverageQueryRejectsConflictingCanonicalKeyFiltersAndHandlesMaximumEnd(
 	if err != nil {
 		t.Fatalf("maximum UTC event end translation: %v", err)
 	}
-	if !translated.End.Equal(time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)) {
-		t.Fatalf("maximum translated end = %s, want finite maximum", translated.End)
+	maximum := time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	if !translated.End.Equal(maximum.Add(time.Nanosecond)) || translated.End.Year() != 10000 {
+		t.Fatalf("maximum translated end = %s, want %s", translated.End, maximum.Add(time.Nanosecond))
 	}
 
 	s := openTestStore(t)
 	_, err = s.QueryCapabilityCoverage(context.Background(), key, history.CoverageQuery{Runtime: domain.RuntimeClaude})
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("conflicting runtime filter error = %v, want conflict", err)
+	}
+}
+
+func TestCoverageQueryEqualEndpointsYieldUnknownEmptyWindow(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	key := history.CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "empty-window"}
+	point := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	got, err := s.QueryCapabilityCoverage(ctx, key, history.CoverageQuery{Start: point, End: point})
+	if err != nil {
+		t.Fatalf("QueryCapabilityCoverage(empty): %v", err)
+	}
+	if got.Status != history.CoverageUnknown || len(got.Intervals) != 0 {
+		t.Fatalf("equal-endpoint coverage = %#v, status %q; want empty unknown", got.Intervals, got.Status)
+	}
+}
+
+func TestQueryInvocationHistoryIncludesMaximumPersistedEndpoint(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	maximum := time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+	capability := testCapability("maximum-endpoint", time.Time{}, time.Time{})
+	capability.Type = domain.CapabilityTool
+	if err := s.OpenCaptureEpoch(ctx, capability.Runtime, maximum, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("OpenCaptureEpoch(): %v", err)
+	}
+	if err := s.RecordInventory(ctx, capability.Runtime, maximum, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(): %v", err)
+	}
+	event := testUsageEvent(maximum, capability.Name, domain.EventInvoked)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
+		t.Fatalf("InsertUsageEvents(): %v", err)
+	}
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name, Start: maximum, End: maximum})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(maximum): %v", err)
+	}
+	if len(rows) != 1 || rows[0].EffectiveCoverage == nil {
+		t.Fatalf("maximum history rows = %#v, want one row with effective coverage", rows)
+	}
+	coverage := rows[0].EffectiveCoverage
+	want := history.Interval{Start: maximum, End: maximum.Add(time.Nanosecond)}
+	if coverage.Status != history.CoveragePartial || len(coverage.Intervals) != 1 || !coverage.Intervals[0].Start.Equal(want.Start) || !coverage.Intervals[0].End.Equal(want.End) {
+		t.Fatalf("maximum effective coverage = %#v, status %q; want [%s,%s) partial", coverage.Intervals, coverage.Status, want.Start, want.End)
 	}
 }
 
@@ -216,6 +285,9 @@ func TestExplainCoverageQueryPlanUsesEpochIndexes(t *testing.T) {
 	joined := strings.ToLower(strings.Join(plans, "\n"))
 	if !strings.Contains(joined, "capture_epochs") || !strings.Contains(joined, "capability_presence_epochs") {
 		t.Fatalf("coverage plans = %#v", plans)
+	}
+	if strings.Contains(joined, "usage_events") || strings.Contains(joined, "current_inventory") {
+		t.Fatalf("coverage key plans query non-epoch identity tables: %#v", plans)
 	}
 	if !strings.Contains(joined, "capture_epochs_runtime_time_idx") || !strings.Contains(joined, "capability_presence_epochs_key_time_idx") {
 		t.Fatalf("coverage plans do not show epoch indexes: %#v", plans)

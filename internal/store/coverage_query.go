@@ -13,9 +13,10 @@ import (
 )
 
 // QueryEffectiveCoverage computes modeled coverage from the sparse epoch
-// tables. Usage events are consulted only for distinct aggregate keys; event
-// rows themselves are never loaded into memory. Presence epochs for different
-// scopes/sources intentionally collapse to the canonical history key.
+// tables. Canonical coverage keys come only from capability-presence epochs;
+// usage events and current inventory are not coverage identity evidence.
+// Presence epochs for different scopes/sources intentionally collapse to the
+// canonical history key.
 func (s *Store) QueryEffectiveCoverage(ctx context.Context, query history.CoverageQuery) ([]history.EffectiveCoverage, error) {
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
@@ -86,13 +87,17 @@ func (s *Store) ExplainCoverageQueryPlan(ctx context.Context, query history.Cove
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
-	plans := make([]string, 0, 2)
+	identityQuery := query
+	identityQuery.Start = time.Time{}
+	identityQuery.End = time.Time{}
+	plans := make([]string, 0, 3)
 	for _, statement := range []struct {
 		statement string
 		args      []any
 	}{
 		{statement: `EXPLAIN QUERY PLAN SELECT runtime, started_at, ended_at FROM capture_epochs` + coverageCaptureWhere(query), args: coverageCaptureArgs(query)},
 		{statement: `EXPLAIN QUERY PLAN SELECT runtime, capability_type, capability_name, scope, source, started_at, ended_at FROM capability_presence_epochs` + coveragePresenceWhere(query), args: coveragePresenceArgs(query)},
+		{statement: `EXPLAIN QUERY PLAN SELECT DISTINCT runtime, capability_type, capability_name FROM capability_presence_epochs` + coveragePresenceWhere(identityQuery), args: coveragePresenceArgs(identityQuery)},
 	} {
 		rows, err := s.db.QueryContext(ctx, statement.statement, statement.args...)
 		if err != nil {
@@ -120,55 +125,14 @@ func (s *Store) ExplainCoverageQueryPlan(ctx context.Context, query history.Cove
 
 func (s *Store) coverageKeys(ctx context.Context, query history.CoverageQuery) ([]history.CoverageKey, error) {
 	keys := make(map[history.CoverageKey]struct{})
-	usageClause, usageArgs := coverageIdentityFilters("u", "capability_name", query)
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT u.runtime, u.capability_type, u.capability_name FROM usage_events AS u`+usageClause, usageArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("query effective coverage usage keys: %w", err)
-	}
-	for rows.Next() {
-		var key history.CoverageKey
-		if err := rows.Scan(&key.Runtime, &key.CapabilityType, &key.CapabilityName); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan effective coverage usage key: %w", err)
-		}
-		keys[key] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("iterate effective coverage usage keys: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close effective coverage usage keys: %w", err)
-	}
-
-	currentClause, currentArgs := coverageIdentityFilters("c", "name", query)
-	rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT c.runtime, c.capability_type, c.name FROM current_inventory AS ci INNER JOIN capabilities AS c ON c.runtime = ci.runtime AND c.capability_type = ci.capability_type AND c.name = ci.name AND c.scope = ci.scope AND c.source = ci.source`+currentClause, currentArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("query effective coverage inventory keys: %w", err)
-	}
-	for rows.Next() {
-		var key history.CoverageKey
-		if err := rows.Scan(&key.Runtime, &key.CapabilityType, &key.CapabilityName); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan effective coverage inventory key: %w", err)
-		}
-		keys[key] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("iterate effective coverage inventory keys: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("close effective coverage inventory keys: %w", err)
-	}
-
-	// A capability with only epoch evidence is still a valid query result.
-	// Discover canonical keys independently of the requested interval so a
-	// known key with no overlap is returned as unknown rather than disappearing.
+	// Discover canonical keys only from sparse epoch identity, independently of
+	// the requested interval. A known key with no overlap is returned as
+	// unknown rather than disappearing, while usage-only/current-only keys are
+	// not treated as effective coverage identities.
 	identityQuery := query
 	identityQuery.Start = time.Time{}
 	identityQuery.End = time.Time{}
-	rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, capability_name FROM capability_presence_epochs`+coveragePresenceWhere(identityQuery), coveragePresenceArgs(identityQuery)...)
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, capability_name FROM capability_presence_epochs`+coveragePresenceWhere(identityQuery), coveragePresenceArgs(identityQuery)...)
 	if err != nil {
 		return nil, fmt.Errorf("query effective coverage epoch keys: %w", err)
 	}
@@ -324,10 +288,10 @@ func coverageCaptureWhere(query history.CoverageQuery) string {
 	if query.Runtime != "" {
 		conditions = append(conditions, "runtime = ?")
 	}
-	if !query.Start.IsZero() {
+	if coverageSQLBoundRepresentable(query.Start) {
 		conditions = append(conditions, "(ended_at IS NULL OR ended_at > ?)")
 	}
-	if !query.End.IsZero() {
+	if coverageSQLBoundRepresentable(query.End) {
 		conditions = append(conditions, "started_at < ?")
 	}
 	if len(conditions) == 0 {
@@ -341,10 +305,10 @@ func coverageCaptureArgs(query history.CoverageQuery) []any {
 	if query.Runtime != "" {
 		args = append(args, query.Runtime)
 	}
-	if !query.Start.IsZero() {
+	if coverageSQLBoundRepresentable(query.Start) {
 		args = append(args, formatEpochTimestamp(query.Start))
 	}
-	if !query.End.IsZero() {
+	if coverageSQLBoundRepresentable(query.End) {
 		args = append(args, formatEpochTimestamp(query.End))
 	}
 	return args
@@ -361,10 +325,10 @@ func coveragePresenceWhere(query history.CoverageQuery) string {
 	if query.CapabilityName != "" {
 		conditions = append(conditions, "capability_name = ?")
 	}
-	if !query.Start.IsZero() {
+	if coverageSQLBoundRepresentable(query.Start) {
 		conditions = append(conditions, "(ended_at IS NULL OR ended_at > ?)")
 	}
-	if !query.End.IsZero() {
+	if coverageSQLBoundRepresentable(query.End) {
 		conditions = append(conditions, "started_at < ?")
 	}
 	if len(conditions) == 0 {
@@ -384,13 +348,25 @@ func coveragePresenceArgs(query history.CoverageQuery) []any {
 	if query.CapabilityName != "" {
 		args = append(args, query.CapabilityName)
 	}
-	if !query.Start.IsZero() {
+	if coverageSQLBoundRepresentable(query.Start) {
 		args = append(args, formatEpochTimestamp(query.Start))
 	}
-	if !query.End.IsZero() {
+	if coverageSQLBoundRepresentable(query.End) {
 		args = append(args, formatEpochTimestamp(query.End))
 	}
 	return args
+}
+
+// coverageSQLBoundRepresentable reports whether a query bound can be compared
+// safely with migration 007's fixed-width four-digit UTC timestamps. Bounds
+// outside that persisted domain are applied only by in-memory clipping; an
+// omitted SQL predicate avoids invalid values and lexicographic mismatches.
+func coverageSQLBoundRepresentable(value time.Time) bool {
+	if value.IsZero() {
+		return false
+	}
+	value = value.UTC()
+	return value.Year() >= 0 && value.Year() <= 9999 && len(value.Format(epochTimestampLayout)) == len(epochTimestampLayout)
 }
 
 func coverageIdentityFilters(alias, nameColumn string, query history.CoverageQuery) (string, []any) {
