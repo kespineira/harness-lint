@@ -368,24 +368,3 @@ func coverageSQLBoundRepresentable(value time.Time) bool {
 	value = value.UTC()
 	return value.Year() >= 0 && value.Year() <= 9999 && len(value.Format(epochTimestampLayout)) == len(epochTimestampLayout)
 }
-
-func coverageIdentityFilters(alias, nameColumn string, query history.CoverageQuery) (string, []any) {
-	conditions := make([]string, 0, 3)
-	args := make([]any, 0, 3)
-	if query.Runtime != "" {
-		conditions = append(conditions, alias+`.runtime = ?`)
-		args = append(args, query.Runtime)
-	}
-	if query.CapabilityType != "" {
-		conditions = append(conditions, alias+`.capability_type = ?`)
-		args = append(args, query.CapabilityType)
-	}
-	if query.CapabilityName != "" {
-		conditions = append(conditions, alias+`.`+nameColumn+` = ?`)
-		args = append(args, query.CapabilityName)
-	}
-	if len(conditions) == 0 {
-		return "", args
-	}
-	return " WHERE " + strings.Join(conditions, " AND "), args
-}
