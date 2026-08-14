@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "runtimes": [
+    {
+      "runtime": "claude-code",
+      "status": "installed",
+      "config_path": "<ROOT>/home/.claude/settings.json",
+      "config_exists": true,
+      "managed": "installed",
+      "managed_entries": [
+        {"event": "PostToolUse", "state": "installed", "exact_handlers": 1, "partial_handlers": 0, "lookalike_handlers": 0},
+        {"event": "PostToolUseFailure", "state": "installed", "exact_handlers": 1, "partial_handlers": 0, "lookalike_handlers": 0},
+        {"event": "UserPromptExpansion", "state": "installed", "exact_handlers": 1, "partial_handlers": 0, "lookalike_handlers": 0}
+      ],
+      "binary": {"name": "harness-lint", "resolved": true, "resolved_path": "/opt/harness-lint", "error": ""},
+      "inline_hooks": false,
+      "trust_review": {"required": false, "limitation": ""},
+      "warnings": []
+    },
+    {
+      "runtime": "codex",
+      "status": "installed",
+      "config_path": "<ROOT>/home/.codex/hooks.json",
+      "config_exists": true,
+      "managed": "installed",
+      "managed_entries": [
+        {"event": "PostToolUse", "state": "installed", "exact_handlers": 1, "partial_handlers": 0, "lookalike_handlers": 0}
+      ],
+      "binary": {"name": "harness-lint", "resolved": true, "resolved_path": "/opt/harness-lint", "error": ""},
+      "inline_hooks": false,
+      "trust_review": {"required": true, "limitation": "Codex user-level non-managed command hooks require review/trust before execution; this manager cannot grant trust."},
+      "warnings": []
+    }
+  ]
+}

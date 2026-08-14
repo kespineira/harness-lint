@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "period": {
+    "days": 60,
+    "start": "2026-06-15T12:00:00Z",
+    "end": "2026-08-14T12:00:00Z",
+    "inclusive": true
+  },
+  "filters": {"runtime": null, "type": null},
+  "capabilities": [
+    {
+      "runtime": "codex",
+      "type": "tool",
+      "name": "Bash",
+      "installed": true,
+      "installed_scopes": ["user"],
+      "uses": 1,
+      "distinct_sessions": 1,
+      "provenance": {"hook": 1, "transcript": 0, "import": 0, "sources": ["hook"]}
+    },
+    {
+      "runtime": "codex",
+      "type": "tool",
+      "name": "update_plan",
+      "installed": false,
+      "installed_scopes": [],
+      "uses": 1,
+      "distinct_sessions": 1,
+      "provenance": {"hook": 1, "transcript": 0, "import": 0, "sources": ["hook"]}
+    }
+  ]
+}

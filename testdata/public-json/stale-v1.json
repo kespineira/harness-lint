@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "stale_after_days": 60,
+  "runtimes": [
+    {
+      "runtime": "claude-code",
+      "installed": 0,
+      "advertised": 0,
+      "loaded": 0,
+      "invoked": 0,
+      "configured_advertised": 0,
+      "invoked_last_30d": 0,
+      "no_activity_observed": 0,
+      "usage_events": 0
+    },
+    {
+      "runtime": "codex",
+      "installed": 1,
+      "advertised": 0,
+      "loaded": 0,
+      "invoked": 2,
+      "configured_advertised": 1,
+      "invoked_last_30d": 1,
+      "no_activity_observed": 0,
+      "usage_events": 2
+    }
+  ],
+  "capabilities": [
+    {
+      "runtime": "codex",
+      "type": "tool",
+      "name": "Bash",
+      "installed": true,
+      "scope": "user",
+      "installed_scopes": ["user"],
+      "status": "KEEP",
+      "evidence_sources": ["hook"],
+      "invocation_count": 1,
+      "distinct_sessions": 1
+    }
+  ],
+  "findings": []
+}
