@@ -29,6 +29,15 @@ type migration struct {
 	sql     []byte
 }
 
+// SchemaStatus describes the database schema version and the newest schema
+// version supported by this binary. It intentionally contains no database
+// handle so callers can use it for health checks without reaching into the
+// store implementation.
+type SchemaStatus struct {
+	Current int
+	Latest  int
+}
+
 const sqliteBusyTimeoutMilliseconds = 5000
 
 // Store is a concurrency-safe database handle. SQLite serializes writes and
@@ -42,6 +51,10 @@ type Store struct {
 // for a transient store in tests; callers own the path and identifiers passed
 // to this package.
 func Open(path string) (*Store, error) {
+	return openWithMigrationFS(path, migrations)
+}
+
+func openWithMigrationFS(path string, migrationFS fs.FS) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("store path is required")
 	}
@@ -52,7 +65,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
+	if err := s.migrateWithFS(context.Background(), migrationFS); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -83,7 +96,11 @@ func (s *Store) isClosed() bool {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	available, err := loadMigrations(migrations)
+	return s.migrateWithFS(ctx, migrations)
+}
+
+func (s *Store) migrateWithFS(ctx context.Context, migrationFS fs.FS) error {
+	available, err := loadMigrations(migrationFS)
 	if err != nil {
 		return fmt.Errorf("load migrations: %w", err)
 	}
@@ -95,11 +112,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)`); err != nil {
 		return fmt.Errorf("create schema metadata: %w", err)
 	}
-	var current int
-	err = tx.QueryRowContext(ctx, `SELECT CAST(value AS INTEGER) FROM schema_meta WHERE key = 'version'`).Scan(&current)
-	if errors.Is(err, sql.ErrNoRows) {
-		current = 0
-	} else if err != nil {
+	current, err := readSchemaVersion(ctx, tx)
+	if err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
 	latest := available[len(available)-1].version
@@ -121,6 +135,55 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
+}
+
+// SchemaStatus reports the current database schema version and the latest
+// version supported by the embedded migration sequence.
+func (s *Store) SchemaStatus(ctx context.Context) (SchemaStatus, error) {
+	if s.isClosed() {
+		return SchemaStatus{}, errors.New("store is closed")
+	}
+	available, err := loadMigrations(migrations)
+	if err != nil {
+		return SchemaStatus{}, fmt.Errorf("load migrations: %w", err)
+	}
+	current, err := readSchemaVersion(ctx, s.db)
+	if err != nil {
+		return SchemaStatus{}, fmt.Errorf("read schema version: %w", err)
+	}
+	return SchemaStatus{Current: current, Latest: available[len(available)-1].version}, nil
+}
+
+type schemaVersionReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func readSchemaVersion(ctx context.Context, reader schemaVersionReader) (int, error) {
+	var raw string
+	err := reader.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return parseSchemaVersion(raw)
+}
+
+func parseSchemaVersion(raw string) (int, error) {
+	if raw == "" {
+		return 0, errors.New("schema version is empty")
+	}
+	for _, char := range raw {
+		if char < '0' || char > '9' {
+			return 0, fmt.Errorf("schema version %q is not a non-negative integer", raw)
+		}
+	}
+	version, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse schema version %q: %w", raw, err)
+	}
+	return version, nil
 }
 
 // loadMigrations discovers numbered SQL files from the embedded migration

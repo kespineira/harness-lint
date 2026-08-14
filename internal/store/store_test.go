@@ -27,12 +27,12 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	checkSchema(t, s)
-	var version string
-	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
-		t.Fatalf("read schema version: %v", err)
+	status, err := s.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus() = %v", err)
 	}
-	if version != "5" {
-		t.Fatalf("schema version = %q, want 5", version)
+	if status != (SchemaStatus{Current: 5, Latest: 5}) {
+		t.Fatalf("schema status = %#v, want current/latest 5", status)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -47,6 +47,182 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 		t.Fatalf("ListCapabilities() after reopen: %v", err)
 	} else if len(capabilities) != 0 {
 		t.Fatalf("empty capabilities = %#v, want no rows", capabilities)
+	}
+	status, err = reopened.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus() after reopen = %v", err)
+	}
+	if status != (SchemaStatus{Current: 5, Latest: 5}) {
+		t.Fatalf("schema status after reopen = %#v, want current/latest 5", status)
+	}
+}
+
+func TestOpenMigrationSecondRunIsNoOpForPersistedData(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "idempotent.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	capability := testCapability("lint", time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC), time.Date(2026, 8, 13, 11, 0, 0, 0, time.UTC))
+	if err := s.UpsertCapabilities(ctx, []domain.Capability{capability}); err != nil {
+		t.Fatalf("UpsertCapabilities() = %v", err)
+	}
+	event := testUsageEvent(time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC), "terminal", domain.EventInvoked)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
+		t.Fatalf("InsertUsageEvents() = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen error = %v", err)
+	}
+	defer reopened.Close()
+	status, err := reopened.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus() after second run = %v", err)
+	}
+	if status != (SchemaStatus{Current: 5, Latest: 5}) {
+		t.Fatalf("schema status after second run = %#v, want current/latest 5", status)
+	}
+
+	capabilities, err := reopened.ListCapabilities(ctx)
+	if err != nil {
+		t.Fatalf("ListCapabilities() after second run = %v", err)
+	}
+	if !reflect.DeepEqual(capabilities, []domain.Capability{capability}) {
+		t.Fatalf("capabilities after second run = %#v, want %#v", capabilities, []domain.Capability{capability})
+	}
+	events, err := reopened.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents() after second run = %v", err)
+	}
+	if len(events) != 1 || events[0].CapabilityName != event.CapabilityName || events[0].EventType != event.EventType {
+		t.Fatalf("events after second run = %#v, want one preserved event", events)
+	}
+}
+
+func TestMigrationFailureRollsBackSchemaObjectsDataAndVersion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "failed-migration.db")
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := seed.ExecContext(ctx, `
+CREATE TABLE schema_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+INSERT INTO schema_meta(key, value) VALUES ('version', '1');
+CREATE TABLE preserved (value TEXT NOT NULL);
+INSERT INTO preserved(value) VALUES ('before migration');`); err != nil {
+		seed.Close()
+		t.Fatalf("seed database: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seeded database: %v", err)
+	}
+
+	fsys := fstest.MapFS{
+		"migrations/001_base.sql": &fstest.MapFile{Data: []byte("-- existing baseline")},
+		"migrations/002_add_data.sql": &fstest.MapFile{Data: []byte(`
+INSERT INTO preserved(value) VALUES ('during migration');
+CREATE TABLE partial (value TEXT NOT NULL);`)},
+		"migrations/003_broken.sql": &fstest.MapFile{Data: []byte("THIS IS NOT VALID SQL")},
+	}
+	if _, err := openWithMigrationFS(path, fsys); err == nil || !strings.Contains(err.Error(), "apply migration 3") {
+		t.Fatalf("openWithMigrationFS() error = %v, want migration failure", err)
+	}
+
+	verify, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() verifier error = %v", err)
+	}
+	defer verify.Close()
+	var version string
+	if err := verify.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
+		t.Fatalf("read schema version after rollback: %v", err)
+	}
+	if version != "1" {
+		t.Fatalf("schema version after rollback = %q, want 1", version)
+	}
+	var preserved []string
+	rows, err := verify.QueryContext(ctx, `SELECT value FROM preserved ORDER BY value`)
+	if err != nil {
+		t.Fatalf("read preserved data after rollback: %v", err)
+	}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			rows.Close()
+			t.Fatalf("scan preserved data: %v", err)
+		}
+		preserved = append(preserved, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("iterate preserved data: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close preserved rows: %v", err)
+	}
+	if !reflect.DeepEqual(preserved, []string{"before migration"}) {
+		t.Fatalf("preserved data after rollback = %#v, want original row only", preserved)
+	}
+	var partialCount int
+	if err := verify.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'partial'`).Scan(&partialCount); err != nil {
+		t.Fatalf("check rolled-back table: %v", err)
+	}
+	if partialCount != 0 {
+		t.Fatalf("rolled-back table count = %d, want 0", partialCount)
+	}
+}
+
+func TestOpenRejectsMalformedSchemaVersionWithoutChangingDatabase(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ""},
+		{name: "suffix", raw: "1abc"},
+		{name: "negative", raw: "-1"},
+		{name: "whitespace", raw: " 1 "},
+		{name: "decimal", raw: "1.0"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "malformed.db")
+			seed, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatalf("sql.Open() error = %v", err)
+			}
+			if _, err := seed.ExecContext(ctx, `CREATE TABLE schema_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL); INSERT INTO schema_meta(key, value) VALUES ('version', ?)`, test.raw); err != nil {
+				seed.Close()
+				t.Fatalf("seed malformed version: %v", err)
+			}
+			if err := seed.Close(); err != nil {
+				t.Fatalf("close seeded database: %v", err)
+			}
+
+			if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "schema version") {
+				t.Fatalf("Open() error = %v, want malformed schema-version error", err)
+			}
+			verify, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatalf("sql.Open() verifier error = %v", err)
+			}
+			defer verify.Close()
+			var got string
+			if err := verify.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&got); err != nil {
+				t.Fatalf("read schema version after rejection: %v", err)
+			}
+			if got != test.raw {
+				t.Fatalf("schema version after rejection = %q, want %q", got, test.raw)
+			}
+		})
 	}
 }
 
@@ -309,12 +485,12 @@ func TestOpenUpgradesRepresentativeV4DatabasePreservingUsageHistory(t *testing.T
 		t.Fatalf("Open() v4 migration error = %v", err)
 	}
 	defer s.Close()
-	var version string
-	if err := s.db.QueryRowContext(ctx, `SELECT value FROM schema_meta WHERE key = 'version'`).Scan(&version); err != nil {
-		t.Fatalf("read upgraded schema version: %v", err)
+	status, err := s.SchemaStatus(ctx)
+	if err != nil {
+		t.Fatalf("SchemaStatus() after v4 upgrade: %v", err)
 	}
-	if version != "5" {
-		t.Fatalf("upgraded schema version = %q, want 5", version)
+	if status != (SchemaStatus{Current: 5, Latest: 5}) {
+		t.Fatalf("upgraded schema status = %#v, want current/latest 5", status)
 	}
 
 	capabilities, err := s.ListCapabilities(ctx)
