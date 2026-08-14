@@ -416,6 +416,7 @@ func runDoctor(ctx context.Context, config commandConfig, out io.Writer) error {
 	var failures []string
 	for _, adapter := range orderedAdapters(set) {
 		runtimeName := adapter.Runtime()
+		printCompatibilityDiagnostic(out, detectCompatibility(ctx, config, runtimeName))
 		discovery, err := adapter.Discover(ctx)
 		if err != nil {
 			fmt.Fprintf(out, "runtime=%s discovery=error error=%s\n", runtimeName, cleanText(err.Error()))

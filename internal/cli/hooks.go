@@ -140,6 +140,7 @@ func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Run
 	}
 	summary := hookTestSummary{}
 	reports := make([]health.Report, 0, len(runtimes))
+	compatibilityResults := make([]compatibilityDiagnostic, 0, len(runtimes))
 	for _, runtimeName := range runtimes {
 		runtime := hookDomainRuntime(runtimeName)
 		result, err := health.Evaluate(ctx, health.Inputs{
@@ -155,6 +156,7 @@ func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Run
 			return err
 		}
 		reports = append(reports, result)
+		compatibilityResults = append(compatibilityResults, detectCompatibility(ctx, config, runtime))
 		switch result.State {
 		case health.Healthy:
 			summary.Healthy++
@@ -171,6 +173,9 @@ func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Run
 	fmt.Fprintf(out, "hooks-test aggregate healthy=%d idle=%d degraded=%d broken=%d unknown=%d\n", summary.Healthy, summary.Idle, summary.Degraded, summary.Broken, summary.Unknown)
 	for _, report := range reports {
 		printHookTestReport(out, report)
+	}
+	for _, diagnostic := range compatibilityResults {
+		printCompatibilityDiagnostic(out, diagnostic)
 	}
 	fmt.Fprintln(out, "limitation=synthetic self-test proves local ingest/SQLite but not true runtime delivery without activity")
 	if summary.Broken > 0 || summary.Degraded > 0 || summary.Unknown > 0 {

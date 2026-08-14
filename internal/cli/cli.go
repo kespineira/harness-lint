@@ -8,6 +8,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/kespineira/harness-lint/internal/compatibility"
 )
 
 // Options injects process-dependent values for deterministic tests. Non-empty
@@ -19,6 +21,13 @@ type Options struct {
 	ConfigDir   string
 	Now         func() time.Time
 	LookPath    func(string) (string, error)
+
+	// VersionResolver and VersionRunner are used only by low-frequency
+	// doctor/hooks-test diagnostics. They are deliberately absent from the
+	// ingest configuration path so receiving a hook can never execute a
+	// runtime command.
+	VersionResolver compatibility.ExecutableResolver
+	VersionRunner   compatibility.CommandRunner
 }
 
 // Execute runs one command using process standard inputs and outputs passed

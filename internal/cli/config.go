@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/compatibility"
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
@@ -346,18 +347,20 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 }
 
 type commandConfig struct {
-	dbPath       string
-	home         string
-	projectRoot  string
-	currentDir   string
-	codexHome    string
-	claudeConfig string
-	hooks        []string
-	since        time.Time
-	now          time.Time
-	days         int
-	json         bool
-	lookPath     func(string) (string, error)
+	dbPath          string
+	home            string
+	projectRoot     string
+	currentDir      string
+	codexHome       string
+	claudeConfig    string
+	hooks           []string
+	since           time.Time
+	now             time.Time
+	days            int
+	json            bool
+	lookPath        func(string) (string, error)
+	versionResolver compatibility.ExecutableResolver
+	versionRunner   compatibility.CommandRunner
 }
 
 func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {
@@ -452,18 +455,20 @@ func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {
 		hooks = append(hooks, path)
 	}
 	return commandConfig{
-		dbPath:       dbPath,
-		home:         home,
-		projectRoot:  projectRoot,
-		currentDir:   currentDir,
-		codexHome:    codexHome,
-		claudeConfig: claudeConfig,
-		hooks:        hooks,
-		since:        since,
-		now:          now,
-		days:         flags.days,
-		json:         flags.json,
-		lookPath:     options.LookPath,
+		dbPath:          dbPath,
+		home:            home,
+		projectRoot:     projectRoot,
+		currentDir:      currentDir,
+		codexHome:       codexHome,
+		claudeConfig:    claudeConfig,
+		hooks:           hooks,
+		since:           since,
+		now:             now,
+		days:            flags.days,
+		json:            flags.json,
+		lookPath:        options.LookPath,
+		versionResolver: options.VersionResolver,
+		versionRunner:   options.VersionRunner,
 	}, nil
 }
 
@@ -603,12 +608,14 @@ func resolveHooksConfig(options Options, flags parsedFlags) (commandConfig, erro
 		return commandConfig{}, errors.New("observation clock returned zero time")
 	}
 	return commandConfig{
-		home:         home,
-		currentDir:   currentDir,
-		codexHome:    codexHome,
-		claudeConfig: claudeConfig,
-		now:          now.UTC(),
-		lookPath:     options.LookPath,
+		home:            home,
+		currentDir:      currentDir,
+		codexHome:       codexHome,
+		claudeConfig:    claudeConfig,
+		now:             now.UTC(),
+		lookPath:        options.LookPath,
+		versionResolver: options.VersionResolver,
+		versionRunner:   options.VersionRunner,
 	}, nil
 }
 
