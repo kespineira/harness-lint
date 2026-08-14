@@ -74,17 +74,18 @@ database.
 
 ## Commands and flags
 
-The implemented commands are `scan`, `report`, `context`, `stale`, `doctor`,
-`hooks`, and `ingest`. Run `harness-lint <command> --help` for the same
-options shown by the binary. The relevant command forms are:
+The implemented commands are `scan`, `usage`, `report`, `context`, `stale`,
+`doctor`, `hooks`, and `ingest`. Run `harness-lint <command> --help` for the
+same options shown by the binary. The relevant command forms are:
 
 ```text
 harness-lint scan    [--db PATH] [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--hook-capture PATH]... [--since RFC3339] [--now RFC3339]
+harness-lint usage   [--json] [--db PATH] [--days N] [--runtime claude|claude-code|codex] [--type skill|mcp|tool|agent] [--monthly] [--now RFC3339]
 harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint context [--db PATH] [--days N] [--now RFC3339]
 harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint hooks   <status|install|uninstall> [claude|codex] [--json] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint hooks   <status|test|install|uninstall> [claude|codex] [--json] [--dry-run] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint ingest  --runtime <claude|codex> [--event EVENT] [--managed-by harness-lint-hooks/v1] [--db PATH] < one JSON document on stdin
 ```
 
@@ -102,8 +103,12 @@ Flag meanings:
   capture path. It is not a hook installer or hook runner.
 - `--since RFC3339` sets an inclusive lower bound for usage import during
   `scan`.
-- `--days N` sets the stale threshold, in days; the default is `60` and it
-  must be positive when analyzing a stored report.
+- `--days N` sets the stale threshold for `report`/`stale` (default `60`) or
+  the closed UTC history period for `usage` (default `90`); it must be
+  positive.
+- `--runtime`, `--type`, and `--monthly` are `usage`-only filters/output
+  controls. `--type mcp` includes both MCP servers and MCP tools while the
+  emitted filter remains `mcp`.
 - `--now RFC3339` sets the observation/analysis clock, useful for reproducible
   reports and tests.
 
@@ -113,6 +118,7 @@ by an installed runtime hook and is intentionally quiet on success:
 
 ```sh
 harness-lint hooks status [claude|codex] [--json]
+harness-lint hooks test [claude|codex] --db PATH
 harness-lint hooks install [claude|codex] [--dry-run]
 harness-lint hooks uninstall [claude|codex] [--dry-run]
 harness-lint ingest --runtime claude|codex [--event EVENT] [--managed-by harness-lint-hooks/v1] --db PATH < hook-payload.json
@@ -129,6 +135,14 @@ files. `ingest` receives exactly one JSON document, normalizes only the
 documented metadata needed for one event, and writes only the local SQLite
 event; users should not call it with prompts, tool results, or other data.
 
+`hooks test` is a read-only health check. It checks configuration, owned
+entries, executable resolution, local SQLite/schema state, a synthetic ingest
+self-test, and bounded delivery health without invoking Claude or Codex. It
+does not insert a usage event. The exact output states are
+`healthy`, `idle`, `degraded`, `broken`, and `unknown`; `--json` is rejected
+for this command. The synthetic self-test proves local ingest/SQLite behavior,
+but not true runtime delivery when no activity has occurred.
+
 Command responsibilities:
 
 - `scan` refreshes each runtime's current inventory and imports usage history.
@@ -136,12 +150,16 @@ Command responsibilities:
   current inventory.
 - `report` prints per-runtime counts, per-capability evidence, classifications,
   and usage-only observations.
+- `usage` queries stored invocation history over a closed UTC interval. It can
+  filter by runtime/type and add UTC monthly evidence without reading live
+  runtime configuration.
 - `context` prints configured baseline and on-load/body measurement summaries,
   keeping metadata and body semantics separate.
 - `stale` prints the same capability evidence focused on `KEEP`, `REVIEW`,
   `STALE`, and `DEAD` classifications. A definition is stale only when its
   last loaded/invoked observation is older than the threshold; equality is
-  still `KEEP`.
+  still `KEEP`. `DEAD` is reserved for a future completeness signal and is
+  not inferred from absent events.
 - `doctor` performs discovery and prints malformed, duplicate, broken-path,
   and unresolved-command findings without opening or creating the SQLite
   database.
@@ -171,6 +189,21 @@ no current capabilities
 $ harness-lint doctor --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
 runtime=claude-code capabilities=0 findings=0
 runtime=codex capabilities=0 findings=0
+```
+
+An isolated history query against a populated state file is:
+
+```sh
+harness-lint usage --db /path/to/harness-lint.db --days 90 --runtime codex --type mcp --monthly --json
+```
+
+The returned period is `[generated_at - 90*24h, generated_at]`, inclusive at
+both boundaries. The same query can be rendered for a person with `--json`
+omitted. For a local hook readiness check, use the read-only command with
+explicit roots:
+
+```sh
+harness-lint hooks test --db /path/to/harness-lint.db --claude-config "$HOME/.claude" --codex-home "$HOME/.codex"
 ```
 
 ## Direct hook capture and transcript fallback
@@ -212,6 +245,14 @@ recognized source timestamp is used; otherwise the local observed time is the
 conservative fallback. Provenance is not allowed to make the same stable
 delivery count twice, while a legitimate second call with a distinct delivery
 identity remains a second invocation.
+
+Capture-health diagnostics are deliberately bounded. The store retains only
+the runtime, last successful/failed delivery times, a consecutive-failure
+count capped at `32`, and one allow-listed failure kind:
+`malformed_payload`, `unsupported_event`, `database_busy`,
+`database_unavailable`, `schema_error`, or `internal_error`. Raw errors,
+stdin, prompts, arguments, results, and payload text are not retained or
+echoed.
 
 ### Claude Code
 
@@ -358,6 +399,11 @@ interpretation remain best-effort:
   [hooks](https://learn.chatgpt.com/docs/hooks), and
   [subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
+The accepted runtime-specific evidence boundaries, fixture coverage, and
+unsupported cases are recorded in the [runtime conformance matrix](docs/runtime-conformance.md).
+That matrix is the conformance reference; this README does not claim Claude
+Code/Codex telemetry parity.
+
 ## Privacy and measurement contract
 
 The SQLite schema is metadata-only. Retained fields can include runtime,
@@ -396,6 +442,12 @@ never invoked, or observed in usage without appearing in the current
 inventory. Such unmatched events are printed as `usage-only` rather than
 invented inventory.
 
+For both human and JSON output, an advertised-session count is `unknown` (or
+`null`/omitted in the documented JSON shape) when no explicit advertised
+event was observed. It is not reported as zero: zero would assert that an
+advertised event occurred in zero sessions. See the [public JSON schema
+reference](docs/cli-json-schemas.md) for the command-specific nullability.
+
 ## JSON contracts and examples
 
 `report --json` and `stale --json` emit versioned objects with
@@ -424,6 +476,10 @@ as the installed command. `ingest` emits no JSON or human output on success;
 its input is one runtime-specific hook document and its output is the local
 SQLite event.
 
+The complete field tables, nullability rules, RFC3339Nano timestamp contract,
+monthly usage shape, filters, observation coverage, and pre-1.0 additive
+compatibility guidance are in [Public CLI JSON schemas](docs/cli-json-schemas.md).
+
 ## State, migrations, and upgrades
 
 The default state file is
@@ -437,15 +493,16 @@ and Codex roots described above; changing `--home` does not move the
 database.
 
 SQLite migrations are embedded, numbered, and forward-only. Opening an older
-database applies the missing migrations in order. The usage-observation
-migration retains the legacy `timestamp` column for old readers, carries it
-forward as the best available source/observed value, and makes the explicit
-`observed_at`, optional `source_timestamp`, provenance, schema version,
-invocation origin, and source identity columns authoritative for current
-readers. There is no automatic downgrade or remote migration service; copy a
-state file before an operational upgrade when rollback of local state matters.
+database applies the missing migrations in order. A v5 database upgrades to v6
+automatically: existing inventory and usage rows remain, v5 usage rows gain
+one backfilled evidence relation each, and the legacy `timestamp` column is
+retained for old readers. There is no automatic downgrade or remote migration
+service; copy a state file before an operational upgrade when rollback of
+local state matters. See [SQLite migration architecture](docs/migration-architecture.md)
+for the runner invariants and preservation boundaries.
 
-The MVP has no automatic event retention or pruning policy. Reports describe
+The MVP has no automatic event retention, pruning, or destructive cleanup
+policy. Reports describe
 the evidence still present in the local database and do not claim complete
 lifetime history. `no_activity_observed` and phrases such as `never observed`
 mean that no matching event is present in the ingested evidence for the
@@ -480,8 +537,10 @@ Codex hooks/files/transcripts ───────┘                         �
 - Scan, report, context, stale, doctor, and ingest are read-only against
   harness sources and write only local state or output. The opt-in hook
   manager is the sole configuration writer and edits only its exact owned
-  entries. Command lookup is used only to report whether the stable executable
-  appears resolvable; no configured command is started.
+  entries. `usage` and `hooks test` are also read-only. Command lookup is used
+  only to report whether the stable executable appears resolvable; no
+  configured command is started. There is no daemon and no automatic
+  retention deletion.
 
 The project is macOS-first and Linux-compatible. It uses Go filesystem paths,
 the host `os.UserConfigDir`, and local runtime conventions; other operating
@@ -514,6 +573,7 @@ PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks status --home "$
 PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks install --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
 PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks uninstall --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
 "$m2_smoke_root/harness-lint" scan --db :memory: --home "$m2_smoke_root/home" --project "$m2_smoke_root/project" --now 2026-08-13T15:00:00Z
+"$m2_smoke_root/harness-lint" usage --db :memory: --days 90 --now 2026-08-13T15:00:00Z
 "$m2_smoke_root/harness-lint" report --db :memory: --now 2026-08-13T15:00:00Z
 "$m2_smoke_root/harness-lint" context --db :memory: --now 2026-08-13T15:00:00Z
 "$m2_smoke_root/harness-lint" stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
