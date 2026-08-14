@@ -83,6 +83,38 @@ func TestHooksInstallAndReadOnlyStatusDoNotCreateCaptureEpochs(t *testing.T) {
 	}
 }
 
+func TestHooksInstallThenUninstallWithoutDatabaseLeavesDatabaseAbsent(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	claudeRoot := filepath.Join(root, "claude")
+	options := Options{
+		CWD: root, ConfigDir: configDir,
+		LookPath: func(string) (string, error) { return "/usr/local/bin/harness-lint", nil },
+		Now:      func() time.Time { return time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC) },
+	}
+	execute := func(args []string) error {
+		var stdout, stderr bytes.Buffer
+		return ExecuteWithOptions(options, args, nil, &stdout, &stderr)
+	}
+	if err := execute([]string{"hooks", "install", "claude", "--claude-config", claudeRoot}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := execute([]string{"hooks", "uninstall", "claude", "--claude-config", claudeRoot}); err != nil {
+		t.Fatalf("uninstall without database: %v", err)
+	}
+	status, err := hooks.NewClaude(hooks.Options{
+		ConfigRoot: claudeRoot,
+		LookPath:   options.LookPath,
+	}).Status(context.Background())
+	if err != nil || status.Code != hooks.StatusNotInstalled {
+		t.Fatalf("managed hooks remain installed: status=%#v err=%v", status, err)
+	}
+	dbPath := filepath.Join(configDir, "harness-lint", "harness-lint.db")
+	if _, err := os.Stat(dbPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("uninstall created lifecycle database: %v", err)
+	}
+}
+
 func TestHooksUninstallLifecycleFailureDoesNotUndoConfigMutation(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config-file")

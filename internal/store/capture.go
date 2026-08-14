@@ -63,7 +63,7 @@ func (s *Store) IngestUsageEvent(ctx context.Context, event domain.UsageEvent) e
 // and its delivery-health update inside a transaction that is always rolled
 // back. It compares usage, evidence, and health state before and after so a
 // startup diagnostic can prove the schema and write path without invoking a
-// model, runtime, network, or MCP operation.
+// model, runtime, network, MCP operation, or capture lifecycle transition.
 func (s *Store) SelfTestCaptureIngest(ctx context.Context) error {
 	if s.isClosed() {
 		return errors.New("store is closed")
@@ -96,9 +96,6 @@ func (s *Store) SelfTestCaptureIngest(ctx context.Context) error {
 	if err := markCaptureSuccessTx(ctx, tx, normalized.Runtime, normalized.ObservedAt); err != nil {
 		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test health: %w", err))
 	}
-	if err := openCaptureEpochTx(ctx, tx, normalized.Runtime, normalized.ObservedAt, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
-		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test epoch: %w", err))
-	}
 	if err := tx.Rollback(); err != nil {
 		return fmt.Errorf("rollback capture self-test: %w", err)
 	}
@@ -116,7 +113,6 @@ type captureSelfTestState struct {
 	UsageCount    int64
 	EvidenceCount int64
 	Health        []capture.DeliveryHealth
-	Epochs        []history.CaptureEpoch
 }
 
 func (s *Store) captureSelfTestState(ctx context.Context) (captureSelfTestState, error) {
@@ -132,11 +128,6 @@ func (s *Store) captureSelfTestState(ctx context.Context) (captureSelfTestState,
 		return captureSelfTestState{}, fmt.Errorf("read capture health: %w", err)
 	}
 	state.Health = health
-	epochs, err := s.ListCaptureEpochs(ctx)
-	if err != nil {
-		return captureSelfTestState{}, fmt.Errorf("read capture epochs: %w", err)
-	}
-	state.Epochs = epochs
 	return state, nil
 }
 

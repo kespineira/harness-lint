@@ -88,6 +88,37 @@ func TestCaptureSelfTestRollsBackEpochAndUsageState(t *testing.T) {
 	}
 }
 
+func TestCaptureSelfTestIgnoresFutureOpenEpoch(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	future := time.Now().UTC().Add(time.Hour)
+	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, future, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("OpenCaptureEpoch(): %v", err)
+	}
+	beforeState, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		t.Fatalf("capture self-test state before: %v", err)
+	}
+	beforeEpochs, err := s.ListCaptureEpochs(ctx)
+	if err != nil {
+		t.Fatalf("ListCaptureEpochs() before: %v", err)
+	}
+	if err := s.SelfTestCaptureIngest(ctx); err != nil {
+		t.Fatalf("SelfTestCaptureIngest() with future open epoch: %v", err)
+	}
+	afterState, err := s.captureSelfTestState(ctx)
+	if err != nil {
+		t.Fatalf("capture self-test state after: %v", err)
+	}
+	afterEpochs, err := s.ListCaptureEpochs(ctx)
+	if err != nil {
+		t.Fatalf("ListCaptureEpochs() after: %v", err)
+	}
+	if !reflect.DeepEqual(beforeState, afterState) || !reflect.DeepEqual(beforeEpochs, afterEpochs) {
+		t.Fatalf("self-test changed persisted state: before state=%#v epochs=%#v; after state=%#v epochs=%#v", beforeState, beforeEpochs, afterState, afterEpochs)
+	}
+}
+
 func TestCaptureEpochPrimitivesAreChronologicalAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

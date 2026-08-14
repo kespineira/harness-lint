@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -134,6 +135,12 @@ func runHookOperation(ctx context.Context, config commandConfig, runtimes []hook
 func closeManagedHookCaptureEpoch(ctx context.Context, config commandConfig, runtime hooks.Runtime) error {
 	if config.dbPath == "" {
 		return errors.New("capture lifecycle database path is unavailable")
+	}
+	if _, err := os.Stat(config.dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat capture lifecycle database: %w", err)
 	}
 	db, err := openStore(config)
 	if err != nil {
