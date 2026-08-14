@@ -33,26 +33,61 @@ func TestAnalyzeHistoryNoHistoryIsReviewWithoutUseClaims(t *testing.T) {
 	}
 }
 
+func TestAnalyzeHistoryEffectiveCoverageIsAsOfClippedAndUnknownWhenFuture(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := testCapability("as-of-coverage")
+	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	future := &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now, End: now.Add(time.Hour)}}}
+	partial := &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now.Add(-2 * time.Hour), End: now.Add(time.Hour)}}}
+	capability.FirstSeen = now.Add(-24 * time.Hour)
+	capability.LastSeen = now
+	aggregate := history.Aggregate{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name, EffectiveCoverage: future}
+	result, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory(future) error = %v", err)
+	}
+	if got := result.Capabilities[0]; got.ModeledCoverageStatus != history.CoverageUnknown || got.ModeledCoveredDuration != 0 || got.Classification != REVIEW {
+		t.Fatalf("future modeled coverage = %#v, want unknown/zero and REVIEW", got)
+	}
+	aggregate.EffectiveCoverage = partial
+	result, err = AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory(partial) error = %v", err)
+	}
+	got := result.Capabilities[0]
+	if got.ModeledCoverageStatus != history.CoveragePartial || got.ModeledCoveredDuration != 2*time.Hour {
+		t.Fatalf("as-of modeled coverage = %s/%s, want partial/2h", got.ModeledCoverageStatus, got.ModeledCoveredDuration)
+	}
+	if got.FirstSeen == nil || !got.FirstSeen.Equal(capability.FirstSeen) || got.LastSeen == nil || !got.LastSeen.Equal(capability.LastSeen) {
+		t.Fatalf("inventory bounds = %v/%v, want domain capability bounds", got.FirstSeen, got.LastSeen)
+	}
+	if !strings.Contains(got.Basis, "modeled coverage status=partial") || !strings.Contains(got.Basis, "no invocation evidence") {
+		t.Fatalf("basis = %q, want classification and coverage explanation", got.Basis)
+	}
+}
+
 func TestAnalyzeHistorySeparatesAdvertisedLoadedAndInvocationCounts(t *testing.T) {
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("state-counts")
 	observed := now.Add(-time.Hour)
 	effective := now.Add(-2 * time.Hour)
 	advertisedSessions := int64(1)
+	invokedAdvertisedSessions := int64(1)
 	aggregate := history.Aggregate{
-		Runtime:                    capability.Runtime,
-		CapabilityType:             capability.Type,
-		CapabilityName:             capability.Name,
-		AdvertisedObservations:     2,
-		LoadedObservations:         1,
-		Uses:                       1,
-		DistinctInvocationSessions: 1,
-		FirstObservedAt:            &observed,
-		LastObservedAt:             &observed,
-		FirstEffectiveActivityAt:   &effective,
-		LastEffectiveActivityAt:    &effective,
-		ObservedAdvertisedSessions: &advertisedSessions,
-		InvocationEvidence:         map[domain.Provenance]int64{domain.ProvenanceHook: 1, domain.ProvenanceTranscript: 1},
+		Runtime:                     capability.Runtime,
+		CapabilityType:              capability.Type,
+		CapabilityName:              capability.Name,
+		AdvertisedObservations:      2,
+		LoadedObservations:          1,
+		Uses:                        1,
+		DistinctInvocationSessions:  1,
+		FirstObservedAt:             &observed,
+		LastObservedAt:              &observed,
+		FirstEffectiveActivityAt:    &effective,
+		LastEffectiveActivityAt:     &effective,
+		ObservedAdvertisedSessions:  &advertisedSessions,
+		InvokedInAdvertisedSessions: &invokedAdvertisedSessions,
+		InvocationEvidence:          map[domain.Provenance]int64{domain.ProvenanceHook: 1, domain.ProvenanceTranscript: 1},
 	}
 	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
 	if err != nil {
@@ -259,8 +294,9 @@ func TestAnalyzeHistoryAdvertisedExposureRetainsUnknownAndKnownStates(t *testing
 	knownCapability := testCapability("known-advertised")
 	unknownCapability := testCapability("unknown-advertised")
 	known := int64(2)
+	knownInvoked := int64(0)
 	aggregates := []history.Aggregate{
-		{Runtime: knownCapability.Runtime, CapabilityType: knownCapability.Type, CapabilityName: knownCapability.Name, AdvertisedObservations: known, ObservedAdvertisedSessions: &known},
+		{Runtime: knownCapability.Runtime, CapabilityType: knownCapability.Type, CapabilityName: knownCapability.Name, AdvertisedObservations: known, ObservedAdvertisedSessions: &known, InvokedInAdvertisedSessions: &knownInvoked},
 		{Runtime: unknownCapability.Runtime, CapabilityType: unknownCapability.Type, CapabilityName: unknownCapability.Name},
 	}
 
@@ -301,7 +337,7 @@ func TestAnalyzeHistoryRejectsImpossibleAdvertisedSessionEvidence(t *testing.T) 
 	}{
 		{
 			name:      "zero advertisements require nil sessions",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session, InvokedInAdvertisedSessions: &session},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions must be nil when advertised observations are zero",
 		},
 		{
@@ -311,12 +347,12 @@ func TestAnalyzeHistoryRejectsImpossibleAdvertisedSessionEvidence(t *testing.T) 
 		},
 		{
 			name:      "sessions must be positive",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero, InvokedInAdvertisedSessions: &zero},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions must be positive",
 		},
 		{
 			name:      "sessions cannot exceed advertisements",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany, InvokedInAdvertisedSessions: &tooMany},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions exceed advertised observations",
 		},
 	}

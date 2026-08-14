@@ -130,6 +130,17 @@ type CapabilityEvidence struct {
 	// no explicit advertised-event evidence. When advertised observations are
 	// present, this is a positive, bounded distinct-session count.
 	ObservedAdvertisedSessions *int64
+	// InvokedInAdvertisedSessions is the exact distinct-session intersection.
+	// It is nil when advertised evidence is absent and zero is meaningful.
+	InvokedInAdvertisedSessions *int64
+	// EffectiveCoverage is modeled only from confirmed capture and capability
+	// presence epochs; legacy observation bounds are not a substitute.
+	EffectiveCoverage      *history.EffectiveCoverage
+	ModeledCoveredDuration time.Duration
+	ModeledCoverageStatus  history.CoverageStatus
+	// FirstSeen and LastSeen are real inventory bounds from the capability.
+	FirstSeen *time.Time
+	LastSeen  *time.Time
 	// These aggregate timestamps are invocation-only. The event compatibility
 	// path leaves them empty and report formatting continues to summarize its
 	// complete event wrapper separately.
@@ -172,6 +183,8 @@ type CapabilityEvidence struct {
 	// observations exist. Classification Confidence remains separate and
 	// describes confidence in the policy finding where justified.
 	CoverageConfidence domain.Confidence
+	// ContextFootprintConfidence summarizes metadata/body measurements only.
+	ContextFootprintConfidence domain.Confidence
 	// MetadataTokens and BodyTokens retain adapter measurements independently;
 	// context summaries label their semantics by capability type. Neither
 	// measurement implies a loaded or invoked event.
@@ -448,6 +461,32 @@ func validateAggregate(aggregate history.Aggregate) error {
 	if aggregate.ObservedAdvertisedSessions != nil && *aggregate.ObservedAdvertisedSessions > maxPlatformInt64() {
 		return errors.New("observed advertised session count does not fit int")
 	}
+	if aggregate.InvokedInAdvertisedSessions != nil {
+		if *aggregate.InvokedInAdvertisedSessions < 0 {
+			return errors.New("invoked-in-advertised session count cannot be negative")
+		}
+		if *aggregate.InvokedInAdvertisedSessions > maxPlatformInt64() {
+			return errors.New("invoked-in-advertised session count does not fit int")
+		}
+		if aggregate.ObservedAdvertisedSessions == nil {
+			return errors.New("invoked-in-advertised sessions require advertised session evidence")
+		}
+		if *aggregate.InvokedInAdvertisedSessions > *aggregate.ObservedAdvertisedSessions {
+			return errors.New("invoked-in-advertised sessions exceed advertised sessions")
+		}
+	}
+	if (aggregate.ObservedAdvertisedSessions == nil) != (aggregate.InvokedInAdvertisedSessions == nil) {
+		return errors.New("advertised session evidence must include both observed and invoked session counts")
+	}
+	if aggregate.EffectiveCoverage != nil {
+		key := history.CoverageKey{Runtime: aggregate.Runtime, CapabilityType: aggregate.CapabilityType, CapabilityName: aggregate.CapabilityName}
+		if aggregate.EffectiveCoverage.Key != key {
+			return errors.New("effective coverage key does not match aggregate key")
+		}
+		if err := aggregate.EffectiveCoverage.Validate(); err != nil {
+			return fmt.Errorf("effective coverage: %w", err)
+		}
+	}
 	if aggregate.AdvertisedObservations == 0 {
 		if aggregate.ObservedAdvertisedSessions != nil {
 			return errors.New("observed advertised sessions must be nil when advertised observations are zero")
@@ -567,20 +606,30 @@ func analyzeAggregate(capability domain.Capability, aggregate history.Aggregate,
 	}
 	sources := aggregateProvenanceSources(aggregate.InvocationEvidence)
 	evidence := CapabilityEvidence{
-		Capability:                 capability,
-		Installed:                  true,
-		InstalledScopes:            aggregateScopes(capability, aggregate, found),
-		Coverage:                   aggregate.Coverage,
-		ObservedAdvertisedSessions: aggregate.ObservedAdvertisedSessions,
-		EventCounts:                eventCounts,
-		InvocationCount:            invocationCount,
-		ActivityCount:              loadedCount + invocationCount,
-		DistinctSessionCount:       distinctSessions,
-		EvidenceSources:            sources,
-		MetadataTokens:             capability.MetadataTokens,
-		BodyTokens:                 capability.BodyTokens,
-		Confidence:                 domain.ConfidenceObserved,
-		CoverageConfidence:         domain.ConfidenceUnknown,
+		Capability:                  capability,
+		Installed:                   true,
+		InstalledScopes:             aggregateScopes(capability, aggregate, found),
+		Coverage:                    aggregate.Coverage,
+		EffectiveCoverage:           cloneEffectiveCoverage(aggregate.EffectiveCoverage),
+		FirstSeen:                   cloneTimeIfSet(capability.FirstSeen),
+		LastSeen:                    cloneTimeIfSet(capability.LastSeen),
+		ObservedAdvertisedSessions:  cloneInt64(aggregate.ObservedAdvertisedSessions),
+		InvokedInAdvertisedSessions: cloneInt64(aggregate.InvokedInAdvertisedSessions),
+		EventCounts:                 eventCounts,
+		InvocationCount:             invocationCount,
+		ActivityCount:               loadedCount + invocationCount,
+		DistinctSessionCount:        distinctSessions,
+		EvidenceSources:             sources,
+		MetadataTokens:              capability.MetadataTokens,
+		BodyTokens:                  capability.BodyTokens,
+		Confidence:                  domain.ConfidenceObserved,
+		CoverageConfidence:          domain.ConfidenceUnknown,
+		ModeledCoverageStatus:       modeledCoverageStatus(aggregate.EffectiveCoverage),
+		ContextFootprintConfidence:  footprintConfidence(capability.MetadataTokens, capability.BodyTokens),
+	}
+	evidence.ModeledCoveredDuration = modeledCoveredDuration(evidence.EffectiveCoverage, now)
+	if evidence.ModeledCoveredDuration <= 0 {
+		evidence.ModeledCoverageStatus = history.CoverageUnknown
 	}
 	if found && aggregate.Uses > 0 {
 		evidence.FirstObservedAt = aggregate.FirstObservedAt
@@ -628,19 +677,95 @@ func aggregateProvenanceSources(counts map[domain.Provenance]int64) []domain.Pro
 
 func aggregateCoverageWording(evidence CapabilityEvidence, found bool) string {
 	coverage := coverageDescription(evidence.Coverage)
+	modeled := modeledCoverageWording(evidence)
 	if evidence.InvocationCount > 0 {
-		return fmt.Sprintf("observed invocation activity from %s; %s", provenanceWording(evidence.EvidenceSources), coverage)
+		return fmt.Sprintf("observed invocation activity from %s; %s%s", provenanceWording(evidence.EvidenceSources), coverage, modeled)
 	}
 	if evidence.ActivityCount > 0 {
-		return "observed loaded activity; " + coverage
+		return "observed loaded activity; " + coverage + modeled
 	}
 	if evidence.ObservedAdvertisedSessions != nil {
-		return fmt.Sprintf("not observed in period; advertised evidence for %d observed session(s); %s", *evidence.ObservedAdvertisedSessions, coverage)
+		return fmt.Sprintf("not observed in period; advertised evidence for %d observed session(s); %s%s", *evidence.ObservedAdvertisedSessions, coverage, modeled)
 	}
 	if found && evidence.Coverage != nil {
-		return "not observed in period; no invocation evidence in the selected interval; " + coverage
+		return "not observed in period; no invocation evidence in the selected interval; " + coverage + modeled
 	}
-	return "never observed; no invocation evidence in the selected interval; " + coverageInsufficient
+	return "never observed; no invocation evidence in the selected interval; " + coverageInsufficient + modeled
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneTimeIfSet(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
+func cloneEffectiveCoverage(value *history.EffectiveCoverage) *history.EffectiveCoverage {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.Intervals = append([]history.Interval(nil), value.Intervals...)
+	return &copy
+}
+
+func modeledCoverageStatus(value *history.EffectiveCoverage) history.CoverageStatus {
+	if value == nil || value.Status == history.CoverageComplete {
+		return history.CoverageUnknown
+	}
+	return value.Status
+}
+
+func modeledCoveredDuration(value *history.EffectiveCoverage, asOf time.Time) time.Duration {
+	if value == nil || value.Status != history.CoveragePartial {
+		return 0
+	}
+	asOf = asOf.UTC()
+	var total time.Duration
+	for _, interval := range value.Intervals {
+		end := interval.End
+		if end.IsZero() || end.After(asOf) {
+			end = asOf
+		}
+		if end.After(interval.Start) {
+			total += end.Sub(interval.Start)
+		}
+	}
+	return total
+}
+
+func modeledCoverageWording(evidence CapabilityEvidence) string {
+	if evidence.EffectiveCoverage == nil {
+		return ""
+	}
+	if evidence.ModeledCoverageStatus == history.CoverageUnknown {
+		return "; modeled coverage status=unknown; no positive capture/presence intersection; no confirmed capture/presence intersection"
+	}
+	return fmt.Sprintf("; modeled coverage status=%s duration=%s", evidence.ModeledCoverageStatus, evidence.ModeledCoveredDuration)
+}
+
+func footprintConfidence(metadata, body domain.Measurement) domain.Confidence {
+	result := domain.ConfidenceUnknown
+	for _, measurement := range []domain.Measurement{metadata, body} {
+		if measurement.Confidence == domain.ConfidenceUnknown {
+			continue
+		}
+		if result == domain.ConfidenceUnknown {
+			result = measurement.Confidence
+		} else {
+			result = weakerConfidence(result, measurement.Confidence)
+		}
+	}
+	return result
 }
 
 func coverageDescription(coverage *history.Coverage) string {
@@ -707,16 +832,19 @@ func analyzeCapability(capability domain.Capability, events []domain.UsageEvent,
 	activityCount := eventCounts[domain.EventLoaded] + invocationCount
 	sources := sortedProvenanceSources(provenanceSet)
 	evidence := CapabilityEvidence{
-		Capability:           capability,
-		EventCounts:          eventCounts,
-		InvocationCount:      invocationCount,
-		ActivityCount:        activityCount,
-		DistinctSessionCount: len(sessions),
-		EvidenceSources:      sources,
-		MetadataTokens:       capability.MetadataTokens,
-		BodyTokens:           capability.BodyTokens,
-		Confidence:           domain.ConfidenceObserved,
-		CoverageConfidence:   domain.ConfidenceUnknown,
+		Capability:                 capability,
+		FirstSeen:                  cloneTimeIfSet(capability.FirstSeen),
+		LastSeen:                   cloneTimeIfSet(capability.LastSeen),
+		EventCounts:                eventCounts,
+		InvocationCount:            invocationCount,
+		ActivityCount:              activityCount,
+		DistinctSessionCount:       len(sessions),
+		EvidenceSources:            sources,
+		MetadataTokens:             capability.MetadataTokens,
+		BodyTokens:                 capability.BodyTokens,
+		Confidence:                 domain.ConfidenceObserved,
+		CoverageConfidence:         domain.ConfidenceUnknown,
+		ContextFootprintConfidence: footprintConfidence(capability.MetadataTokens, capability.BodyTokens),
 	}
 	setUseObservation(&evidence, firstUsed, lastUsed, now)
 	evidence.EvidenceCoverage = coverageWording(evidence)

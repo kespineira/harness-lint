@@ -16,7 +16,7 @@ import (
 	"github.com/kespineira/harness-lint/internal/history"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Period describes the closed UTC interval used for a usage query.
 type Period struct {
@@ -46,6 +46,13 @@ type Coverage struct {
 	LastDirectHookObservedAt  *string `json:"last_direct_hook_observed_at"`
 }
 
+// EffectiveCoverage summarizes only confirmed capture/presence intersection.
+// Unknown coverage has a null duration; a string zero is never evidence.
+type EffectiveCoverage struct {
+	Status          string  `json:"status"`
+	CoveredDuration *string `json:"covered_duration"`
+}
+
 // Provenance contains per-source invocation subtotals and the deterministic
 // set of sources that contributed invocation evidence. A duplicated
 // hook/transcript identity is represented once in Uses but once in each
@@ -70,23 +77,25 @@ type Monthly struct {
 // only normalized metadata and aggregate counts; paths, hashes, identifiers,
 // source identities, fingerprints, payloads, and raw errors are excluded.
 type Capability struct {
-	Runtime                  string     `json:"runtime"`
-	Type                     string     `json:"type"`
-	Name                     string     `json:"name"`
-	Installed                bool       `json:"installed"`
-	InstalledScopes          []string   `json:"installed_scopes"`
-	Uses                     int64      `json:"uses"`
-	DistinctSessions         int64      `json:"distinct_sessions"`
-	FirstObservedAt          *string    `json:"first_observed_at"`
-	LastObservedAt           *string    `json:"last_observed_at"`
-	FirstEffectiveActivityAt *string    `json:"first_effective_activity_at"`
-	LastEffectiveActivityAt  *string    `json:"last_effective_activity_at"`
-	Provenance               Provenance `json:"provenance"`
-	AdvertisedObservations   int64      `json:"advertised_observations"`
-	AdvertisedSessions       *int64     `json:"advertised_sessions"`
-	LoadedObservations       int64      `json:"loaded_observations"`
-	ObservationOnlyCoverage  *Coverage  `json:"observation_only_coverage"`
-	Monthly                  []Monthly  `json:"monthly,omitempty"`
+	Runtime                     string             `json:"runtime"`
+	Type                        string             `json:"type"`
+	Name                        string             `json:"name"`
+	Installed                   bool               `json:"installed"`
+	InstalledScopes             []string           `json:"installed_scopes"`
+	Uses                        int64              `json:"uses"`
+	DistinctSessions            int64              `json:"distinct_sessions"`
+	FirstObservedAt             *string            `json:"first_observed_at"`
+	LastObservedAt              *string            `json:"last_observed_at"`
+	FirstEffectiveActivityAt    *string            `json:"first_effective_activity_at"`
+	LastEffectiveActivityAt     *string            `json:"last_effective_activity_at"`
+	Provenance                  Provenance         `json:"provenance"`
+	AdvertisedObservations      int64              `json:"advertised_observations"`
+	AdvertisedSessions          *int64             `json:"advertised_sessions"`
+	InvokedInAdvertisedSessions *int64             `json:"invoked_in_advertised_sessions"`
+	LoadedObservations          int64              `json:"loaded_observations"`
+	EffectiveCoverage           *EffectiveCoverage `json:"effective_coverage"`
+	ObservationOnlyCoverage     *Coverage          `json:"observation_only_coverage"`
+	Monthly                     []Monthly          `json:"monthly,omitempty"`
 }
 
 // UsageDocument is the versioned JSON contract emitted by usage --json.
@@ -180,7 +189,7 @@ func Build(input BuildInput) (UsageDocument, error) {
 
 	rows := make([]Capability, 0, len(ordered))
 	for _, aggregate := range ordered {
-		row := capabilityDTO(aggregate)
+		row := capabilityDTO(aggregate, generatedAt)
 		if input.IncludeMonthly {
 			row.Monthly = fillMonthly(monthlyByKey[aggregateKey{runtime: aggregate.Runtime, typ: aggregate.CapabilityType, name: aggregate.CapabilityName}], start, generatedAt)
 		}
@@ -276,6 +285,29 @@ func validateAggregate(aggregate history.Aggregate) error {
 	if aggregate.ObservedAdvertisedSessions != nil {
 		if *aggregate.ObservedAdvertisedSessions < 0 || *aggregate.ObservedAdvertisedSessions > aggregate.AdvertisedObservations {
 			return errors.New("advertised sessions are outside observation count")
+		}
+	}
+	if aggregate.InvokedInAdvertisedSessions != nil {
+		if *aggregate.InvokedInAdvertisedSessions < 0 {
+			return errors.New("invoked-in-advertised sessions cannot be negative")
+		}
+		if aggregate.ObservedAdvertisedSessions == nil {
+			return errors.New("invoked-in-advertised sessions require advertised sessions")
+		}
+		if *aggregate.InvokedInAdvertisedSessions > *aggregate.ObservedAdvertisedSessions {
+			return errors.New("invoked-in-advertised sessions exceed advertised sessions")
+		}
+	}
+	if (aggregate.ObservedAdvertisedSessions == nil) != (aggregate.InvokedInAdvertisedSessions == nil) {
+		return errors.New("advertised session evidence must include both observed and invoked session counts")
+	}
+	if aggregate.EffectiveCoverage != nil {
+		key := history.CoverageKey{Runtime: aggregate.Runtime, CapabilityType: aggregate.CapabilityType, CapabilityName: aggregate.CapabilityName}
+		if aggregate.EffectiveCoverage.Key != key {
+			return errors.New("effective coverage key does not match aggregate key")
+		}
+		if err := aggregate.EffectiveCoverage.Validate(); err != nil {
+			return fmt.Errorf("effective coverage: %w", err)
 		}
 	}
 	if aggregate.AdvertisedObservations == 0 {
@@ -383,7 +415,7 @@ func periodDuration(days int) (time.Duration, error) {
 	return time.Duration(days) * 24 * time.Hour, nil
 }
 
-func capabilityDTO(aggregate history.Aggregate) Capability {
+func capabilityDTO(aggregate history.Aggregate, asOf time.Time) Capability {
 	scopes := make([]string, 0, len(aggregate.InstalledScopes))
 	for _, scope := range aggregate.InstalledScopes {
 		if scope.Valid() {
@@ -416,11 +448,34 @@ func capabilityDTO(aggregate history.Aggregate) Capability {
 			Import:     aggregate.InvocationEvidence[domain.ProvenanceImport],
 			Sources:    sources,
 		},
-		AdvertisedObservations:  aggregate.AdvertisedObservations,
-		AdvertisedSessions:      cloneInt64(aggregate.ObservedAdvertisedSessions),
-		LoadedObservations:      aggregate.LoadedObservations,
-		ObservationOnlyCoverage: coverageDTO(aggregate.Coverage),
+		AdvertisedObservations:      aggregate.AdvertisedObservations,
+		AdvertisedSessions:          cloneInt64(aggregate.ObservedAdvertisedSessions),
+		InvokedInAdvertisedSessions: cloneInt64(aggregate.InvokedInAdvertisedSessions),
+		LoadedObservations:          aggregate.LoadedObservations,
+		ObservationOnlyCoverage:     coverageDTO(aggregate.Coverage),
+		EffectiveCoverage:           effectiveCoverageDTO(aggregate.EffectiveCoverage, asOf),
 	}
+}
+
+func effectiveCoverageDTO(coverage *history.EffectiveCoverage, asOf time.Time) *EffectiveCoverage {
+	if coverage == nil || coverage.Status != history.CoveragePartial {
+		return &EffectiveCoverage{Status: string(history.CoverageUnknown), CoveredDuration: nil}
+	}
+	var duration time.Duration
+	for _, interval := range coverage.Intervals {
+		end := interval.End
+		if end.IsZero() || end.After(asOf) {
+			end = asOf
+		}
+		if end.After(interval.Start) {
+			duration += end.Sub(interval.Start)
+		}
+	}
+	if duration <= 0 {
+		return &EffectiveCoverage{Status: string(history.CoverageUnknown), CoveredDuration: nil}
+	}
+	value := duration.String()
+	return &EffectiveCoverage{Status: string(history.CoveragePartial), CoveredDuration: &value}
 }
 
 func fillMonthly(existing map[time.Time]history.MonthlyAggregate, start, end time.Time) []Monthly {

@@ -70,7 +70,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(first), &report); err != nil {
 		t.Fatalf("decode report JSON: %v\noutput=%s", err, first)
 	}
-	if report.SchemaVersion != 1 || report.GeneratedAt != now.Format(time.RFC3339Nano) {
+	if report.SchemaVersion != reportdto.SchemaVersion || report.GeneratedAt != now.Format(time.RFC3339Nano) {
 		t.Fatalf("report envelope = %#v, want schema 1 and injected generated_at", report)
 	}
 	if !strings.Contains(first, `"no_activity_observed"`) || strings.Contains(first, `"never_observed"`) {
@@ -102,7 +102,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(staleOutput), &stale); err != nil {
 		t.Fatalf("decode stale JSON: %v\noutput=%s", err, staleOutput)
 	}
-	if stale.SchemaVersion != 1 || stale.GeneratedAt != now.Format(time.RFC3339Nano) || len(stale.Capabilities) != 2 || len(stale.Findings) != 1 {
+	if stale.SchemaVersion != reportdto.SchemaVersion || stale.GeneratedAt != now.Format(time.RFC3339Nano) || len(stale.Capabilities) != 2 || len(stale.Findings) != 1 {
 		t.Fatalf("stale JSON envelope/collections = %#v", stale)
 	}
 	if strings.Contains(staleOutput, "report as-of=") || strings.Contains(staleOutput, "capabilities:") {
@@ -152,7 +152,7 @@ func TestReportAndStaleJSONEmptyDatasetsAreValid(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 			t.Fatalf("decode %s empty JSON: %v\noutput=%s", command, err, stdout.String())
 		}
-		if envelope.SchemaVersion != 1 || envelope.GeneratedAt != now.Format(time.RFC3339Nano) || len(envelope.Runtimes) != 2 || len(envelope.Capabilities) != 0 || len(envelope.Findings) != 0 {
+		if envelope.SchemaVersion != reportdto.SchemaVersion || envelope.GeneratedAt != now.Format(time.RFC3339Nano) || len(envelope.Runtimes) != 2 || len(envelope.Capabilities) != 0 || len(envelope.Findings) != 0 {
 			t.Fatalf("%s empty JSON envelope = %#v", command, envelope)
 		}
 		if command == "report" && len(envelope.UsageOnly) != 0 {

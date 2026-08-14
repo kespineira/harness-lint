@@ -87,7 +87,7 @@ func TestExecuteUsageJSONFiltersMCPAndFillsMonthlyEvidence(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
 		t.Fatalf("decode usage JSON: %v\n%s", err, stdout.String())
 	}
-	if document.SchemaVersion != 1 || document.Period.Days != 90 || !document.Period.Inclusive {
+	if document.SchemaVersion != usagedto.SchemaVersion || document.Period.Days != 90 || !document.Period.Inclusive {
 		t.Fatalf("usage envelope = %#v", document)
 	}
 	if document.Filters.Runtime == nil || *document.Filters.Runtime != "codex" || document.Filters.Type == nil || *document.Filters.Type != "mcp" {

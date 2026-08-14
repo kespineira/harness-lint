@@ -327,7 +327,9 @@ func loadReport(ctx context.Context, config commandConfig, staleDays int) (analy
 	if err != nil {
 		return analysis.Report{}, nil, err
 	}
-	aggregates, err := db.QueryInvocationHistory(ctx, history.Query{})
+	// Bound the history query at the explicit command clock so effective
+	// coverage is clipped at the report/stale as-of, including open epochs.
+	aggregates, err := db.QueryInvocationHistory(ctx, history.Query{End: config.now})
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("query usage history: %w", err)
 	}

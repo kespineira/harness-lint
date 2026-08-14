@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/domain"
+	reportdto "github.com/kespineira/harness-lint/internal/report"
 	"github.com/kespineira/harness-lint/internal/store"
+	usagedto "github.com/kespineira/harness-lint/internal/usage"
 )
 
 const publicJSONObservedAt = "2026-08-14T12:00:00.000Z"
@@ -44,16 +46,16 @@ func TestPublicJSONContractsAreStableAndPrivacySafe(t *testing.T) {
 	installHooksForPublicJSON(t, options, home)
 
 	outputs := map[string]string{
-		"report-v1.json": runStablePublicJSON(t, options, []string{"report", "--json", "--db", dbPath, "--days", "60"}),
-		"stale-v1.json":  runStablePublicJSON(t, options, []string{"stale", "--json", "--db", dbPath, "--days", "60"}),
-		"usage-v1.json":  runStablePublicJSON(t, options, []string{"usage", "--json", "--db", dbPath, "--days", "60"}),
+		"report-v2.json": runStablePublicJSON(t, options, []string{"report", "--json", "--db", dbPath, "--days", "60"}),
+		"stale-v2.json":  runStablePublicJSON(t, options, []string{"stale", "--json", "--db", dbPath, "--days", "60"}),
+		"usage-v2.json":  runStablePublicJSON(t, options, []string{"usage", "--json", "--db", dbPath, "--days", "60"}),
 		"hooks-status-v1.json": runStablePublicJSON(t, options, []string{
 			"hooks", "status", "--json", "--claude-config", filepath.Join(home, ".claude"), "--codex-home", filepath.Join(home, ".codex"),
 		}),
 	}
 
 	for name, output := range outputs {
-		assertSchemaVersionOne(t, name, output)
+		assertSchemaVersion(t, name, output)
 		assertNoPublicJSONSentinels(t, name, output)
 		assertPublicJSONGolden(t, name, root, output)
 	}
@@ -151,7 +153,7 @@ func runStablePublicJSON(t *testing.T, options Options, args []string) string {
 	return first
 }
 
-func assertSchemaVersionOne(t *testing.T, name, output string) {
+func assertSchemaVersion(t *testing.T, name, output string) {
 	t.Helper()
 	var envelope struct {
 		SchemaVersion int `json:"schema_version"`
@@ -159,8 +161,14 @@ func assertSchemaVersionOne(t *testing.T, name, output string) {
 	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
 		t.Fatalf("decode %s: %v\noutput=%s", name, err, output)
 	}
-	if envelope.SchemaVersion != 1 {
-		t.Fatalf("%s schema_version = %d, want 1", name, envelope.SchemaVersion)
+	want := 1
+	if strings.HasPrefix(name, "report-") || strings.HasPrefix(name, "stale-") {
+		want = reportdto.SchemaVersion
+	} else if strings.HasPrefix(name, "usage-") {
+		want = usagedto.SchemaVersion
+	}
+	if envelope.SchemaVersion != want {
+		t.Fatalf("%s schema_version = %d, want %d", name, envelope.SchemaVersion, want)
 	}
 }
 

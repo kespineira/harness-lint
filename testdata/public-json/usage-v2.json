@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "period": {
+    "days": 60,
+    "start": "2026-06-15T12:00:00Z",
+    "end": "2026-08-14T12:00:00Z",
+    "inclusive": true
+  },
+  "filters": {"runtime": null, "type": null},
+  "capabilities": [{"runtime": "codex", "name": "Bash", "advertised_sessions": null, "invoked_in_advertised_sessions": null, "effective_coverage": {"status": "unknown", "covered_duration": null}}, {"runtime": "codex", "name": "update_plan", "advertised_sessions": null, "invoked_in_advertised_sessions": null, "effective_coverage": {"status": "unknown", "covered_duration": null}}]
+}

@@ -82,7 +82,7 @@ func TestExecuteMilestone2IsolatedHooksAndIngestE2E(t *testing.T) {
 	if err := json.Unmarshal([]byte(reportOutput), &report); err != nil {
 		t.Fatalf("decode report JSON: %v\noutput=%s", err, reportOutput)
 	}
-	if report.SchemaVersion != 1 || report.GeneratedAt != now.Format(time.RFC3339Nano) || len(report.UsageOnly) != 3 {
+	if report.SchemaVersion != reportdto.SchemaVersion || report.GeneratedAt != now.Format(time.RFC3339Nano) || len(report.UsageOnly) != 3 {
 		t.Fatalf("report envelope = %#v, want schema 1, injected time, and three usage-only groups", report)
 	}
 	wantCounts := map[string]int{
@@ -107,7 +107,7 @@ func TestExecuteMilestone2IsolatedHooksAndIngestE2E(t *testing.T) {
 	if err := json.Unmarshal([]byte(staleOutput), &stale); err != nil {
 		t.Fatalf("decode stale JSON: %v\noutput=%s", err, staleOutput)
 	}
-	if stale.SchemaVersion != 1 || stale.GeneratedAt != now.Format(time.RFC3339Nano) || len(stale.Capabilities) != 0 || len(stale.Findings) != 0 {
+	if stale.SchemaVersion != reportdto.SchemaVersion || stale.GeneratedAt != now.Format(time.RFC3339Nano) || len(stale.Capabilities) != 0 || len(stale.Findings) != 0 {
 		t.Fatalf("stale JSON = %#v, want valid empty installed-inventory view", stale)
 	}
 

@@ -79,11 +79,15 @@ func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, a
 		}
 		aggregate, found := aggregates[historyAggregateKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name}]
 		advertisedSessions := "unknown"
+		invokedAdvertisedSessions := "unknown"
 		provenance := "hook=0,transcript=0,import=0"
 		coverage := "unknown"
 		if found {
 			if aggregate.ObservedAdvertisedSessions != nil {
 				advertisedSessions = fmt.Sprintf("%d", *aggregate.ObservedAdvertisedSessions)
+			}
+			if aggregate.InvokedInAdvertisedSessions != nil {
+				invokedAdvertisedSessions = formatAdvertisedSessionEvidence(aggregate.InvokedInAdvertisedSessions, aggregate.ObservedAdvertisedSessions)
 			}
 			provenance = formatProvenance(aggregate.InvocationEvidence)
 			coverage = formatObservationCoverage(aggregate.Coverage)
@@ -92,13 +96,14 @@ func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, a
 		if capability.InvocationCount == 0 && capability.Advertised == 0 && capability.Loaded == 0 {
 			evidence = "never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient; " + evidence
 		}
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d advertised-sessions=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s evidence-sources=%s exposure=%s used-last-30d=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s metadata-exposure=%s body-footprint=%s confidence=%s coverage-confidence=%s coverage=%s basis=%s evidence=%s\n",
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d advertised-sessions=%s efficiency=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s evidence-sources=%s exposure=%s used-last-30d=%s first-seen=%s last-seen=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s metadata-exposure=%s body-footprint=%s context-footprint-confidence=%s confidence=%s coverage-confidence=%s coverage=%s effective-coverage=%s basis=%s evidence=%s\n",
 			capability.Runtime,
 			capability.Type,
 			cleanText(capability.Name),
 			capability.Status,
 			capability.Advertised,
 			advertisedSessions,
+			invokedAdvertisedSessions,
 			capability.Loaded,
 			capability.InvocationCount,
 			capability.DistinctSessionCount,
@@ -106,15 +111,19 @@ func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, a
 			joinSources(capability.EvidenceSources),
 			capability.Advertisement,
 			usedLast30,
+			humanInventoryTimestamp(capability.FirstSeen),
+			humanInventoryTimestamp(capability.LastSeen),
 			humanObservedTimestamp(capability.FirstObservedAt),
 			humanObservedTimestamp(capability.LastObservedAt),
 			humanInvocationTimestamp(capability.FirstInvocationEffectiveAt),
 			humanInvocationTimestamp(capability.LastInvocationEffectiveAt),
 			formatReportMeasurement(capability.MetadataExposure),
 			formatReportMeasurement(capability.LoadedBodyFootprint),
+			capability.ContextFootprintConfidence,
 			capability.Confidence,
 			capability.CoverageConfidence,
 			coverage,
+			formatModeledCoverage(capability.EffectiveCoverage),
 			cleanText(capability.Basis),
 			evidence)
 	}
@@ -125,6 +134,30 @@ func humanObservedTimestamp(value *string) string {
 		return "never observed"
 	}
 	return *value
+}
+
+func humanInventoryTimestamp(value *string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return "unknown"
+	}
+	return *value
+}
+
+func formatModeledCoverage(coverage *reportdto.EffectiveCoverage) string {
+	if coverage == nil || strings.TrimSpace(coverage.Status) == "" {
+		return "unknown"
+	}
+	if coverage.CoveredDuration == nil {
+		return cleanText(coverage.Status) + "/unknown"
+	}
+	return cleanText(coverage.Status) + "/" + cleanText(*coverage.CoveredDuration)
+}
+
+func formatAdvertisedSessionEvidence(invoked, advertised *int64) string {
+	if invoked == nil || advertised == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("invoked in %d / %d advertised sessions", *invoked, *advertised)
 }
 
 func humanInvocationTimestamp(value *string) string {
@@ -160,21 +193,26 @@ func printUsageOnlyWithAnalysis(out io.Writer, result analysis.Report, aggregate
 	for _, usage := range document.UsageOnly {
 		aggregate, found := aggregates[historyAggregateKey{runtime: usage.Runtime, typ: usage.Type, name: usage.Name}]
 		advertisedSessions := "unknown"
+		invokedAdvertisedSessions := "unknown"
 		provenance := "hook=0,transcript=0,import=0"
 		coverage := "unknown"
 		if found {
 			if aggregate.ObservedAdvertisedSessions != nil {
 				advertisedSessions = fmt.Sprintf("%d", *aggregate.ObservedAdvertisedSessions)
 			}
+			if aggregate.InvokedInAdvertisedSessions != nil {
+				invokedAdvertisedSessions = formatAdvertisedSessionEvidence(aggregate.InvokedInAdvertisedSessions, aggregate.ObservedAdvertisedSessions)
+			}
 			provenance = formatProvenance(aggregate.InvocationEvidence)
 			coverage = formatObservationCoverage(aggregate.Coverage)
 		}
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d advertised-sessions=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s coverage=%s status=usage-only\n",
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d advertised-sessions=%s efficiency=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s coverage=%s effective-coverage=%s status=usage-only\n",
 			usage.Runtime,
 			usage.Type,
 			cleanText(usage.Name),
 			usage.Advertised,
 			advertisedSessions,
+			invokedAdvertisedSessions,
 			usage.Loaded,
 			usage.InvocationCount,
 			usage.DistinctSessionCount,
@@ -184,7 +222,8 @@ func printUsageOnlyWithAnalysis(out io.Writer, result analysis.Report, aggregate
 			humanInvocationTimestamp(usage.FirstInvocationEffectiveAt),
 			humanInvocationTimestamp(usage.LastInvocationEffectiveAt),
 			joinSources(usage.EvidenceSources),
-			coverage)
+			coverage,
+			formatModeledCoverage(usage.EffectiveCoverage))
 	}
 }
 
@@ -295,10 +334,14 @@ func printUsageDocument(out io.Writer, document usagedto.UsageDocument) {
 		}
 		observation := usageObservationLabel(capability)
 		advertisedSessions := "unknown"
+		invokedAdvertisedSessions := "unknown"
 		if capability.AdvertisedSessions != nil {
 			advertisedSessions = fmt.Sprintf("%d", *capability.AdvertisedSessions)
 		}
-		fmt.Fprintf(out, "  type=%s name=%s installed=%t scopes=%s observation=%s uses=%d sessions=%d provenance=hook:%d,transcript:%d,import:%d sources=%s advertised=%d advertised-sessions=%s loaded=%d coverage=%s\n",
+		if capability.InvokedInAdvertisedSessions != nil {
+			invokedAdvertisedSessions = formatAdvertisedSessionEvidence(capability.InvokedInAdvertisedSessions, capability.AdvertisedSessions)
+		}
+		fmt.Fprintf(out, "  type=%s name=%s installed=%t scopes=%s observation=%s uses=%d sessions=%d provenance=hook:%d,transcript:%d,import:%d sources=%s advertised=%d advertised-sessions=%s efficiency=%s loaded=%d coverage=%s effective-coverage=%s\n",
 			capability.Type,
 			cleanText(capability.Name),
 			capability.Installed,
@@ -312,8 +355,10 @@ func printUsageDocument(out io.Writer, document usagedto.UsageDocument) {
 			joinSources(capability.Provenance.Sources),
 			capability.AdvertisedObservations,
 			advertisedSessions,
+			invokedAdvertisedSessions,
 			capability.LoadedObservations,
-			usageCoverageText(capability.ObservationOnlyCoverage))
+			usageCoverageText(capability.ObservationOnlyCoverage),
+			formatUsageModeledCoverage(capability.EffectiveCoverage))
 		if len(capability.Monthly) > 0 {
 			fmt.Fprint(out, "    monthly UTC:")
 			for _, month := range capability.Monthly {
@@ -322,6 +367,16 @@ func printUsageDocument(out io.Writer, document usagedto.UsageDocument) {
 			fmt.Fprintln(out)
 		}
 	}
+}
+
+func formatUsageModeledCoverage(coverage *usagedto.EffectiveCoverage) string {
+	if coverage == nil || strings.TrimSpace(coverage.Status) == "" {
+		return "unknown"
+	}
+	if coverage.CoveredDuration == nil {
+		return cleanText(coverage.Status) + "/unknown"
+	}
+	return cleanText(coverage.Status) + "/" + cleanText(*coverage.CoveredDuration)
 }
 
 func usageFilterText(value *string) string {

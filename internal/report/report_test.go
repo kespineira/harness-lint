@@ -18,26 +18,28 @@ func TestBuildReportHistoryUsesAggregatesWithoutEventTableAndKeepsPrivacy(t *tes
 	observed := now.Add(-2 * time.Hour)
 	effective := now.Add(-3 * time.Hour)
 	advertised := int64(2)
+	invokedAdvertised := int64(1)
 	coverageFirst := now.Add(-365 * 24 * time.Hour)
 	coverageLast := now.Add(-24 * time.Hour)
 	aggregates := []history.Aggregate{
 		{
-			Runtime:                    capability.Runtime,
-			CapabilityType:             capability.Type,
-			CapabilityName:             capability.Name,
-			AdvertisedObservations:     2,
-			LoadedObservations:         1,
-			Uses:                       1,
-			DistinctInvocationSessions: 1,
-			FirstObservedAt:            &observed,
-			LastObservedAt:             &observed,
-			FirstEffectiveActivityAt:   &effective,
-			LastEffectiveActivityAt:    &effective,
-			InvocationEvidence:         map[domain.Provenance]int64{domain.ProvenanceHook: 1, domain.ProvenanceTranscript: 1},
-			ObservedAdvertisedSessions: &advertised,
-			Installed:                  true,
-			InstalledScopes:            []domain.Scope{domain.ScopeProject, domain.ScopeUser},
-			Coverage:                   &history.Coverage{FirstInventoryObservedAt: &coverageFirst, LastInventoryObservedAt: &coverageLast},
+			Runtime:                     capability.Runtime,
+			CapabilityType:              capability.Type,
+			CapabilityName:              capability.Name,
+			AdvertisedObservations:      2,
+			LoadedObservations:          1,
+			Uses:                        1,
+			DistinctInvocationSessions:  1,
+			FirstObservedAt:             &observed,
+			LastObservedAt:              &observed,
+			FirstEffectiveActivityAt:    &effective,
+			LastEffectiveActivityAt:     &effective,
+			InvocationEvidence:          map[domain.Provenance]int64{domain.ProvenanceHook: 1, domain.ProvenanceTranscript: 1},
+			ObservedAdvertisedSessions:  &advertised,
+			InvokedInAdvertisedSessions: &invokedAdvertised,
+			Installed:                   true,
+			InstalledScopes:             []domain.Scope{domain.ScopeProject, domain.ScopeUser},
+			Coverage:                    &history.Coverage{FirstInventoryObservedAt: &coverageFirst, LastInventoryObservedAt: &coverageLast},
 		},
 		{
 			Runtime:                    domain.RuntimeCodex,
@@ -137,7 +139,7 @@ func TestHistoryReportsRejectImpossibleAdvertisedSessionEvidence(t *testing.T) {
 	}{
 		{
 			name:      "zero advertisements require nil sessions",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, ObservedAdvertisedSessions: &session, InvokedInAdvertisedSessions: &session},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions must be nil when advertised observations are zero",
 		},
 		{
@@ -147,12 +149,12 @@ func TestHistoryReportsRejectImpossibleAdvertisedSessionEvidence(t *testing.T) {
 		},
 		{
 			name:      "sessions must be positive",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &zero, InvokedInAdvertisedSessions: &zero},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions must be positive",
 		},
 		{
 			name:      "sessions cannot exceed advertisements",
-			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany},
+			aggregate: history.Aggregate{Runtime: base.Runtime, CapabilityType: base.CapabilityType, CapabilityName: base.CapabilityName, AdvertisedObservations: 1, ObservedAdvertisedSessions: &tooMany, InvokedInAdvertisedSessions: &tooMany},
 			wantError: "invalid history aggregate at index 0: observed advertised sessions exceed advertised observations",
 		},
 	}
@@ -183,6 +185,57 @@ func TestHistoryReportsRejectImpossibleAdvertisedSessionEvidence(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHistoryReportV2UsesExactSessionEvidenceAndNullableCoverageDuration(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	capability := reportTestCapability("v2-contract")
+	advertised := int64(3)
+	invoked := int64(1)
+	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	aggregate := history.Aggregate{
+		Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
+		AdvertisedObservations: 3, ObservedAdvertisedSessions: &advertised, InvokedInAdvertisedSessions: &invoked,
+		EffectiveCoverage: &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now.Add(-2 * time.Hour), End: now.Add(time.Hour)}}},
+	}
+	unknown := aggregate
+	unknown.CapabilityName = "v2-unknown"
+	unknown.AdvertisedObservations = 0
+	unknown.ObservedAdvertisedSessions = nil
+	unknown.InvokedInAdvertisedSessions = nil
+	unknown.EffectiveCoverage = nil
+	other := capability
+	other.Name = unknown.CapabilityName
+	result, err := analysis.AnalyzeHistory([]domain.Capability{capability, other}, []history.Aggregate{aggregate, unknown}, analysis.DefaultConfig(), now)
+	if err != nil {
+		t.Fatalf("AnalyzeHistory() error = %v", err)
+	}
+	document, err := BuildReportHistory(result, []history.Aggregate{aggregate, unknown}, now, 60)
+	if err != nil {
+		t.Fatalf("BuildReportHistory() error = %v", err)
+	}
+	rows := make(map[string]Capability, len(document.Capabilities))
+	for _, row := range document.Capabilities {
+		rows[row.Name] = row
+	}
+	row := rows[capability.Name]
+	if row.EffectiveCoverage.Status != string(history.CoveragePartial) || row.EffectiveCoverage.CoveredDuration == nil || *row.EffectiveCoverage.CoveredDuration != "2h0m0s" {
+		t.Fatalf("effective coverage = %#v, want partial/2h", row.EffectiveCoverage)
+	}
+	if row.ObservedAdvertisedSessions == nil || row.InvokedInAdvertisedSessions == nil || *row.ObservedAdvertisedSessions != 3 || *row.InvokedInAdvertisedSessions != 1 {
+		t.Fatalf("session evidence = %#v, want exact integer pair", row)
+	}
+	unknownRow := rows[unknown.CapabilityName]
+	if unknownRow.EffectiveCoverage.Status != string(history.CoverageUnknown) || unknownRow.EffectiveCoverage.CoveredDuration != nil || unknownRow.ObservedAdvertisedSessions != nil || unknownRow.InvokedInAdvertisedSessions != nil {
+		t.Fatalf("unknown evidence = %#v, want nullable unknown fields", unknownRow)
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "advertised_invocation_rate") || strings.Contains(string(encoded), "value_score") || strings.Contains(string(encoded), "covered_duration\":\"0s\"") {
+		t.Fatalf("v2 report contains forbidden efficiency/zero-duration output: %s", encoded)
 	}
 }
 

@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-14T12:00:00Z",
+  "stale_after_days": 60,
+  "runtimes": [{"runtime": "claude-code"}, {"runtime": "codex"}],
+  "capabilities": [{"runtime": "codex", "name": "Bash", "first_seen": "2026-08-13T12:00:00Z", "last_seen": "2026-08-14T12:00:00Z", "observed_advertised_sessions": null, "invoked_in_advertised_sessions": null, "effective_coverage": {"status": "unknown", "covered_duration": null}}],
+  "findings": []
+}

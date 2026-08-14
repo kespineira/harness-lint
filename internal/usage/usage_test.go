@@ -15,6 +15,7 @@ func TestBuildUsageDocumentFillsClosedUTCMonthsAndKeepsNullablePrivacySafeFields
 	firstObserved := now.Add(-48 * time.Hour)
 	firstEffective := now.Add(-47 * time.Hour)
 	advertisedSessions := int64(1)
+	invokedAdvertisedSessions := int64(1)
 	aggregate := history.Aggregate{
 		Runtime:                    domain.RuntimeCodex,
 		CapabilityType:             domain.CapabilityTool,
@@ -29,10 +30,11 @@ func TestBuildUsageDocumentFillsClosedUTCMonthsAndKeepsNullablePrivacySafeFields
 			domain.ProvenanceHook:       1,
 			domain.ProvenanceTranscript: 1,
 		},
-		AdvertisedObservations:     1,
-		ObservedAdvertisedSessions: &advertisedSessions,
-		Installed:                  true,
-		InstalledScopes:            []domain.Scope{domain.ScopeUser},
+		AdvertisedObservations:      1,
+		ObservedAdvertisedSessions:  &advertisedSessions,
+		InvokedInAdvertisedSessions: &invokedAdvertisedSessions,
+		Installed:                   true,
+		InstalledScopes:             []domain.Scope{domain.ScopeUser},
 	}
 	monthly := []history.MonthlyAggregate{{
 		Month:                      time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
@@ -53,7 +55,7 @@ func TestBuildUsageDocumentFillsClosedUTCMonthsAndKeepsNullablePrivacySafeFields
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if document.SchemaVersion != 1 || document.GeneratedAt != now.Format(time.RFC3339Nano) || !document.Period.Inclusive {
+	if document.SchemaVersion != SchemaVersion || document.GeneratedAt != now.Format(time.RFC3339Nano) || !document.Period.Inclusive {
 		t.Fatalf("envelope = %#v", document)
 	}
 	if document.Period.Start != now.Add(-60*24*time.Hour).Format(time.RFC3339Nano) || document.Period.End != now.Format(time.RFC3339Nano) {
