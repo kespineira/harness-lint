@@ -9,13 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kespineira/harness-lint/internal/domain"
 )
 
-const defaultStaleDays = 60
+const (
+	defaultStaleDays = 60
+	defaultUsageDays = 90
+)
 
 var supportedCommands = map[string]struct{}{
 	"ingest":  {},
 	"hooks":   {},
+	"usage":   {},
 	"scan":    {},
 	"report":  {},
 	"context": {},
@@ -37,38 +43,42 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type parsedFlags struct {
-	dbPath       string
-	dbSet        bool
-	home         string
-	homeSet      bool
-	project      string
-	projectSet   bool
-	configDir    string
-	configDirSet bool
-	codexHome    string
-	codexSet     bool
-	claudeConfig string
-	claudeSet    bool
-	nowText      string
-	nowSet       bool
-	sinceText    string
-	sinceSet     bool
-	days         int
-	daysSet      bool
-	hooks        []string
-	hooksSet     bool
-	runtime      string
-	runtimeSet   bool
-	event        string
-	eventSet     bool
-	managedBy    string
-	managedSet   bool
-	dryRun       bool
-	dryRunSet    bool
-	json         bool
-	jsonSet      bool
-	hooksAction  string
-	hooksRuntime string
+	dbPath         string
+	dbSet          bool
+	home           string
+	homeSet        bool
+	project        string
+	projectSet     bool
+	configDir      string
+	configDirSet   bool
+	codexHome      string
+	codexSet       bool
+	claudeConfig   string
+	claudeSet      bool
+	nowText        string
+	nowSet         bool
+	sinceText      string
+	sinceSet       bool
+	days           int
+	daysSet        bool
+	hooks          []string
+	hooksSet       bool
+	runtime        string
+	runtimeSet     bool
+	event          string
+	eventSet       bool
+	managedBy      string
+	managedSet     bool
+	capabilityType string
+	typeSet        bool
+	dryRun         bool
+	dryRunSet      bool
+	json           bool
+	jsonSet        bool
+	monthly        bool
+	monthlySet     bool
+	hooksAction    string
+	hooksRuntime   string
 }
 
 func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, error) {
@@ -76,7 +86,7 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: harness-lint %s [options]\n", command)
-		fmt.Fprintln(stderr, "commands: scan, report, context, stale, doctor, ingest, hooks")
+		fmt.Fprintln(stderr, "commands: scan, usage, report, context, stale, doctor, ingest, hooks")
 	}
 	var result parsedFlags
 	fs.StringVar(&result.dbPath, "db", "", "SQLite database path")
@@ -87,12 +97,14 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.StringVar(&result.claudeConfig, "claude-config", "", "Claude configuration root")
 	fs.StringVar(&result.nowText, "now", "", "observation time in RFC3339 form")
 	fs.StringVar(&result.sinceText, "since", "", "inclusive usage-import boundary in RFC3339 form")
-	fs.IntVar(&result.days, "days", defaultStaleDays, "stale threshold in days")
+	fs.IntVar(&result.days, "days", defaultDays(command), "period or stale threshold in days")
 	fs.StringVar(&result.runtime, "runtime", "", "runtime (claude, claude-code, or codex)")
+	fs.StringVar(&result.capabilityType, "type", "", "usage type (skill, mcp, tool, or agent)")
 	fs.StringVar(&result.event, "event", "", "documented runtime hook event name")
 	fs.StringVar(&result.managedBy, "managed-by", "", "managed hook ownership marker")
 	fs.BoolVar(&result.dryRun, "dry-run", false, "show hook changes without writing configuration")
-	fs.BoolVar(&result.json, "json", false, "render hook status as stable JSON")
+	fs.BoolVar(&result.json, "json", false, "render stable JSON output")
+	fs.BoolVar(&result.monthly, "monthly", false, "include UTC monthly usage evidence")
 	var hooks stringListFlag
 	fs.Var(&hooks, "hook-capture", "repeatable metadata-only hook capture path")
 
@@ -123,6 +135,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.eventSet = true
 		case "managed-by":
 			result.managedSet = true
+		case "type":
+			result.typeSet = true
 		case "now":
 			result.nowSet = true
 		case "since":
@@ -135,6 +149,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.dryRunSet = true
 		case "json":
 			result.jsonSet = true
+		case "monthly":
+			result.monthlySet = true
 		}
 	})
 	if result.days < 0 {
@@ -172,7 +188,7 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 		positionalIndexes = append(positionalIndexes, index)
 	}
 	if len(positionals) == 0 {
-		return parsedFlags{}, nil, errors.New("hooks action is required: status, install, or uninstall")
+		return parsedFlags{}, nil, errors.New("hooks action is required: status, test, install, or uninstall")
 	}
 	if len(positionals) > 2 {
 		return parsedFlags{}, nil, fmt.Errorf("unexpected hooks argument(s): %s", strings.Join(positionals[2:], " "))
@@ -225,7 +241,10 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 			return errors.New("--dry-run is only valid for hooks install or hooks uninstall")
 		}
 		if flags.jsonSet {
-			return errors.New("--json is only valid for hooks status")
+			return errors.New("--json is only valid for hooks status or usage/report/stale")
+		}
+		if flags.typeSet || flags.monthlySet {
+			return errors.New("--type and --monthly are only valid for usage")
 		}
 		if !flags.runtimeSet || strings.TrimSpace(flags.runtime) == "" {
 			return errors.New("ingest requires --runtime claude|codex")
@@ -234,13 +253,13 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 			return err
 		}
 	case "hooks":
-		if flags.dbSet {
+		if flags.dbSet && flags.hooksAction != "test" {
 			return errors.New("hooks does not accept --db")
 		}
 		if flags.projectSet {
 			return errors.New("hooks does not accept --project")
 		}
-		if flags.configDirSet {
+		if flags.configDirSet && flags.hooksAction != "test" {
 			return errors.New("hooks does not accept --config-dir")
 		}
 		if flags.sinceSet {
@@ -276,11 +295,50 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 			if flags.jsonSet {
 				return errors.New("--json is only valid for hooks status")
 			}
+		case "test":
+			if flags.dryRunSet {
+				return errors.New("--dry-run is only valid for hooks install or hooks uninstall")
+			}
+			if flags.jsonSet {
+				return errors.New("hooks test does not support --json")
+			}
 		default:
-			return fmt.Errorf("unknown hooks action %q (want status, install, or uninstall)", flags.hooksAction)
+			return fmt.Errorf("unknown hooks action %q (want status, test, install, or uninstall)", flags.hooksAction)
+		}
+		if flags.typeSet || flags.monthlySet {
+			return errors.New("--type and --monthly are only valid for usage")
+		}
+	case "usage":
+		if flags.homeSet {
+			return errors.New("usage does not accept --home")
+		}
+		if flags.projectSet {
+			return errors.New("usage does not accept --project")
+		}
+		if flags.codexSet {
+			return errors.New("usage does not accept --codex-home")
+		}
+		if flags.claudeSet {
+			return errors.New("usage does not accept --claude-config")
+		}
+		if flags.eventSet || flags.managedSet || flags.dryRunSet || flags.hooksSet || flags.sinceSet {
+			return errors.New("usage does not accept ingest or hooks-only flags")
+		}
+		if flags.runtimeSet {
+			if _, err := usageRuntime(flags.runtime); err != nil {
+				return err
+			}
+		}
+		if flags.typeSet {
+			if _, err := usageType(flags.capabilityType); err != nil {
+				return err
+			}
+		}
+		if flags.days <= 0 {
+			return errors.New("usage --days must be greater than zero")
 		}
 	default:
-		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || (flags.jsonSet && command != "report" && command != "stale") {
+		if flags.runtimeSet || flags.eventSet || flags.managedSet || flags.dryRunSet || flags.typeSet || flags.monthlySet || (flags.jsonSet && command != "report" && command != "stale") {
 			return fmt.Errorf("ingest or hooks flags are not valid for %s", command)
 		}
 	}
@@ -447,6 +505,53 @@ func resolveIngestConfig(options Options, flags parsedFlags) (commandConfig, err
 	}, nil
 }
 
+// resolveUsageConfig is intentionally narrower than resolveConfig. Usage is
+// a store-history query and must not inspect a live HOME, project tree, or
+// runtime configuration merely to render local aggregates.
+func resolveUsageConfig(options Options, flags parsedFlags) (commandConfig, error) {
+	currentDir, err := resolveCurrentDirectory(options)
+	if err != nil {
+		return commandConfig{}, err
+	}
+	now := time.Now()
+	if options.Now != nil {
+		now = options.Now()
+	}
+	if flags.nowText != "" {
+		now, err = time.Parse(time.RFC3339Nano, flags.nowText)
+		if err != nil {
+			return commandConfig{}, fmt.Errorf("parse --now: %w", err)
+		}
+	}
+	if now.IsZero() {
+		return commandConfig{}, errors.New("observation clock returned zero time")
+	}
+	dbPath := ""
+	if flags.dbSet {
+		dbPath = flags.dbPath
+	} else if options.ConfigDir != "" {
+		dbPath = filepath.Join(options.ConfigDir, "harness-lint", "harness-lint.db")
+	} else if flags.configDirSet {
+		dbPath = filepath.Join(flags.configDir, "harness-lint", "harness-lint.db")
+	} else {
+		base, configErr := os.UserConfigDir()
+		if configErr != nil {
+			return commandConfig{}, fmt.Errorf("resolve user config directory: %w", configErr)
+		}
+		dbPath = filepath.Join(base, "harness-lint", "harness-lint.db")
+	}
+	if strings.TrimSpace(dbPath) == "" {
+		return commandConfig{}, errors.New("database path is empty")
+	}
+	if dbPath != ":memory:" {
+		dbPath, err = absolutePath(dbPath, currentDir)
+		if err != nil {
+			return commandConfig{}, fmt.Errorf("resolve database path: %w", err)
+		}
+	}
+	return commandConfig{dbPath: dbPath, currentDir: currentDir, now: now.UTC(), days: flags.days, json: flags.json}, nil
+}
+
 // resolveHooksConfig resolves only runtime hook roots and the injected clock.
 // In particular, explicit --claude-config/--codex-home overrides do not cause
 // an otherwise unnecessary HOME lookup, which keeps status/install tests and
@@ -499,11 +604,47 @@ func resolveHooksConfig(options Options, flags parsedFlags) (commandConfig, erro
 	}
 	return commandConfig{
 		home:         home,
+		currentDir:   currentDir,
 		codexHome:    codexHome,
 		claudeConfig: claudeConfig,
 		now:          now.UTC(),
 		lookPath:     options.LookPath,
 	}, nil
+}
+
+// resolveHooksTestConfig adds the isolated database selection needed by the
+// read-only hooks test command. Hook status/install/uninstall intentionally do
+// not open a database.
+func resolveHooksTestConfig(options Options, flags parsedFlags) (commandConfig, error) {
+	if flags.dbSet && strings.TrimSpace(flags.dbPath) == "" {
+		return commandConfig{}, errors.New("database path is empty")
+	}
+	config, err := resolveHooksConfig(options, flags)
+	if err != nil {
+		return commandConfig{}, err
+	}
+	dbPath := ""
+	if flags.dbSet {
+		dbPath = flags.dbPath
+	} else if options.ConfigDir != "" {
+		dbPath = filepath.Join(options.ConfigDir, "harness-lint", "harness-lint.db")
+	} else if flags.configDirSet {
+		dbPath = filepath.Join(flags.configDir, "harness-lint", "harness-lint.db")
+	} else {
+		base, configErr := os.UserConfigDir()
+		if configErr != nil {
+			return commandConfig{}, fmt.Errorf("resolve user config directory: %w", configErr)
+		}
+		dbPath = filepath.Join(base, "harness-lint", "harness-lint.db")
+	}
+	if dbPath != ":memory:" {
+		dbPath, err = absolutePath(dbPath, config.currentDir)
+		if err != nil {
+			return commandConfig{}, fmt.Errorf("resolve database path: %w", err)
+		}
+	}
+	config.dbPath = dbPath
+	return config, nil
 }
 
 func hookConfigNeedsHome(flags parsedFlags) (bool, bool) {
@@ -644,7 +785,7 @@ func splitCommand(args []string) (string, []string, error) {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			return "", nil, unknownCommandError(args[0])
 		}
-		return "", nil, errors.New("a command is required: scan, report, context, stale, doctor, ingest, or hooks")
+		return "", nil, errors.New("a command is required: scan, usage, report, context, stale, doctor, ingest, or hooks")
 	}
 	command := args[commandIndex]
 	commandArgs := append([]string(nil), args[:commandIndex]...)
@@ -653,12 +794,12 @@ func splitCommand(args []string) (string, []string, error) {
 }
 
 func unknownCommandError(command string) error {
-	return fmt.Errorf("unknown command %q (want scan, report, context, stale, doctor, ingest, or hooks)", command)
+	return fmt.Errorf("unknown command %q (want scan, usage, report, context, stale, doctor, ingest, or hooks)", command)
 }
 
 func consumesValueFlag(arg string) bool {
 	switch arg {
-	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-event", "--event", "-managed-by", "--managed-by":
+	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-type", "--type", "-event", "--event", "-managed-by", "--managed-by":
 		return true
 	default:
 		return false
@@ -666,8 +807,8 @@ func consumesValueFlag(arg string) bool {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: harness-lint <scan|report|context|stale|doctor|ingest|hooks> [options]")
-	fmt.Fprintln(w, "commands: scan, report, context, stale, doctor, ingest, hooks")
+	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks> [options]")
+	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks")
 	fmt.Fprintln(w, "use harness-lint <command> --help for command options")
 }
 
@@ -683,8 +824,20 @@ func writeCommandUsage(w io.Writer, command string) {
 		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
 		return
 	}
+	if command == "usage" {
+		fmt.Fprintln(w, "usage: harness-lint usage [options]")
+		fmt.Fprintln(w, "options:")
+		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
+		fmt.Fprintln(w, "  --days N                   closed UTC period length (default 90; positive)")
+		fmt.Fprintln(w, "  --runtime claude|claude-code|codex")
+		fmt.Fprintln(w, "  --type skill|mcp|tool|agent")
+		fmt.Fprintln(w, "  --monthly                  include UTC monthly evidence")
+		fmt.Fprintln(w, "  --json                     stable JSON output")
+		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
+		return
+	}
 	if command == "hooks" {
-		fmt.Fprintln(w, "usage: harness-lint hooks <status|install|uninstall> [claude|codex] [options]")
+		fmt.Fprintln(w, "usage: harness-lint hooks <status|test|install|uninstall> [claude|codex] [options]")
 		fmt.Fprintln(w, "options:")
 		fmt.Fprintln(w, "  --json                     stable JSON output (status only)")
 		fmt.Fprintln(w, "  --dry-run                  show install/uninstall changes without writing")
@@ -704,10 +857,43 @@ func writeCommandUsage(w io.Writer, command string) {
 	fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
 	fmt.Fprintln(w, "  --hook-capture PATH        repeatable metadata-only hook capture path")
 	fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
-	fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
+	fmt.Fprintf(w, "  --days N                   stale threshold in days (default %d)\n", defaultDays(command))
 	fmt.Fprintln(w, "  --now RFC3339              observation time")
 	if command == "report" || command == "stale" {
 		fmt.Fprintln(w, "  --json                     stable JSON output")
+	}
+}
+
+func defaultDays(command string) int {
+	if command == "usage" {
+		return defaultUsageDays
+	}
+	return defaultStaleDays
+}
+
+func usageRuntime(value string) (domain.Runtime, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "claude", "claude-code":
+		return domain.RuntimeClaudeCode, nil
+	case "codex":
+		return domain.RuntimeCodex, nil
+	default:
+		return domain.RuntimeUnknown, errors.New("unknown usage runtime; want claude, claude-code, or codex")
+	}
+}
+
+func usageType(value string) (domain.CapabilityType, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "skill":
+		return domain.CapabilitySkill, nil
+	case "mcp":
+		return domain.CapabilityMCPServer, nil
+	case "tool":
+		return domain.CapabilityTool, nil
+	case "agent":
+		return domain.CapabilityAgent, nil
+	default:
+		return domain.CapabilityUnknown, errors.New("unknown usage type; want skill, mcp, tool, or agent")
 	}
 }
 

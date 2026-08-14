@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/capture"
+	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/health"
 	"github.com/kespineira/harness-lint/internal/hooks"
 )
 
@@ -21,6 +24,9 @@ func runHooks(ctx context.Context, config commandConfig, flags parsedFlags, out 
 	}
 	if flags.hooksAction == "status" {
 		return runHookStatus(ctx, config, runtimes, flags.json, out)
+	}
+	if flags.hooksAction == "test" {
+		return runHookTest(ctx, config, runtimes, out)
 	}
 	return runHookOperation(ctx, config, runtimes, flags.hooksAction, flags.dryRun, out)
 }
@@ -115,6 +121,108 @@ func hookAction(action string) hooks.Action {
 		return hooks.ActionUninstall
 	}
 	return hooks.ActionInstall
+}
+
+const hookTestFailureMessage = "hooks test failed: one or more selected runtimes are not healthy or idle"
+
+type hookTestSummary struct {
+	Healthy  int
+	Idle     int
+	Degraded int
+	Broken   int
+	Unknown  int
+}
+
+func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Runtime, out io.Writer) error {
+	db, openErr := openStore(config)
+	if db != nil {
+		defer db.Close()
+	}
+	summary := hookTestSummary{}
+	reports := make([]health.Report, 0, len(runtimes))
+	for _, runtimeName := range runtimes {
+		runtime := hookDomainRuntime(runtimeName)
+		result, err := health.Evaluate(ctx, health.Inputs{
+			Runtime:      runtime,
+			Hooks:        hookManager(config, runtimeName),
+			Store:        db,
+			StoreOpenErr: openErr,
+		})
+		if err != nil {
+			// Evaluate only returns context cancellation as an error. Preserve
+			// that cancellation instead of turning it into an unrelated unknown
+			// health result.
+			return err
+		}
+		reports = append(reports, result)
+		switch result.State {
+		case health.Healthy:
+			summary.Healthy++
+		case health.Idle:
+			summary.Idle++
+		case health.Degraded:
+			summary.Degraded++
+		case health.Broken:
+			summary.Broken++
+		default:
+			summary.Unknown++
+		}
+	}
+	fmt.Fprintf(out, "hooks-test aggregate healthy=%d idle=%d degraded=%d broken=%d unknown=%d\n", summary.Healthy, summary.Idle, summary.Degraded, summary.Broken, summary.Unknown)
+	for _, report := range reports {
+		printHookTestReport(out, report)
+	}
+	fmt.Fprintln(out, "limitation=synthetic self-test proves local ingest/SQLite but not true runtime delivery without activity")
+	if summary.Broken > 0 || summary.Degraded > 0 || summary.Unknown > 0 {
+		return errors.New(hookTestFailureMessage)
+	}
+	return nil
+}
+
+func hookDomainRuntime(runtime hooks.Runtime) domain.Runtime {
+	if runtime == hooks.RuntimeClaude {
+		return domain.RuntimeClaudeCode
+	}
+	if runtime == hooks.RuntimeCodex {
+		return domain.RuntimeCodex
+	}
+	return domain.RuntimeUnknown
+}
+
+func printHookTestReport(out io.Writer, report health.Report) {
+	components := report.Components
+	fmt.Fprintf(out, "runtime=%s state=%s config=%s hooks=%s managed-entries=%s executable=%s database=%s schema=%s selftest=%s delivery=%s\n",
+		report.Runtime,
+		report.State,
+		components.Config.State,
+		components.Hooks.State,
+		components.ManagedEntries.State,
+		components.Executable.State,
+		components.Database.State,
+		components.Schema.State,
+		components.SelfTest.State,
+		components.Delivery.State)
+	printHookTestDelivery(out, report.Delivery)
+}
+
+func printHookTestDelivery(out io.Writer, delivery capture.DeliveryHealth) {
+	lastSuccessful := "unknown"
+	if delivery.LastSuccessfulDelivery != nil {
+		lastSuccessful = delivery.LastSuccessfulDelivery.UTC().Format(time.RFC3339Nano)
+	}
+	lastFailed := "unknown"
+	if delivery.LastFailedDelivery != nil {
+		lastFailed = delivery.LastFailedDelivery.UTC().Format(time.RFC3339Nano)
+	}
+	failureKind := "unknown"
+	if delivery.LastFailureKind != nil {
+		failureKind = string(*delivery.LastFailureKind)
+	}
+	count := delivery.ConsecutiveFailures
+	if count < 0 || count > capture.MaxConsecutiveFailures {
+		count = 0
+	}
+	fmt.Fprintf(out, "  delivery last-successful=%s last-failed=%s failure-count=%d failure-kind=%s\n", lastSuccessful, lastFailed, count, failureKind)
 }
 
 func printHookStatus(out io.Writer, report hooks.StatusReport) {

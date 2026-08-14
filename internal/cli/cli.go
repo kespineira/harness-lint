@@ -78,8 +78,14 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		return runIngest(ctx, config, parsed, stdin)
 	}
 	var config commandConfig
-	if command == "hooks" {
-		config, err = resolveHooksConfig(options, parsed)
+	if command == "usage" {
+		config, err = resolveUsageConfig(options, parsed)
+	} else if command == "hooks" {
+		if parsed.hooksAction == "test" {
+			config, err = resolveHooksTestConfig(options, parsed)
+		} else {
+			config, err = resolveHooksConfig(options, parsed)
+		}
 	} else {
 		config, err = resolveConfig(options, parsed)
 	}
@@ -90,6 +96,8 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	switch command {
 	case "hooks":
 		return runHooks(ctx, config, parsed, stdout)
+	case "usage":
+		return runUsage(ctx, config, parsed, stdout)
 	case "scan":
 		return runScan(ctx, config, stdout)
 	case "report":

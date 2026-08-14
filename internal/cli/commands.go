@@ -7,16 +7,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/analysis"
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
 	reportdto "github.com/kespineira/harness-lint/internal/report"
 	"github.com/kespineira/harness-lint/internal/runtime"
 	"github.com/kespineira/harness-lint/internal/runtime/claude"
 	"github.com/kespineira/harness-lint/internal/runtime/codex"
 	"github.com/kespineira/harness-lint/internal/store"
+	usagedto "github.com/kespineira/harness-lint/internal/usage"
 )
 
 const lastUsedWindow = 30 * 24 * time.Hour
@@ -138,7 +141,183 @@ func currentCapabilities(ctx context.Context, db *store.Store) ([]domain.Capabil
 	return result, nil
 }
 
-func loadReport(ctx context.Context, config commandConfig, staleDays int) (analysis.Report, []domain.UsageEvent, error) {
+func runUsage(ctx context.Context, config commandConfig, flags parsedFlags, out io.Writer) error {
+	if config.days <= 0 {
+		return errors.New("usage --days must be greater than zero")
+	}
+	duration, err := durationForDays(config.days)
+	if err != nil {
+		return fmt.Errorf("usage %w", err)
+	}
+	runtimeFilter, typeFilter, mcpUnion, err := usageFilters(flags)
+	if err != nil {
+		return err
+	}
+	start := config.now.Add(-duration)
+	query := history.Query{Start: start, End: config.now, Runtime: runtimeFilter}
+	if !mcpUnion {
+		query.CapabilityType = typeFilter
+	}
+	db, err := openStore(config)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	aggregates, err := queryUsageAggregates(ctx, db, query, mcpUnion)
+	if err != nil {
+		return fmt.Errorf("query usage history: %w", err)
+	}
+	var monthly []history.MonthlyAggregate
+	if flags.monthly {
+		monthly, err = queryUsageMonthly(ctx, db, query, mcpUnion)
+		if err != nil {
+			return fmt.Errorf("query monthly usage history: %w", err)
+		}
+	}
+	runtimeFilterText := usageRuntimeFilterText(runtimeFilter, flags.runtimeSet)
+	typeFilterText := usageTypeFilterText(typeFilter, mcpUnion, flags.typeSet)
+	document, err := usagedto.Build(usagedto.BuildInput{
+		GeneratedAt:    config.now,
+		Days:           config.days,
+		RuntimeFilter:  runtimeFilterText,
+		TypeFilter:     typeFilterText,
+		Aggregates:     aggregates,
+		Monthly:        monthly,
+		IncludeMonthly: flags.monthly,
+	})
+	if err != nil {
+		return fmt.Errorf("build usage output: %w", err)
+	}
+	if config.json {
+		return usagedto.WriteJSON(out, document)
+	}
+	printUsageDocument(out, document)
+	return nil
+}
+
+func queryUsageAggregates(ctx context.Context, db *store.Store, query history.Query, mcpUnion bool) ([]history.Aggregate, error) {
+	if !mcpUnion {
+		return db.QueryInvocationHistory(ctx, query)
+	}
+	result := make([]history.Aggregate, 0)
+	for _, capabilityType := range []domain.CapabilityType{domain.CapabilityMCPServer, domain.CapabilityMCPTool} {
+		bounded := query
+		bounded.CapabilityType = capabilityType
+		aggregates, err := db.QueryInvocationHistory(ctx, bounded)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, aggregates...)
+	}
+	sortUsageAggregates(result)
+	return result, nil
+}
+
+func queryUsageMonthly(ctx context.Context, db *store.Store, query history.Query, mcpUnion bool) ([]history.MonthlyAggregate, error) {
+	if !mcpUnion {
+		return db.QueryMonthlyInvocations(ctx, query)
+	}
+	result := make([]history.MonthlyAggregate, 0)
+	for _, capabilityType := range []domain.CapabilityType{domain.CapabilityMCPServer, domain.CapabilityMCPTool} {
+		bounded := query
+		bounded.CapabilityType = capabilityType
+		monthly, err := db.QueryMonthlyInvocations(ctx, bounded)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, monthly...)
+	}
+	sortUsageMonthly(result)
+	return result, nil
+}
+
+func sortUsageAggregates(values []history.Aggregate) {
+	sort.SliceStable(values, func(left, right int) bool {
+		if values[left].Runtime != values[right].Runtime {
+			return values[left].Runtime < values[right].Runtime
+		}
+		if values[left].CapabilityType != values[right].CapabilityType {
+			return values[left].CapabilityType < values[right].CapabilityType
+		}
+		return values[left].CapabilityName < values[right].CapabilityName
+	})
+}
+
+func sortUsageMonthly(values []history.MonthlyAggregate) {
+	sort.SliceStable(values, func(left, right int) bool {
+		if values[left].Runtime != values[right].Runtime {
+			return values[left].Runtime < values[right].Runtime
+		}
+		if values[left].CapabilityType != values[right].CapabilityType {
+			return values[left].CapabilityType < values[right].CapabilityType
+		}
+		if values[left].CapabilityName != values[right].CapabilityName {
+			return values[left].CapabilityName < values[right].CapabilityName
+		}
+		return values[left].Month.Before(values[right].Month)
+	})
+}
+
+func usageFilters(flags parsedFlags) (domain.Runtime, domain.CapabilityType, bool, error) {
+	runtimeFilter := domain.Runtime("")
+	if flags.runtimeSet {
+		parsed, err := usageRuntime(flags.runtime)
+		if err != nil {
+			return "", "", false, err
+		}
+		runtimeFilter = parsed
+	}
+	typeFilter := domain.CapabilityType("")
+	mcpUnion := false
+	if flags.typeSet {
+		parsed, err := usageType(flags.capabilityType)
+		if err != nil {
+			return "", "", false, err
+		}
+		typeFilter = parsed
+		mcpUnion = strings.EqualFold(strings.TrimSpace(flags.capabilityType), "mcp")
+	}
+	return runtimeFilter, typeFilter, mcpUnion, nil
+}
+
+func usageRuntimeFilterText(value domain.Runtime, selected bool) *string {
+	if !selected {
+		return nil
+	}
+	normalized := string(value)
+	return &normalized
+}
+
+func usageTypeFilterText(value domain.CapabilityType, mcpUnion, selected bool) *string {
+	if !selected {
+		return nil
+	}
+	normalized := ""
+	if mcpUnion {
+		normalized = "mcp"
+	} else {
+		normalized = string(value)
+	}
+	return &normalized
+}
+
+const maxDurationDays = int64(1<<63-1) / int64(24*time.Hour)
+
+func durationForDays(days int) (time.Duration, error) {
+	if days <= 0 {
+		return 0, errors.New("days must be greater than zero")
+	}
+	if int64(days) > maxDurationDays {
+		return 0, errors.New("days exceed supported UTC period range")
+	}
+	return time.Duration(days) * 24 * time.Hour, nil
+}
+
+func loadReport(ctx context.Context, config commandConfig, staleDays int) (analysis.Report, []history.Aggregate, error) {
+	staleAfter, err := durationForDays(staleDays)
+	if err != nil {
+		return analysis.Report{}, nil, fmt.Errorf("--days %w", err)
+	}
 	db, err := openStore(config)
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("open database: %w", err)
@@ -148,49 +327,47 @@ func loadReport(ctx context.Context, config commandConfig, staleDays int) (analy
 	if err != nil {
 		return analysis.Report{}, nil, err
 	}
-	events, err := db.ListUsageEvents(ctx, time.Time{})
+	aggregates, err := db.QueryInvocationHistory(ctx, history.Query{})
 	if err != nil {
-		return analysis.Report{}, nil, fmt.Errorf("list usage history: %w", err)
-	}
-	if staleDays <= 0 {
-		return analysis.Report{}, nil, errors.New("--days must be greater than zero")
+		return analysis.Report{}, nil, fmt.Errorf("query usage history: %w", err)
 	}
 	policy := analysis.DefaultConfig()
-	policy.StaleAfter = time.Duration(staleDays) * 24 * time.Hour
-	result, err := analysis.Analyze(capabilities, events, policy, config.now)
+	policy.StaleAfter = staleAfter
+	result, err := analysis.AnalyzeHistory(capabilities, aggregates, policy, config.now)
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("analyze current inventory: %w", err)
 	}
-	return result, events, nil
+	return result, aggregates, nil
 }
 
 func runReport(ctx context.Context, config commandConfig, out io.Writer) error {
-	result, events, err := loadReport(ctx, config, config.days)
+	result, aggregates, err := loadReport(ctx, config, config.days)
 	if err != nil {
 		return err
 	}
 	if config.json {
-		document, buildErr := reportdto.BuildReport(result, events, config.now, config.days)
+		document, buildErr := reportdto.BuildReportHistory(result, aggregates, config.now, config.days)
 		if buildErr != nil {
 			return fmt.Errorf("build report JSON: %w", buildErr)
 		}
 		return reportdto.WriteJSON(out, document)
 	}
 	fmt.Fprintf(out, "report as-of=%s stale-days=%d\n", config.now.Format(time.RFC3339), config.days)
-	printRuntimeCounts(out, result, events, config.now)
-	printCapabilityEvidenceWithEvents(out, result, events, config.now)
+	aggregateIndex := buildAggregateIndex(aggregates)
+	printRuntimeCounts(out, result, aggregates, config.now)
+	printCapabilityEvidenceWithHistory(out, result, aggregateIndex, config.now)
 	printDuplicateFindings(out, result)
-	printUsageOnlyWithAnalysis(out, result, events, config.now)
+	printUsageOnlyWithAnalysis(out, result, aggregateIndex, config.now)
 	return nil
 }
 
 func runStale(ctx context.Context, config commandConfig, out io.Writer) error {
-	result, events, err := loadReport(ctx, config, config.days)
+	result, aggregates, err := loadReport(ctx, config, config.days)
 	if err != nil {
 		return err
 	}
 	if config.json {
-		document, buildErr := reportdto.BuildStale(result, events, config.now, config.days)
+		document, buildErr := reportdto.BuildStaleHistory(result, aggregates, config.now, config.days)
 		if buildErr != nil {
 			return fmt.Errorf("build stale JSON: %w", buildErr)
 		}
@@ -201,7 +378,8 @@ func runStale(ctx context.Context, config commandConfig, out io.Writer) error {
 		fmt.Fprintln(out, "no current capabilities")
 		return nil
 	}
-	printCapabilityEvidenceWithEvents(out, result, events, config.now)
+	aggregateIndex := buildAggregateIndex(aggregates)
+	printCapabilityEvidenceWithHistory(out, result, aggregateIndex, config.now)
 	printDuplicateFindings(out, result)
 	return nil
 }

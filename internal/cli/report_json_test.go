@@ -83,7 +83,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 	if capabilityJSON.InvocationCount != 2 || capabilityJSON.DistinctSessionCount != 2 || capabilityJSON.Advertised != 1 || capabilityJSON.Loaded != 1 {
 		t.Fatalf("capability usage fields = %#v", capabilityJSON)
 	}
-	if got, want := capabilityJSON.EvidenceSources, []string{"hook", "import", "transcript"}; !equalStrings(got, want) {
+	if got, want := capabilityJSON.EvidenceSources, []string{"hook", "transcript"}; !equalStrings(got, want) {
 		t.Fatalf("evidence sources = %#v, want %#v", got, want)
 	}
 	if capabilityJSON.FirstObservedAt == nil || capabilityJSON.LastObservedAt == nil || capabilityJSON.FirstInvocationEffectiveAt == nil || capabilityJSON.LastInvocationEffectiveAt == nil {
@@ -121,7 +121,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 	if strings.Contains(human.String(), "never-observed=") || strings.Contains(human.String(), "first-effective-activity=") {
 		t.Fatalf("human report uses imprecise activity labels: %s", human.String())
 	}
-	for _, want := range []string{"invocation-uses=2", "distinct-sessions=2", "first-observed=", "last-observed=", "first-invocation-effective=", "evidence-sources=hook,import,transcript", "definitions=2"} {
+	for _, want := range []string{"invocation-uses=2", "distinct-sessions=2", "first-observed=", "last-observed=", "first-invocation-effective=", "evidence-sources=hook,transcript", "definitions=2"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human report = %q, missing %q", human.String(), want)
 		}

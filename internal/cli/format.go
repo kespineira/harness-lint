@@ -3,13 +3,16 @@ package cli
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/kespineira/harness-lint/internal/analysis"
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
 	reportdto "github.com/kespineira/harness-lint/internal/report"
+	usagedto "github.com/kespineira/harness-lint/internal/usage"
 )
 
 func printFinding(out io.Writer, finding domain.Finding) {
@@ -20,24 +23,19 @@ func printFinding(out io.Writer, finding domain.Finding) {
 	fmt.Fprintf(out, "finding runtime=%s code=%s severity=%s confidence=%s capability=%s message=%s\n", finding.Runtime, cleanText(finding.Code), finding.Severity, finding.Confidence, capability, cleanText(finding.Message))
 }
 
-func printRuntimeCounts(out io.Writer, result analysis.Report, events []domain.UsageEvent, now time.Time) {
+func printRuntimeCounts(out io.Writer, result analysis.Report, aggregates []history.Aggregate, now time.Time) {
 	for _, runtimeName := range knownRuntimes {
 		installed := 0
 		configuredAdvertised := 0
 		advertisedEvents, loadedEvents, invokedEvents := 0, 0, 0
 		usedLast30, noActivityObserved := 0, 0
-		for _, event := range events {
-			if event.Runtime != runtimeName {
+		for _, aggregate := range aggregates {
+			if aggregate.Runtime != runtimeName {
 				continue
 			}
-			switch event.EventType {
-			case domain.EventAdvertised:
-				advertisedEvents++
-			case domain.EventLoaded:
-				loadedEvents++
-			case domain.EventInvoked:
-				invokedEvents++
-			}
+			advertisedEvents += int(aggregate.AdvertisedObservations)
+			loadedEvents += int(aggregate.LoadedObservations)
+			invokedEvents += int(aggregate.Uses)
 		}
 		for _, evidence := range result.Capabilities {
 			if evidence.Capability.Runtime != runtimeName {
@@ -54,22 +52,17 @@ func printRuntimeCounts(out io.Writer, result analysis.Report, events []domain.U
 				usedLast30++
 			}
 		}
-		usageEvents := 0
-		for _, event := range events {
-			if event.Runtime == runtimeName {
-				usageEvents++
-			}
-		}
+		usageEvents := advertisedEvents + loadedEvents + invokedEvents
 		fmt.Fprintf(out, "runtime=%s installed=%d advertised=%d loaded=%d invoked=%d configured-advertised=%d used-last-30d=%d no-activity-observed=%d usage-events=%d\n", runtimeName, installed, advertisedEvents, loadedEvents, invokedEvents, configuredAdvertised, usedLast30, noActivityObserved, usageEvents)
 	}
 }
 
-func printCapabilityEvidenceWithEvents(out io.Writer, result analysis.Report, events []domain.UsageEvent, now time.Time) {
+func printCapabilityEvidenceWithHistory(out io.Writer, result analysis.Report, aggregates historyAggregateIndex, now time.Time) {
 	if len(result.Capabilities) == 0 {
 		fmt.Fprintln(out, "no current capabilities")
 		return
 	}
-	document, err := reportdto.BuildStale(result, events, now, 0)
+	document, err := reportdto.BuildStaleHistory(result, aggregateValues(aggregates), now, 0)
 	if err != nil {
 		// Analyze already validates the clock. Keep this formatter defensive for
 		// direct unit callers without turning a presentation error into a panic.
@@ -84,26 +77,46 @@ func printCapabilityEvidenceWithEvents(out io.Writer, result analysis.Report, ev
 				usedLast30 = "yes"
 			}
 		}
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d loaded=%d invocation-uses=%d distinct-sessions=%d exposure=%s used-last-30d=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s confidence=%s coverage-confidence=%s basis=%s evidence=%s\n",
+		aggregate, found := aggregates[historyAggregateKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name}]
+		advertisedSessions := "unknown"
+		provenance := "hook=0,transcript=0,import=0"
+		coverage := "unknown"
+		if found {
+			if aggregate.ObservedAdvertisedSessions != nil {
+				advertisedSessions = fmt.Sprintf("%d", *aggregate.ObservedAdvertisedSessions)
+			}
+			provenance = formatProvenance(aggregate.InvocationEvidence)
+			coverage = formatObservationCoverage(aggregate.Coverage)
+		}
+		evidence := cleanText(capability.Evidence)
+		if capability.InvocationCount == 0 && capability.Advertised == 0 && capability.Loaded == 0 {
+			evidence = "never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient; " + evidence
+		}
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s status=%s advertised=%d advertised-sessions=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s evidence-sources=%s exposure=%s used-last-30d=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s metadata-exposure=%s body-footprint=%s confidence=%s coverage-confidence=%s coverage=%s basis=%s evidence=%s\n",
 			capability.Runtime,
 			capability.Type,
 			cleanText(capability.Name),
 			capability.Status,
 			capability.Advertised,
+			advertisedSessions,
 			capability.Loaded,
 			capability.InvocationCount,
 			capability.DistinctSessionCount,
+			provenance,
+			joinSources(capability.EvidenceSources),
 			capability.Advertisement,
 			usedLast30,
 			humanObservedTimestamp(capability.FirstObservedAt),
 			humanObservedTimestamp(capability.LastObservedAt),
 			humanInvocationTimestamp(capability.FirstInvocationEffectiveAt),
 			humanInvocationTimestamp(capability.LastInvocationEffectiveAt),
-			joinSources(capability.EvidenceSources),
+			formatReportMeasurement(capability.MetadataExposure),
+			formatReportMeasurement(capability.LoadedBodyFootprint),
 			capability.Confidence,
 			capability.CoverageConfidence,
+			coverage,
 			cleanText(capability.Basis),
-			cleanText(capability.Evidence))
+			evidence)
 	}
 }
 
@@ -138,26 +151,40 @@ func printDuplicateFindings(out io.Writer, result analysis.Report) {
 	}
 }
 
-func printUsageOnlyWithAnalysis(out io.Writer, result analysis.Report, events []domain.UsageEvent, now time.Time) {
-	document, err := reportdto.BuildReport(result, events, now, 0)
+func printUsageOnlyWithAnalysis(out io.Writer, result analysis.Report, aggregates historyAggregateIndex, now time.Time) {
+	document, err := reportdto.BuildReportHistory(result, aggregateValues(aggregates), now, 0)
 	if err != nil || len(document.UsageOnly) == 0 {
 		return
 	}
 	fmt.Fprintln(out, "usage-only (observed usage is not installed inventory):")
 	for _, usage := range document.UsageOnly {
-		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d loaded=%d invocation-uses=%d distinct-sessions=%d first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s status=usage-only\n",
+		aggregate, found := aggregates[historyAggregateKey{runtime: usage.Runtime, typ: usage.Type, name: usage.Name}]
+		advertisedSessions := "unknown"
+		provenance := "hook=0,transcript=0,import=0"
+		coverage := "unknown"
+		if found {
+			if aggregate.ObservedAdvertisedSessions != nil {
+				advertisedSessions = fmt.Sprintf("%d", *aggregate.ObservedAdvertisedSessions)
+			}
+			provenance = formatProvenance(aggregate.InvocationEvidence)
+			coverage = formatObservationCoverage(aggregate.Coverage)
+		}
+		fmt.Fprintf(out, "  runtime=%s type=%s name=%s advertised=%d advertised-sessions=%s loaded=%d invocation-uses=%d distinct-sessions=%d provenance=%s first-observed=%s last-observed=%s first-invocation-effective=%s last-invocation-effective=%s evidence-sources=%s coverage=%s status=usage-only\n",
 			usage.Runtime,
 			usage.Type,
 			cleanText(usage.Name),
 			usage.Advertised,
+			advertisedSessions,
 			usage.Loaded,
 			usage.InvocationCount,
 			usage.DistinctSessionCount,
+			provenance,
 			humanObservedTimestamp(usage.FirstObservedAt),
 			humanObservedTimestamp(usage.LastObservedAt),
 			humanInvocationTimestamp(usage.FirstInvocationEffectiveAt),
 			humanInvocationTimestamp(usage.LastInvocationEffectiveAt),
-			joinSources(usage.EvidenceSources))
+			joinSources(usage.EvidenceSources),
+			coverage)
 	}
 }
 
@@ -183,4 +210,153 @@ func cleanText(value string) string {
 		builder.WriteRune(character)
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+type historyAggregateKey struct {
+	runtime string
+	typ     string
+	name    string
+}
+
+type historyAggregateIndex map[historyAggregateKey]history.Aggregate
+
+func buildAggregateIndex(aggregates []history.Aggregate) historyAggregateIndex {
+	result := make(historyAggregateIndex, len(aggregates))
+	for _, aggregate := range aggregates {
+		key := historyAggregateKey{runtime: string(aggregate.Runtime), typ: string(aggregate.CapabilityType), name: aggregate.CapabilityName}
+		result[key] = aggregate
+	}
+	return result
+}
+
+func aggregateValues(index historyAggregateIndex) []history.Aggregate {
+	result := make([]history.Aggregate, 0, len(index))
+	for _, aggregate := range index {
+		result = append(result, aggregate)
+	}
+	// The report DTO sorts and validates its input. This conversion is only
+	// needed by the compatibility DTO builder; preserve deterministic ordering
+	// here as well so the formatter never depends on map iteration.
+	sort.Slice(result, func(left, right int) bool {
+		if result[left].Runtime != result[right].Runtime {
+			return result[left].Runtime < result[right].Runtime
+		}
+		if result[left].CapabilityType != result[right].CapabilityType {
+			return result[left].CapabilityType < result[right].CapabilityType
+		}
+		return result[left].CapabilityName < result[right].CapabilityName
+	})
+	return result
+}
+
+func formatProvenance(counts map[domain.Provenance]int64) string {
+	return fmt.Sprintf("hook=%d,transcript=%d,import=%d", counts[domain.ProvenanceHook], counts[domain.ProvenanceTranscript], counts[domain.ProvenanceImport])
+}
+
+func formatObservationCoverage(coverage *history.Coverage) string {
+	if coverage == nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, 3)
+	if coverage.FirstInventoryObservedAt != nil || coverage.LastInventoryObservedAt != nil {
+		parts = append(parts, "inventory")
+	}
+	if coverage.FirstUsageObservedAt != nil || coverage.LastUsageObservedAt != nil {
+		parts = append(parts, "usage")
+	}
+	if coverage.FirstDirectHookObservedAt != nil || coverage.LastDirectHookObservedAt != nil {
+		parts = append(parts, "direct-hook")
+	}
+	if len(parts) == 0 {
+		return "unknown"
+	}
+	return "observation-only(" + strings.Join(parts, ",") + "); lifetime activity coverage unknown"
+}
+
+func formatReportMeasurement(measurement reportdto.Measurement) string {
+	if measurement.Tokens == nil {
+		return "unknown(" + cleanText(measurement.Confidence) + ")"
+	}
+	return fmt.Sprintf("%d tokens(%s)", *measurement.Tokens, cleanText(measurement.Confidence))
+}
+
+func printUsageDocument(out io.Writer, document usagedto.UsageDocument) {
+	fmt.Fprintf(out, "usage generated-at=%s period-start=%s period-end=%s days=%d inclusive=%t\n", document.GeneratedAt, document.Period.Start, document.Period.End, document.Period.Days, document.Period.Inclusive)
+	fmt.Fprintf(out, "filters runtime=%s type=%s\n", usageFilterText(document.Filters.Runtime), usageFilterText(document.Filters.Type))
+	if len(document.Capabilities) == 0 {
+		fmt.Fprintln(out, "no usage capabilities returned; coverage is observation-only and lifetime activity coverage is unknown")
+		return
+	}
+	currentRuntime := ""
+	for _, capability := range document.Capabilities {
+		if capability.Runtime != currentRuntime {
+			currentRuntime = capability.Runtime
+			fmt.Fprintf(out, "runtime=%s\n", capability.Runtime)
+		}
+		observation := usageObservationLabel(capability)
+		advertisedSessions := "unknown"
+		if capability.AdvertisedSessions != nil {
+			advertisedSessions = fmt.Sprintf("%d", *capability.AdvertisedSessions)
+		}
+		fmt.Fprintf(out, "  type=%s name=%s installed=%t scopes=%s observation=%s uses=%d sessions=%d provenance=hook:%d,transcript:%d,import:%d sources=%s advertised=%d advertised-sessions=%s loaded=%d coverage=%s\n",
+			capability.Type,
+			cleanText(capability.Name),
+			capability.Installed,
+			joinSources(capability.InstalledScopes),
+			observation,
+			capability.Uses,
+			capability.DistinctSessions,
+			capability.Provenance.Hook,
+			capability.Provenance.Transcript,
+			capability.Provenance.Import,
+			joinSources(capability.Provenance.Sources),
+			capability.AdvertisedObservations,
+			advertisedSessions,
+			capability.LoadedObservations,
+			usageCoverageText(capability.ObservationOnlyCoverage))
+		if len(capability.Monthly) > 0 {
+			fmt.Fprint(out, "    monthly UTC:")
+			for _, month := range capability.Monthly {
+				fmt.Fprintf(out, " %s uses=%d sessions=%d", month.Month, month.Uses, month.DistinctSessions)
+			}
+			fmt.Fprintln(out)
+		}
+	}
+}
+
+func usageFilterText(value *string) string {
+	if value == nil || strings.TrimSpace(*value) == "" {
+		return "none"
+	}
+	return cleanText(*value)
+}
+
+func usageObservationLabel(capability usagedto.Capability) string {
+	if capability.Uses > 0 && capability.LastObservedAt != nil {
+		return "last observed " + *capability.LastObservedAt
+	}
+	if capability.AdvertisedObservations > 0 || capability.LoadedObservations > 0 || capability.ObservationOnlyCoverage != nil && (capability.ObservationOnlyCoverage.FirstUsageObservedAt != nil || capability.ObservationOnlyCoverage.LastUsageObservedAt != nil || capability.ObservationOnlyCoverage.FirstDirectHookObservedAt != nil || capability.ObservationOnlyCoverage.LastDirectHookObservedAt != nil) {
+		return "not observed in this period"
+	}
+	return "never observed"
+}
+
+func usageCoverageText(coverage *usagedto.Coverage) string {
+	if coverage == nil {
+		return "observation-only coverage unknown"
+	}
+	parts := make([]string, 0, 3)
+	if coverage.FirstInventoryObservedAt != nil || coverage.LastInventoryObservedAt != nil {
+		parts = append(parts, "inventory")
+	}
+	if coverage.FirstUsageObservedAt != nil || coverage.LastUsageObservedAt != nil {
+		parts = append(parts, "usage")
+	}
+	if coverage.FirstDirectHookObservedAt != nil || coverage.LastDirectHookObservedAt != nil {
+		parts = append(parts, "direct-hook")
+	}
+	if len(parts) == 0 {
+		return "observation-only coverage unknown"
+	}
+	return "observation-only(" + strings.Join(parts, ",") + "); lifetime activity coverage unknown"
 }
