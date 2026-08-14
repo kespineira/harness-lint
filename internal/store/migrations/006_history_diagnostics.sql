@@ -28,8 +28,8 @@ CREATE TABLE usage_event_evidence (
     FOREIGN KEY (fingerprint) REFERENCES usage_events(fingerprint)
 );
 
--- Backfill the v5 canonical source as import evidence. Existing usage rows
--- remain untouched, including their canonical fingerprint and observed time.
+-- Backfill each v5 canonical source as evidence with its existing provenance.
+-- Usage rows remain untouched, including their fingerprint and observed time.
 INSERT INTO usage_event_evidence (
     fingerprint, provenance, observed_at, source_timestamp,
     invocation_origin, source_identity
