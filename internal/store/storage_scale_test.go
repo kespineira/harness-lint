@@ -1,11 +1,9 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,27 +12,13 @@ import (
 	"github.com/kespineira/harness-lint/internal/history"
 )
 
-const storageScalePrivacySentinel = "storage-scale-raw-identity-sentinel"
-
-type storageScaleForbiddenPayload struct {
-	Prompt        string
-	Response      string
-	ToolArguments string
-	LocalPath     string
-}
-
-func storageScaleForbiddenPayloadLikeData() storageScaleForbiddenPayload {
-	return storageScaleForbiddenPayload{
-		Prompt:        "prompt containing " + storageScalePrivacySentinel,
-		Response:      "response containing " + storageScalePrivacySentinel,
-		ToolArguments: "tool arguments containing " + storageScalePrivacySentinel,
-		LocalPath:     "/private/project/" + storageScalePrivacySentinel,
-	}
-}
-
 // TestStorageSmallMetadataOnlyCorrectness keeps the storage/query contract
 // covered in normal CI. The tagged scale test below reuses the same setup and
 // assertions with 100,000 rows without making the default test suite slow.
+// Payload/privacy contracts are covered by TestImportUsagePrivacyExplicitSignalsAndInclusiveSince,
+// TestUsagePersistenceDoesNotContainRepresentativePayloadStrings,
+// TestStoreDoesNotPersistConversationOrToolPayloadColumns, and
+// TestBackupHealthyPopulatedDatabasePreservesSchemaAndEvents.
 func TestStorageSmallMetadataOnlyCorrectness(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -43,14 +27,11 @@ func TestStorageSmallMetadataOnlyCorrectness(t *testing.T) {
 	if err := seedStorageScaleCoverage(ctx, s, base); err != nil {
 		t.Fatalf("seed coverage: %v", err)
 	}
-	forbiddenPayload := storageScaleForbiddenPayloadLikeData()
 	events := metadataOnlyScaleEvents(eventCount, base)
-	assertStorageScaleMetadataOnlyInput(t, events, forbiddenPayload)
 	if err := s.InsertUsageEvents(ctx, events); err != nil {
 		t.Fatalf("InsertUsageEvents(%d): %v", eventCount, err)
 	}
 	assertStorageScaleQueries(t, ctx, s, eventCount, base)
-	assertStorageScalePrivacy(t, ctx, s, forbiddenPayload, "source", s.path)
 }
 
 func metadataOnlyScaleEvents(count int, base time.Time) []domain.UsageEvent {
@@ -66,6 +47,7 @@ func metadataOnlyScaleEvents(count int, base time.Time) []domain.UsageEvent {
 		}
 		sourceAt := monthBase.Add(time.Duration(withinMonth) * time.Second)
 		observedAt := sourceAt.Add(5 * time.Minute)
+		// Keep the scale workload visibly metadata-only with already-normalized IDs.
 		events = append(events, domain.UsageEvent{
 			ObservedAt:       observedAt,
 			SourceTimestamp:  &sourceAt,
@@ -180,102 +162,6 @@ func assertStorageScaleQueries(t *testing.T, ctx context.Context, s *Store, even
 	}
 	t.Logf("coverage plan: %s", strings.Join(coveragePlan, " | "))
 	return storageScaleQueryDurations{History: historyDuration, Monthly: monthlyDuration, Coverage: coverageDuration}
-}
-
-func assertStorageScaleMetadataOnlyInput(t *testing.T, events []domain.UsageEvent, forbidden storageScaleForbiddenPayload) {
-	t.Helper()
-	for _, value := range []string{forbidden.Prompt, forbidden.Response, forbidden.ToolArguments, forbidden.LocalPath} {
-		if !strings.Contains(value, storageScalePrivacySentinel) {
-			t.Fatalf("forbidden payload fixture = %q, want sentinel", value)
-		}
-	}
-	for index, event := range events {
-		for field, value := range map[string]string{
-			"session_id":      event.SessionID,
-			"project_id":      event.ProjectID,
-			"capability_name": event.CapabilityName,
-			"source_identity": event.SourceIdentity,
-		} {
-			if strings.Contains(value, storageScalePrivacySentinel) {
-				t.Fatalf("metadata-only event %d field %s contains forbidden payload sentinel", index, field)
-			}
-		}
-	}
-}
-
-func assertStorageScalePrivacy(t *testing.T, ctx context.Context, s *Store, forbidden storageScaleForbiddenPayload, label, path string) {
-	t.Helper()
-	if !strings.Contains(forbidden.Prompt+forbidden.Response+forbidden.ToolArguments+forbidden.LocalPath, storageScalePrivacySentinel) {
-		t.Fatalf("privacy fixture %s does not contain sentinel", label)
-	}
-	tables, err := storageTableNames(ctx, s.db)
-	if err != nil {
-		t.Fatalf("privacy table listing (%s): %v", label, err)
-	}
-	for _, table := range tables {
-		if err := assertStorageScaleTablePrivacy(ctx, s.db, table); err != nil {
-			t.Fatalf("privacy sentinel in %s table %q: %v", label, table, err)
-		}
-	}
-	if path == "" || strings.HasPrefix(path, ":memory:") {
-		return
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s database bytes: %v", label, err)
-	}
-	if bytes.Contains(contents, []byte(storageScalePrivacySentinel)) {
-		t.Fatalf("privacy sentinel appears in complete %s database bytes", label)
-	}
-}
-
-func storageTableNames(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return nil, err
-		}
-		tables = append(tables, table)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return tables, nil
-}
-
-func assertStorageScaleTablePrivacy(ctx context.Context, db *sql.DB, table string) error {
-	quotedTable := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
-	rows, err := db.QueryContext(ctx, `SELECT * FROM `+quotedTable)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	columns, err := rows.Columns()
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		values := make([]any, len(columns))
-		pointers := make([]any, len(values))
-		for index := range values {
-			pointers[index] = &values[index]
-		}
-		if err := rows.Scan(pointers...); err != nil {
-			return err
-		}
-		for _, value := range values {
-			if strings.Contains(fmt.Sprint(value), storageScalePrivacySentinel) {
-				return fmt.Errorf("sentinel found in row value")
-			}
-		}
-	}
-	return rows.Err()
 }
 
 func storageObjectCounts(ctx context.Context, db *sql.DB) (map[string]int64, error) {

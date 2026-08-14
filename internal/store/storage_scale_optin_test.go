@@ -22,9 +22,7 @@ func TestStorageScale100kMetadataOnly(t *testing.T) {
 	if err := seedStorageScaleCoverage(ctx, s, base); err != nil {
 		t.Fatalf("seed coverage: %v", err)
 	}
-	forbiddenPayload := storageScaleForbiddenPayloadLikeData()
 	events := metadataOnlyScaleEvents(eventCount, base)
-	assertStorageScaleMetadataOnlyInput(t, events, forbiddenPayload)
 	started := time.Now()
 	if err := s.InsertUsageEvents(ctx, events); err != nil {
 		t.Fatalf("InsertUsageEvents(%d): %v", eventCount, err)
@@ -54,7 +52,6 @@ func TestStorageScale100kMetadataOnly(t *testing.T) {
 	}
 
 	queryDurations := assertStorageScaleQueries(t, ctx, s, eventCount, base)
-	assertStorageScalePrivacy(t, ctx, s, forbiddenPayload, "source", sourcePath)
 
 	backupPath := filepath.Join(t.TempDir(), "storage-scale-backup.db")
 	backupStarted := time.Now()
@@ -106,6 +103,5 @@ func TestStorageScale100kMetadataOnly(t *testing.T) {
 	if backupEventCount != sourceEventCount || backupEvidenceCount != sourceEvidenceCount || backupEventCount != int64(eventCount) || backupEvidenceCount != int64(eventCount) {
 		t.Fatalf("backup row counts = usage %d/evidence %d, source = %d/%d, want %d/%d", backupEventCount, backupEvidenceCount, sourceEventCount, sourceEvidenceCount, eventCount, eventCount)
 	}
-	assertStorageScalePrivacy(t, ctx, backup, forbiddenPayload, "backup", backupPath)
 	t.Logf("storage scale: events=%d insertion=%s QueryInvocationHistory=%s QueryMonthlyInvocations=%s QueryEffectiveCoverage=%s CheckDatabase=%s Backup=%s database_size_bytes=%d status_count=%d observed_range=%s..%s check=%+v backup_rows=%d/%d query_results=asserted schema=%+v", eventCount, insertionDuration.Round(time.Millisecond), queryDurations.History.Round(time.Millisecond), queryDurations.Monthly.Round(time.Millisecond), queryDurations.Coverage.Round(time.Millisecond), checkDuration.Round(time.Millisecond), backupDuration.Round(time.Millisecond), *status.SizeBytes, status.UsageEventCount, status.OldestObservedAt.Format(time.RFC3339), status.LatestObservedAt.Format(time.RFC3339), check, backupEventCount, backupEvidenceCount, status.Schema)
 }
