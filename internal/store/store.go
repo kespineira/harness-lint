@@ -444,30 +444,70 @@ func (s *Store) InsertUsageEvents(ctx context.Context, events []domain.UsageEven
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, event := range events {
-		normalized, err := domain.NormalizeUsageEvent(event)
-		if err != nil {
-			return fmt.Errorf("validate usage event: %w", err)
-		}
-		fingerprint, err := domain.FingerprintForUsageEvent(normalized)
-		if err != nil {
-			return fmt.Errorf("fingerprint usage event: %w", err)
-		}
-		var sourceTimestamp any
-		if normalized.SourceTimestamp != nil {
-			sourceTimestamp = normalized.SourceTimestamp.Format(time.RFC3339Nano)
-		}
-		// timestamp is the legacy v4 column. Keep it populated with effective
-		// activity time for old readers while the explicit fields below remain
-		// authoritative for the current contract.
-		_, err = tx.ExecContext(ctx, `INSERT INTO usage_events(timestamp, observed_at, source_timestamp, provenance, schema_version, invocation_origin, source_identity, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO NOTHING`, normalized.EffectiveActivityTime().Format(time.RFC3339Nano), normalized.ObservedAt.Format(time.RFC3339Nano), sourceTimestamp, normalized.Provenance, normalized.SchemaVersion, normalized.InvocationOrigin, normalized.SourceIdentity, normalized.Runtime, normalized.SessionID, normalized.ProjectID, normalized.CapabilityType, normalized.CapabilityName, normalized.EventType, fingerprint)
-		if err != nil {
-			return fmt.Errorf("insert usage event: %w", err)
+		if _, err := insertUsageEventTx(ctx, tx, event); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit usage insert: %w", err)
 	}
 	return nil
+}
+
+// insertUsageEventTx writes one canonical event and its normalized evidence
+// relation. It intentionally does not update capture delivery health;
+// transcript/import backfill uses this helper through InsertUsageEvents.
+func insertUsageEventTx(ctx context.Context, tx *sql.Tx, event domain.UsageEvent) (domain.UsageEvent, error) {
+	normalized, err := domain.NormalizeUsageEvent(event)
+	if err != nil {
+		return domain.UsageEvent{}, fmt.Errorf("validate usage event: %w", err)
+	}
+	fingerprint, err := domain.FingerprintForUsageEvent(normalized)
+	if err != nil {
+		return domain.UsageEvent{}, fmt.Errorf("fingerprint usage event: %w", err)
+	}
+	normalized.Fingerprint = fingerprint
+	var sourceTimestamp any
+	if normalized.SourceTimestamp != nil {
+		sourceTimestamp = normalized.SourceTimestamp.Format(time.RFC3339Nano)
+	}
+	// timestamp is the legacy v4 column. Keep it populated with effective
+	// activity time for old readers while the explicit fields below remain
+	// authoritative for the current contract.
+	_, err = tx.ExecContext(ctx, `INSERT INTO usage_events(timestamp, observed_at, source_timestamp, provenance, schema_version, invocation_origin, source_identity, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO NOTHING`, normalized.EffectiveActivityTime().Format(time.RFC3339Nano), normalized.ObservedAt.Format(time.RFC3339Nano), sourceTimestamp, normalized.Provenance, normalized.SchemaVersion, normalized.InvocationOrigin, normalized.SourceIdentity, normalized.Runtime, normalized.SessionID, normalized.ProjectID, normalized.CapabilityType, normalized.CapabilityName, normalized.EventType, fingerprint)
+	if err != nil {
+		return domain.UsageEvent{}, fmt.Errorf("insert usage event: %w", err)
+	}
+
+	// A stable source identity proves that a retry or a second evidence path
+	// refers to the same invocation. Only then may optional source timestamp or
+	// invocation-origin fields enrich the canonical row. observed_at is never
+	// updated, so local receipt time remains authoritative for that field.
+	_, err = tx.ExecContext(ctx, `UPDATE usage_events
+	SET source_timestamp = CASE
+		WHEN source_identity <> '' AND source_identity = ? AND source_timestamp IS NULL AND ? IS NOT NULL THEN ?
+		ELSE source_timestamp
+	END,
+	invocation_origin = CASE
+		WHEN source_identity <> '' AND source_identity = ? AND invocation_origin = 'unknown' AND ? <> 'unknown' THEN ?
+		ELSE invocation_origin
+	END
+	WHERE fingerprint = ? AND source_identity <> '' AND source_identity = ?`, normalized.SourceIdentity, sourceTimestamp, sourceTimestamp, normalized.SourceIdentity, normalized.InvocationOrigin, normalized.InvocationOrigin, fingerprint, normalized.SourceIdentity)
+	if err != nil {
+		return domain.UsageEvent{}, fmt.Errorf("enrich usage event identity fields: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO usage_event_evidence(
+	fingerprint, provenance, observed_at, source_timestamp, invocation_origin, source_identity
+	) VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(fingerprint, provenance) DO UPDATE SET
+	observed_at = CASE WHEN excluded.observed_at < usage_event_evidence.observed_at THEN excluded.observed_at ELSE usage_event_evidence.observed_at END,
+	source_timestamp = COALESCE(usage_event_evidence.source_timestamp, excluded.source_timestamp),
+	invocation_origin = CASE WHEN usage_event_evidence.invocation_origin = 'unknown' AND excluded.invocation_origin <> 'unknown' THEN excluded.invocation_origin ELSE usage_event_evidence.invocation_origin END,
+	source_identity = CASE WHEN usage_event_evidence.source_identity = '' THEN excluded.source_identity ELSE usage_event_evidence.source_identity END`, fingerprint, normalized.Provenance, normalized.ObservedAt.Format(time.RFC3339Nano), sourceTimestamp, normalized.InvocationOrigin, normalized.SourceIdentity)
+	if err != nil {
+		return domain.UsageEvent{}, fmt.Errorf("record usage evidence: %w", err)
+	}
+	return normalized, nil
 }
 
 // ListUsageEvents returns events ordered by effective activity time and

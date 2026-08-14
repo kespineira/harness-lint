@@ -31,8 +31,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatus() = %v", err)
 	}
-	if status != (SchemaStatus{Current: 5, Latest: 5}) {
-		t.Fatalf("schema status = %#v, want current/latest 5", status)
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("schema status = %#v, want current/latest 6", status)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -52,8 +52,8 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatus() after reopen = %v", err)
 	}
-	if status != (SchemaStatus{Current: 5, Latest: 5}) {
-		t.Fatalf("schema status after reopen = %#v, want current/latest 5", status)
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("schema status after reopen = %#v, want current/latest 6", status)
 	}
 }
 
@@ -86,8 +86,8 @@ func TestOpenMigrationSecondRunIsNoOpForPersistedData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaStatus() after second run = %v", err)
 	}
-	if status != (SchemaStatus{Current: 5, Latest: 5}) {
-		t.Fatalf("schema status after second run = %#v, want current/latest 5", status)
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("schema status after second run = %#v, want current/latest 6", status)
 	}
 
 	capabilities, err := reopened.ListCapabilities(ctx)
@@ -489,8 +489,8 @@ func TestOpenUpgradesRepresentativeV4DatabasePreservingUsageHistory(t *testing.T
 	if err != nil {
 		t.Fatalf("SchemaStatus() after v4 upgrade: %v", err)
 	}
-	if status != (SchemaStatus{Current: 5, Latest: 5}) {
-		t.Fatalf("upgraded schema status = %#v, want current/latest 5", status)
+	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+		t.Fatalf("upgraded schema status = %#v, want current/latest 6", status)
 	}
 
 	capabilities, err := s.ListCapabilities(ctx)
@@ -1435,7 +1435,7 @@ func checkSchema(t *testing.T, s *Store) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate schema tables: %v", err)
 	}
-	want := []string{"capabilities", "current_inventory", "inventory_scans", "schema_meta", "usage_events"}
+	want := []string{"capabilities", "capture_delivery_health", "current_inventory", "inventory_scans", "schema_meta", "usage_event_evidence", "usage_events"}
 	if !reflect.DeepEqual(tables, want) {
 		sort.Strings(tables)
 		t.Fatalf("schema tables = %v, want %v", tables, want)

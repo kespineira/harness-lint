@@ -1,0 +1,360 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kespineira/harness-lint/internal/capture"
+	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
+)
+
+func TestIngestUsageEventUpdatesHealthAtomicallyAndDeduplicatesRetry(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	firstAt := time.Date(2026, 8, 14, 9, 0, 0, 0, time.UTC)
+	event := testUsageEvent(firstAt, "terminal", domain.EventInvoked)
+	event.Provenance = domain.ProvenanceHook
+	event.SourceIdentity = "hook-delivery-1"
+	if err := s.IngestUsageEvent(ctx, event); err != nil {
+		t.Fatalf("IngestUsageEvent(first): %v", err)
+	}
+	retry := event
+	retry.ObservedAt = firstAt.Add(time.Minute)
+	if err := s.IngestUsageEvent(ctx, retry); err != nil {
+		t.Fatalf("IngestUsageEvent(retry): %v", err)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents(): %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("usage events after retry = %d, want 1", len(events))
+	}
+	health, err := s.GetCaptureHealth(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("GetCaptureHealth(): %v", err)
+	}
+	if health.ConsecutiveFailures != 0 || health.RecentFailureCount != 0 || health.LastSuccessfulDelivery == nil || !health.LastSuccessfulDelivery.Equal(retry.ObservedAt) {
+		t.Fatalf("capture health after retry = %#v", health)
+	}
+	if health.LastFailedDelivery != nil || health.LastFailureKind != nil {
+		t.Fatalf("unexpected failure state after successful delivery = %#v", health)
+	}
+	if err := s.IngestUsageEvent(ctx, domain.UsageEvent{Provenance: domain.ProvenanceTranscript}); err == nil {
+		t.Fatal("transcript event accepted by direct hook ingest")
+	}
+	var evidenceCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&evidenceCount); err != nil {
+		t.Fatalf("evidence count: %v", err)
+	}
+	if evidenceCount != 1 {
+		t.Fatalf("evidence count = %d, want one hook relation", evidenceCount)
+	}
+}
+
+func TestCaptureHealthBoundedFailureThenSuccessAndPrivacySafe(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < capture.MaxConsecutiveFailures+5; i++ {
+		if err := s.RecordCaptureFailure(ctx, capture.CaptureFailure{
+			Runtime:  domain.RuntimeClaude,
+			FailedAt: base.Add(time.Duration(i) * time.Minute),
+			Kind:     capture.FailureDatabaseUnavailable,
+		}); err != nil {
+			t.Fatalf("RecordCaptureFailure(%d): %v", i, err)
+		}
+	}
+	health, err := s.GetCaptureHealth(ctx, domain.RuntimeClaude)
+	if err != nil {
+		t.Fatalf("GetCaptureHealth(): %v", err)
+	}
+	if health.ConsecutiveFailures != capture.MaxConsecutiveFailures || health.RecentFailureCount != capture.MaxConsecutiveFailures {
+		t.Fatalf("bounded failures = %#v, want max %d", health, capture.MaxConsecutiveFailures)
+	}
+	if health.LastFailedDelivery == nil || !health.LastFailedDelivery.Equal(base.Add(time.Duration(capture.MaxConsecutiveFailures+4)*time.Minute)) {
+		t.Fatalf("last failed delivery = %#v", health.LastFailedDelivery)
+	}
+	if health.LastFailureKind == nil || *health.LastFailureKind != capture.FailureDatabaseUnavailable {
+		t.Fatalf("last failure kind = %#v", health.LastFailureKind)
+	}
+	sentinel := "raw diagnostic error should never persist"
+	if err := s.RecordCaptureFailure(ctx, capture.CaptureFailure{Runtime: domain.RuntimeClaude, FailedAt: base, Kind: capture.FailureKind(sentinel)}); err == nil {
+		t.Fatal("arbitrary failure kind accepted")
+	}
+	event := testUsageEvent(base.Add(time.Hour), "terminal", domain.EventInvoked)
+	event.Provenance = domain.ProvenanceHook
+	event.Runtime = domain.RuntimeClaude
+	if err := s.IngestUsageEvent(ctx, event); err != nil {
+		t.Fatalf("successful ingest after failures: %v", err)
+	}
+	health, err = s.GetCaptureHealth(ctx, domain.RuntimeClaude)
+	if err != nil {
+		t.Fatalf("GetCaptureHealth() after success: %v", err)
+	}
+	if health.ConsecutiveFailures != 0 || health.LastFailureKind == nil || *health.LastFailureKind != capture.FailureDatabaseUnavailable {
+		t.Fatalf("failure history after success = %#v", health)
+	}
+	row, err := s.db.QueryContext(ctx, `SELECT * FROM capture_delivery_health`)
+	if err != nil {
+		t.Fatalf("query capture health: %v", err)
+	}
+	defer row.Close()
+	columns, err := row.Columns()
+	if err != nil {
+		t.Fatalf("capture health columns: %v", err)
+	}
+	values := make([]any, len(columns))
+	destinations := make([]any, len(columns))
+	for i := range values {
+		destinations[i] = &values[i]
+	}
+	if !row.Next() {
+		t.Fatal("capture health row missing")
+	}
+	if err := row.Scan(destinations...); err != nil {
+		t.Fatalf("scan capture health: %v", err)
+	}
+	for i, value := range values {
+		if strings.Contains(fmt.Sprint(value), sentinel) {
+			t.Fatalf("capture diagnostic column %q contains raw sentinel", columns[i])
+		}
+	}
+}
+
+func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	observed := time.Date(2026, 8, 14, 11, 0, 0, 0, time.UTC)
+	capability := testCapability("installed-only", observed, observed)
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, observed, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(): %v", err)
+	}
+	hook := testUsageEvent(observed.Add(time.Minute), "terminal", domain.EventInvoked)
+	hook.Provenance = domain.ProvenanceHook
+	hook.SourceIdentity = "stable-runtime-invocation"
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("IngestUsageEvent(): %v", err)
+	}
+	transcript := hook
+	transcript.Provenance = domain.ProvenanceTranscript
+	transcript.ObservedAt = observed.Add(2 * time.Minute)
+	sourceAt := observed.Add(-time.Minute)
+	transcript.SourceTimestamp = &sourceAt
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{transcript}); err != nil {
+		t.Fatalf("InsertUsageEvents(transcript): %v", err)
+	}
+	advertised := testUsageEvent(observed.Add(3*time.Minute), "terminal", domain.EventAdvertised)
+	advertised.Provenance = domain.ProvenanceTranscript
+	advertised.SessionID = "advertised-session"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{advertised}); err != nil {
+		t.Fatalf("InsertUsageEvents(advertised): %v", err)
+	}
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: domain.RuntimeCodex})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(): %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("history rows = %#v, want installed-only and usage-only keys", rows)
+	}
+	var installed, used history.Aggregate
+	for _, row := range rows {
+		switch row.CapabilityName {
+		case "installed-only":
+			installed = row
+		case "terminal":
+			used = row
+		}
+	}
+	if !installed.Installed || !reflect.DeepEqual(installed.InstalledScopes, []domain.Scope{domain.ScopeProject}) || installed.Uses != 0 {
+		t.Fatalf("installed zero-use aggregate = %#v", installed)
+	}
+	if used.Installed || used.Uses != 1 || used.InvocationUses != 1 || used.DistinctInvocationSessions != 1 {
+		t.Fatalf("usage aggregate identity counts = %#v", used)
+	}
+	if used.InvocationEvidence[domain.ProvenanceHook] != 1 || used.InvocationEvidence[domain.ProvenanceTranscript] != 1 {
+		t.Fatalf("usage evidence counts = %#v", used.InvocationEvidence)
+	}
+	if used.ObservedAdvertisedSessions == nil || *used.ObservedAdvertisedSessions != 1 {
+		t.Fatalf("advertised sessions = %#v, want known one", used.ObservedAdvertisedSessions)
+	}
+	if used.FirstObservedAt == nil || !used.FirstObservedAt.Equal(hook.ObservedAt) || used.FirstEffectiveActivityAt == nil || !used.FirstEffectiveActivityAt.Equal(sourceAt) {
+		t.Fatalf("canonical observed/effective times = %#v/%#v", used.FirstObservedAt, used.FirstEffectiveActivityAt)
+	}
+	if _, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill}); err != nil {
+		t.Fatalf("runtime/type composed filter: %v", err)
+	}
+	evidence, err := s.ListUsageEventEvidence(ctx, usedFingerprint(t, s, hook))
+	if err != nil {
+		t.Fatalf("ListUsageEventEvidence(): %v", err)
+	}
+	if len(evidence) != 2 || evidence[0].Provenance != domain.ProvenanceHook || evidence[1].Provenance != domain.ProvenanceTranscript {
+		t.Fatalf("normalized evidence = %#v", evidence)
+	}
+}
+
+func TestHistoryFallbackAndAdvertisedUnknownRemainConservative(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	first := testUsageEvent(base, "fallback", domain.EventInvoked)
+	first.Provenance = domain.ProvenanceHook
+	second := first
+	second.Provenance = domain.ProvenanceTranscript
+	second.ObservedAt = base.Add(time.Second)
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{first, second}); err != nil {
+		t.Fatalf("InsertUsageEvents(fallback): %v", err)
+	}
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{Start: base, End: base.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Uses != 2 || rows[0].DistinctInvocationSessions != 1 {
+		t.Fatalf("fallback aggregation = %#v, want two conservative uses", rows)
+	}
+	if rows[0].ObservedAdvertisedSessions != nil {
+		t.Fatalf("advertised sessions without advertised evidence = %#v, want unknown", rows[0].ObservedAdvertisedSessions)
+	}
+}
+
+func TestMonthlyHistoryUsesClosedUTCIntervalAndQueryPlanIndex(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	start := time.Date(2026, 8, 31, 23, 59, 59, 0, time.UTC)
+	end := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for index, at := range []time.Time{start, end, end.Add(time.Second)} {
+		event := testUsageEvent(at, "monthly", domain.EventInvoked)
+		event.SourceIdentity = fmt.Sprintf("monthly-%d", index)
+		if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
+			t.Fatalf("InsertUsageEvents(%d): %v", index, err)
+		}
+	}
+	monthly, err := s.QueryMonthlyInvocations(ctx, history.Query{Start: start, End: end, Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool})
+	if err != nil {
+		t.Fatalf("QueryMonthlyInvocations(): %v", err)
+	}
+	if len(monthly) != 2 || monthly[0].Uses != 1 || monthly[1].Uses != 1 || !monthly[0].Month.Equal(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)) || !monthly[1].Month.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("monthly closed-boundary rows = %#v", monthly)
+	}
+	plan, err := s.ExplainHistoryQueryPlan(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, Start: start, End: end})
+	if err != nil {
+		t.Fatalf("ExplainHistoryQueryPlan(): %v", err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "usage_events_history_filter_idx") {
+		t.Fatalf("history query plan = %q, want v6 filtered index", joined)
+	}
+}
+
+func TestHistoryAggregationHandlesMultipleRuntimesAndThousandsOfRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 14, 0, 0, 0, time.UTC)
+	const rows = 2500
+	events := make([]domain.UsageEvent, 0, rows+1)
+	for index := 0; index < rows; index++ {
+		event := testUsageEvent(base.Add(time.Duration(index)*time.Second), "bulk", domain.EventInvoked)
+		event.SessionID = fmt.Sprintf("bulk-session-%d", index%17)
+		event.SourceIdentity = fmt.Sprintf("bulk-delivery-%d", index)
+		events = append(events, event)
+	}
+	otherRuntime := testUsageEvent(base.Add(time.Hour), "bulk", domain.EventInvoked)
+	otherRuntime.Runtime = domain.RuntimeClaude
+	otherRuntime.SessionID = "claude-session"
+	otherRuntime.SourceIdentity = "claude-delivery"
+	events = append(events, otherRuntime)
+	if err := s.InsertUsageEvents(ctx, events); err != nil {
+		t.Fatalf("InsertUsageEvents(%d): %v", len(events), err)
+	}
+	rowsByRuntime, err := s.QueryInvocationHistory(ctx, history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "bulk"})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(codex): %v", err)
+	}
+	if len(rowsByRuntime) != 1 || rowsByRuntime[0].Uses != rows || rowsByRuntime[0].DistinctInvocationSessions != 17 {
+		t.Fatalf("bulk aggregate = %#v, want %d uses and 17 sessions", rowsByRuntime, rows)
+	}
+	allRows, err := s.QueryUsageHistory(ctx, history.Query{CapabilityType: domain.CapabilityTool, CapabilityName: "bulk"})
+	if err != nil {
+		t.Fatalf("QueryUsageHistory(all runtimes): %v", err)
+	}
+	if len(allRows) != 2 || allRows[0].Runtime != domain.RuntimeClaude || allRows[1].Runtime != domain.RuntimeCodex {
+		t.Fatalf("multiple-runtime history rows = %#v", allRows)
+	}
+}
+
+func TestV5MigrationBackfillsEvidenceAndRunsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v5.db")
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("seed sql.Open(): %v", err)
+	}
+	for _, name := range []string{"001_initial.sql", "002_capability_corrections.sql", "003_capability_advertisement.sql", "004_inventory_scans.sql", "005_usage_event_observations.sql"} {
+		migration, readErr := migrations.ReadFile("migrations/" + name)
+		if readErr != nil {
+			seed.Close()
+			t.Fatalf("read migration %s: %v", name, readErr)
+		}
+		if _, execErr := seed.ExecContext(ctx, string(migration)); execErr != nil {
+			seed.Close()
+			t.Fatalf("apply migration %s: %v", name, execErr)
+		}
+	}
+	event := testUsageEvent(time.Date(2026, 8, 14, 13, 0, 0, 0, time.UTC), "legacy", domain.EventInvoked)
+	if _, err := seed.ExecContext(ctx, `INSERT INTO schema_meta(key, value) VALUES ('version', '5')`); err != nil {
+		seed.Close()
+		t.Fatalf("seed schema version: %v", err)
+	}
+	if _, err := seed.ExecContext(ctx, `INSERT INTO usage_events(timestamp, observed_at, source_timestamp, provenance, schema_version, invocation_origin, source_identity, runtime, session_id, project_id, capability_type, capability_name, event_type, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ObservedAt.Format(time.RFC3339Nano), event.ObservedAt.Format(time.RFC3339Nano), nil, event.Provenance, event.SchemaVersion, event.InvocationOrigin, "", event.Runtime, event.SessionID, event.ProjectID, event.CapabilityType, event.CapabilityName, event.EventType, "legacy-v5-fingerprint"); err != nil {
+		seed.Close()
+		t.Fatalf("seed usage event: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seeded v5 db: %v", err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(v5): %v", err)
+	}
+	countEvidence := func() int {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&count); err != nil {
+			t.Fatalf("evidence count: %v", err)
+		}
+		return count
+	}
+	if count := countEvidence(); count != 1 {
+		t.Fatalf("evidence count after v5 upgrade = %d, want 1", count)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close upgraded db: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen upgraded db: %v", err)
+	}
+	defer reopened.Close()
+	var count int
+	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_event_evidence`).Scan(&count); err != nil {
+		t.Fatalf("evidence count after second migration run: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("evidence count after second migration run = %d, want 1", count)
+	}
+}
+
+func usedFingerprint(t *testing.T, s *Store, event domain.UsageEvent) string {
+	t.Helper()
+	fingerprint, err := domain.FingerprintForUsageEvent(event)
+	if err != nil {
+		t.Fatalf("fingerprint: %v", err)
+	}
+	return fingerprint
+}
