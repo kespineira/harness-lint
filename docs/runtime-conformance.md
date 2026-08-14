@@ -30,6 +30,17 @@ semantics, implementation behavior, and synthetic demonstrations. The
 matrix describes metadata-only observations. It does not retain prompts,
 tool arguments, tool results, transcript bodies, or command output.
 
+The fixture manifest is the provenance record for each synthetic set. Its
+`as_of` and `last_validated` dates bound the documentation claim;
+`source_documentation_url` and `documentation_provenance` identify the
+official release reference; `represented_event_schema` and
+`represented_config_schema` identify the narrow shape under test; and
+`release_behavior_note` records fields that may be ahead of a released
+runtime. `runtime_version` is intentionally null with
+`runtime_version_provenance.status=unknown` because CI does not execute or
+capture a live Claude Code or Codex binary. A fixture therefore proves parser
+behavior for the documented synthetic shape, not runtime-version parity.
+
 ## Conformance matrix
 
 | Signal | Claude Code | Codex | Evidence and boundary |
@@ -88,6 +99,14 @@ and policies for `valid`, `malformed`, `unknown_event`, `additive`,
 identity is `same` or `distinct`; this keeps retries separate from legitimate
 invocations while making the current fallback policy explicit.
 
+Fixture metadata is deliberately declarative. `capability_type` and
+`capability_name` state the normalized result expected from an accepted
+payload; `source_identity` says whether the documented stable delivery
+identity is present; `optional_fields` lists fields whose absence must remain
+valid; and `strip_fields` lists additive fields removed to compare normalized
+events. `identity` and `duplicate_group` describe retry/distinctness policy,
+not a claim that the runtime emitted a complete invocation ledger.
+
 Fixtures contain synthetic identifiers, paths, and `SENTINEL_*` values only.
 They contain no user prompts, proprietary code, live transcript content, or
 installed-runtime output. The sentinel values are test-only privacy guards:
@@ -104,6 +123,16 @@ runtime, that:
 - optional fields remain optional and missing identity stays conservative;
 - same-ID duplicate/retry fixtures have equal identity/fingerprint while
   distinct-ID fixtures remain distinct.
+
+The manifests also make privacy and coverage boundaries reviewable: fixtures
+contain only synthetic identifiers and `SENTINEL_*` values, parser errors and
+normalized events must not echo those values, and no fixture creates a
+continuous-capture claim. Observation-window fields in reports describe when
+this local store saw inventory, usage, or direct-hook evidence; they are not
+runtime telemetry completeness. Confirmed capture and capability-presence
+epochs are the separate basis for modeled effective coverage, while missing
+epochs leave lifetime coverage unknown. A discovered capability is therefore
+`installed` evidence only; it is not an advertised, loaded, or invoked claim.
 
 Existing runtime package tests provide the deeper discovery and transcript
 coverage; this manifest test is deliberately narrow and only locks the

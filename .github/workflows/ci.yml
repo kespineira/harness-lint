@@ -30,6 +30,15 @@ jobs:
       - name: Run tests
         run: go test -count=1 ./...
 
+      - name: Verify runtime conformance fixtures
+        run: go test -count=1 ./internal/runtime -run '^TestRuntimeConformanceFixtureManifests$'
+
+      - name: Verify migration upgrades
+        run: go test -count=1 ./internal/store -run 'TestV5MigrationBackfillsEvidenceAndRunsIdempotently|TestV6UpgradePreservesUsageProvenanceAndDoesNotBackfillEpochs'
+
+      - name: Verify public JSON regression and privacy
+        run: go test -count=1 ./internal/cli -run 'TestPublicJSONContractsAreStableAndPrivacySafe|TestDatabaseHelpAndStatusJSONAreStableAndPrivate|TestDatabaseCheckErrorAndBackupOutputs'
+
       - name: Run race tests
         run: go test -race -count=1 ./...
 
@@ -37,4 +46,7 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: go build -trimpath ./cmd/harness-lint
+        run: go build -trimpath -o "$RUNNER_TEMP/harness-lint" ./cmd/harness-lint
+
+      - name: Run isolated CLI smoke
+        run: ./scripts/isolated-smoke.sh "$RUNNER_TEMP/harness-lint"

@@ -1,10 +1,11 @@
 # Public CLI JSON schemas
 
 The JSON commands are small, versioned, metadata-only interfaces. The
-currently emitted schema version is `1`. This page describes the JSON emitted
-by `report --json`, `stale --json`, `usage --json`, and `hooks status --json`;
-the Go structs behind those commands are implementation details and are not
-the public contract.
+currently emitted versions are report/stale `2`, usage `2`, hook status `1`,
+and database status/check `1`. This page describes the JSON emitted by those
+commands; the Go structs behind them are implementation details and are not
+the public contract. `db backup` intentionally has no JSON mode because its
+output is a bounded destination/size confirmation.
 
 All timestamps in these documents are UTC strings formatted with
 `time.RFC3339Nano`. A timestamp is `null` when the corresponding observation
@@ -30,7 +31,7 @@ The top-level object is:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | Current report schema, `1`. |
+| `schema_version` | integer | Current report schema, `2`. |
 | `generated_at` | string | Analysis clock, in RFC3339Nano UTC form. |
 | `stale_after_days` | integer | Positive stale-policy threshold; default `60`. |
 | `runtimes` | array | One aggregate row for each supported runtime. |
@@ -81,6 +82,7 @@ The remaining capability fields are:
 | `evidence_sources` | Sorted distinct provenance names such as `hook`, `transcript`, and `import`. |
 | `advertised` | Observed advertised-event count for this key. |
 | `observed_advertised_sessions` | Distinct sessions for explicit advertised events. Omitted when no advertised-event evidence exists; it is not `0` in that case. |
+| `invoked_in_advertised_sessions` | Distinct invoked sessions that intersect explicit advertised sessions. Nullable for the same reason as `observed_advertised_sessions`; this is an evidence intersection, not a percentage or cost metric. |
 | `loaded` | Observed loaded-event count, independent of advertised and invoked counts. |
 | `invocation_count` | Observed invoked-event count only. |
 | `distinct_sessions` | Distinct normalized session identities among invoked events only. |
@@ -91,6 +93,7 @@ The remaining capability fields are:
 | `last_invocation_age` | Nullable duration string relative to `generated_at`; null when no invocation exists. |
 | `last_invocation_in_future` | Whether the latest effective invocation was after the analysis clock. |
 | `coverage` | Optional observation-window object; see [observation coverage](#observation-coverage). |
+| `effective_coverage` | Modeled capture/presence intersection with `status` and nullable `covered_duration`; it is `unknown` without confirmed intersection. |
 
 `advertised`, `loaded`, and `invocation_count` are intentionally independent.
 An advertised observation does not become a load or invocation; a loaded
@@ -98,9 +101,23 @@ observation does not become an invocation. `configured_advertised` and the
 per-capability `advertisement` state are configured exposure, not proof that a
 model received or used the definition.
 
+`invoked_in_advertised_sessions` is the observation-efficiency intersection:
+the number of distinct invocation sessions that also have explicit advertised
+evidence. It is not a percentage, conversion rate, token count, or runtime
+cost metric. A known zero means advertised sessions were observed but none
+contained an invocation; `null` means the advertised-session denominator was
+not observed.
+
+`DEAD` is intentionally absent from current policy output. A definition can
+be absent from one scan, have no observed event, or fall outside the local
+capture epoch without being proven dead; malformed or unavailable sources
+produce the same absence. A future completeness signal would need to prove
+that the relevant source was continuously observed before a terminal label
+could be justified.
+
 `usage_only[]` has the same aggregate evidence fields as a capability where
 applicable: `runtime`, `type`, `name`, `advertised`,
-`observed_advertised_sessions`, `loaded`, `invocation_count`,
+`observed_advertised_sessions`, `invoked_in_advertised_sessions`, `loaded`, `invocation_count`,
 `distinct_sessions`, `evidence_sources`, all eight nullable timestamp fields,
 and optional `coverage`. It has no installed/configuration fields because its
 definition is not in the current inventory. This is an explicit observation,
@@ -133,7 +150,7 @@ configuration. Its top-level shape is:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | Current usage schema, `1`. |
+| `schema_version` | integer | Current usage schema, `2`. |
 | `generated_at` | string | Query end/analysis clock, RFC3339Nano UTC. |
 | `period` | object | Closed UTC interval. |
 | `filters` | object | Normalized runtime/type filters; members are nullable. |
@@ -164,8 +181,10 @@ Each `capabilities[]` row contains:
 | `provenance` | `{ "hook": N, "transcript": N, "import": N, "sources": [...] }`; source subtotals can each include the same stable invocation when evidence arrived through multiple paths, while `uses` remains deduplicated. |
 | `advertised_observations` | Advertised-event count, independent of `uses`. |
 | `advertised_sessions` | Nullable distinct advertised-event session count. `null` means no explicit advertised-event evidence, not zero sessions. |
+| `invoked_in_advertised_sessions` | Nullable distinct-session intersection between invocation and advertised evidence; an observation-efficiency count, never a percentage. |
 | `loaded_observations` | Loaded-event count, independent of advertised and invoked counts. |
 | `observation_only_coverage` | Nullable observation-window object; it is not a completeness or continuity claim. |
+| `effective_coverage` | Modeled capture/presence intersection with `status` and nullable `covered_duration`; it is not implied by observation-only windows. |
 | `monthly` | Omitted unless `--monthly` is supplied; then it contains UTC calendar-month buckets. |
 
 With `--monthly`, every month touched by the period is present, including
@@ -194,7 +213,10 @@ object. Usage coverage always uses the six members above and may set each to
 `null`. These windows say when this local store has evidence from each path;
 they do not prove continuous collection, complete lifetime history, or true
 runtime delivery. Missing, malformed, unsupported, or uninstalled sources
-can make coverage incomplete.
+can make coverage incomplete. `effective_coverage` is a separate modeled
+field: it is the intersection of confirmed direct-capture epochs and
+capability-presence epochs, and is `unknown` when no positive intersection is
+proven. An observation window never upgrades coverage confidence by itself.
 
 ## `hooks status --json`
 
@@ -246,6 +268,46 @@ health check that reports bounded component states and capture delivery state.
 Its synthetic self-test proves local ingest/SQLite behavior, but not true
 runtime delivery when no activity has occurred.
 
+## `db status --json` and `db check --json`
+
+Database diagnostics are local-file operations and do not inspect runtime
+configuration. Both schemas are currently version `1`.
+
+`db status --json` contains:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `schema_version` | integer | Database-status schema, `1`. |
+| `generated_at` | string | Diagnostic clock, RFC3339Nano UTC. |
+| `path` | string | Selected SQLite path; operator-visible diagnostic metadata. |
+| `schema` | object | `{ "current": N, "latest": N }` migration versions. |
+| `size_bytes` | integer or null | Main database file size; null for in-memory databases. |
+| `usage_event_count` | integer | Retained canonical usage-event rows. |
+| `oldest_observed_at`, `latest_observed_at` | string or null | Local receive/observation bounds, not source occurrence bounds. |
+| `integrity_checked` | boolean | Always `false` for status; use `db check` for integrity diagnostics. |
+
+`db check --json` contains `schema_version`, `generated_at`, `healthy`,
+`quick_check`, `foreign_key_check`, `schema`, and `issues`. Each check is one
+of `ok`, `issues`, or `unavailable`; each issue contains only an allow-listed
+check name. The check is read-only and never migrates, repairs, checkpoints,
+restores, or deletes the database. A failed check exits non-zero without
+echoing SQLite details or local payloads.
+
+`db backup` has no JSON representation. It uses SQLite's Online Backup API to
+write a consistent, exclusive destination and prints only the destination and
+size. It never overwrites an existing destination and does not implement
+restore or pruning.
+
+## Compatibility diagnostics
+
+`doctor` and `hooks test` expose bounded human-readable compatibility lines,
+not a JSON contract. A detected runtime version is evaluated against the
+version facts in the conformance metadata; because this repository does not
+validate a live runtime version, the current validation basis yields
+`status=unknown`. Missing executables, command failures, and unparsable output
+are separate bounded detection states. Raw command output and errors are not
+persisted or emitted.
+
 ## Ingest input and success behavior
 
 `ingest` consumes exactly one runtime-specific metadata-only hook document on
@@ -270,3 +332,9 @@ diagnostic `resolved_path`/`error` fields for operator troubleshooting, but
 does not include configuration contents or run the configured command. A
 local report is evidence from this store, not a data export or a runtime
 billing calculation.
+
+Database status/check intentionally expose the selected local `path` and
+bounded migration/count metadata for operator diagnostics; they do not expose
+configuration contents, inventory source paths, raw event identities, or
+command output. A backup is a local copy chosen by the operator, not an
+upload or automatic retention mechanism.

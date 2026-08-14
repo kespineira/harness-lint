@@ -42,11 +42,13 @@ opening it with a newer binary.
 | `4` | Adds `inventory_scans` and `current_inventory` markers. | Historical capability rows remain; current membership is tracked separately. |
 | `5` | Adds usage-observation columns: authoritative `observed_at`, optional `source_timestamp`, `provenance`, event `schema_version`, `invocation_origin`, and `source_identity`. | The legacy `timestamp` column remains for older readers. Existing timestamps are carried into the new columns as the best available source/observed values; no direct-hook evidence is fabricated. |
 | `6` | Adds bounded `capture_delivery_health`, normalized `usage_event_evidence`, and the filtered history index used by aggregate/monthly queries. | Existing usage rows remain unchanged; one evidence relation is backfilled for each v5 usage row. No event or inventory retention cleanup occurs. |
+| `7` | Adds sparse `capture_epochs` and complete-identity `capability_presence_epochs` for modeled effective coverage. | No historical epoch is backfilled from flattened observation bounds, current inventory, or usage events; only successful post-upgrade capture/inventory observations can create intervals. |
 
-## Automatic v5 to v6 upgrade
+## Automatic v5 to v7 upgrade
 
 Opening a database whose `schema_meta.version` is `5` automatically applies
-`006_history_diagnostics.sql` and reaches schema `6`. The migration adds the
+`006_history_diagnostics.sql` and `007_coverage_epochs.sql` and reaches schema
+`7`. The migration adds the
 capture-health table and evidence relation, backfills each existing usage row
 as its existing provenance (v5 rows therefore become `import` evidence when
 that is the v5 value), and creates a composed-filter index. It preserves the
@@ -58,9 +60,12 @@ The v5 `timestamp` column remains available to old readers. Current readers
 use `observed_at` and nullable `source_timestamp`, with effective activity time
 defined as `COALESCE(source_timestamp, observed_at)`. A v5 row without a source
 timestamp remains an observed-time event after upgrade. Reopening or rerunning
-the migration is idempotent: the schema remains `6/6`, the existing row and
+the migration is idempotent: the schema remains `7/7`, the existing row and
 its one backfilled evidence relation remain intact, and no second evidence row
-is added.
+is added. Migration 7 creates empty epoch tables and indexes only; it does not
+turn legacy `first_seen`/`last_seen`, current-inventory markers, or usage
+events into capture or presence intervals. Reopening a v6 database applies
+only migration 7 and likewise leaves existing usage provenance untouched.
 
 ## Operational boundaries
 
@@ -74,6 +79,9 @@ is added.
   SQLite state, usage history, unrelated configuration, or lookalike handlers.
 - A failed migration is rolled back by the transaction. A database with a
   version newer than the binary is rejected rather than rewritten.
+- Opening a database never restores from a backup and never prunes retained
+  events, inventories, evidence relations, or epochs. Restore, deletion, and
+  retention policy remain explicit operator actions outside this binary.
 - SQLite state and runtime hook configuration are separate. Changing the
   discovery `--home` does not move the database; use `--db` or `--config-dir`
   to select state explicitly.
@@ -89,6 +97,12 @@ tool arguments or inputs, tool outputs, MCP payloads/endpoints/command
 arguments, or model output. Migration steps preserve this boundary and do not
 copy raw runtime payloads into the new diagnostic tables.
 
+`db status` reports bounded schema/count/time-range metadata without running
+integrity checks. `db check` is read-only and runs SQLite quick, foreign-key,
+and embedded-schema checks. `db backup` uses SQLite's Online Backup API and
+writes an exclusive local destination; it does not upload, restore, or prune
+the source database.
+
 ## Upgrade example
 
 For a local state file, the normal upgrade is simply to open it with the new
@@ -100,4 +114,5 @@ harness-lint report --db "$HOME/Library/Application Support/harness-lint/harness
 
 The command opens the file, applies any missing embedded migrations, and then
 renders the report. To make rollback available, copy the SQLite file first;
-the runner itself never performs a downgrade or backup deletion.
+the runner itself never performs a downgrade, restore, pruning, or backup
+deletion.

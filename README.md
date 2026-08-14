@@ -85,6 +85,7 @@ harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint context [--db PATH] [--days N] [--now RFC3339]
 harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
+harness-lint db      <status|check|backup> [--json] [--db PATH] [--config-dir PATH] [--output PATH] [--now RFC3339]
 harness-lint hooks status    [claude|codex] [--json] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint hooks test      [claude|codex] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint hooks install   [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
@@ -146,6 +147,16 @@ does not insert a usage event. The exact output states are
 for this command. The synthetic self-test proves local ingest/SQLite behavior,
 but not true runtime delivery when no activity has occurred.
 
+Database diagnostics are separate from runtime discovery. `db status` opens
+the selected SQLite file, reports schema/count/time-range metadata, and does
+not run integrity checks. `db check` runs read-only SQLite quick, foreign-key,
+and embedded-schema checks; it never migrates, repairs, checkpoints, or
+deletes data. `db backup` creates a consistent SQLite Online Backup API copy;
+`--output PATH` selects an exclusive destination, while omitting it creates a
+timestamped file under `<db-directory>/backups/`. Backups never overwrite an
+existing destination, and there is no `restore` command or automatic backup
+pruning.
+
 Command responsibilities:
 
 - `scan` refreshes each runtime's current inventory and imports usage history.
@@ -159,13 +170,15 @@ Command responsibilities:
 - `context` prints configured baseline and on-load/body measurement summaries,
   keeping metadata and body semantics separate.
 - `stale` prints the same capability evidence focused on `KEEP`, `REVIEW`,
-  `STALE`, and `DEAD` classifications. A definition is stale only when its
-  last loaded/invoked observation is older than the threshold; equality is
-  still `KEEP`. `DEAD` is reserved for a future completeness signal and is
-  not inferred from absent events.
+  and `STALE` classifications. A definition is stale only when its last
+  loaded/invoked observation is older than the threshold; equality is still
+  `KEEP`. `DEAD` is reserved for a future completeness signal: an absent
+  event, source, or scan cannot prove terminal non-use.
 - `doctor` performs discovery and prints malformed, duplicate, broken-path,
   and unresolved-command findings without opening or creating the SQLite
   database.
+- `db status`, `db check`, and `db backup` operate only on the selected local
+  SQLite file; they do not inspect runtime configuration or start commands.
 
 Representative output shape (the zero-inventory form is also a useful smoke
 test):
@@ -312,6 +325,14 @@ it is not an observed-event count. The per-capability `exposure=...` field is
 the configured exposure state, so these values must not be collapsed into a
 single notion of “used”.
 
+The `invoked_in_advertised_sessions` value is an observation-efficiency
+intersection: the number of distinct invocation sessions that also have an
+explicit advertised observation in the selected evidence. It is not a
+percentage, conversion rate, or context-cost estimate. It is `unknown`
+(`null` in JSON) when advertised-session evidence is absent; a known zero
+means advertised sessions were observed but none of those sessions contained
+an invocation.
+
 ## Inventory and usage sources
 
 The adapters read documented local file locations and retain only normalized
@@ -407,6 +428,13 @@ unsupported cases are recorded in the [runtime conformance matrix](docs/runtime-
 That matrix is the conformance reference; this README does not claim Claude
 Code/Codex telemetry parity.
 
+Compatibility diagnostics are deliberately conservative. `doctor` and
+`hooks test` may report a detected local runtime version, but the current
+validation basis is the dated synthetic conformance fixture set and no live
+runtime version is considered validated. Consequently a detected version is
+normally `status=unknown`, while missing executables, failed commands, or
+unparseable output are bounded diagnostics rather than compatibility proof.
+
 ## Privacy and measurement contract
 
 The SQLite schema is metadata-only. Retained fields can include runtime,
@@ -451,16 +479,25 @@ event was observed. It is not reported as zero: zero would assert that an
 advertised event occurred in zero sessions. See the [public JSON schema
 reference](docs/cli-json-schemas.md) for the command-specific nullability.
 
+Capability presence is also distinct from event history. A successful scan
+opens a presence epoch for each discovered definition, retaining its complete
+runtime/type/name/scope/source identity; an empty or failed scan does not
+backfill a historical interval. Confirmed direct hook delivery opens a
+separate capture epoch. Modeled effective coverage is only the intersection
+of those confirmed epochs, and observation windows alone never establish
+continuity or lifetime completeness. This is why `coverage_confidence` can
+remain `unknown` even when events exist.
+
 ## JSON contracts and examples
 
-`report --json` and `stale --json` emit versioned objects with
+`report --json` and `stale --json` emit versioned schema-v2 objects with
 `schema_version`, `generated_at`, `stale_after_days`, `runtimes`,
 `capabilities`, and (for `report`) `usage_only` and `findings`. Arrays are
 present as `[]` when empty. A privacy-safe abbreviated report looks like:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-08-14T12:00:00Z",
   "stale_after_days": 60,
   "runtimes": [{"runtime":"codex","installed":1,"advertised":0,"loaded":0,"invoked":1,"configured_advertised":1,"invoked_last_30d":1,"no_activity_observed":0,"usage_events":1}],
@@ -470,7 +507,7 @@ present as `[]` when empty. A privacy-safe abbreviated report looks like:
 }
 ```
 
-`hooks status --json` emits `schema_version`, `generated_at`, and one runtime
+`hooks status --json` emits schema-v1 `schema_version`, `generated_at`, and one runtime
 object per selected runtime. Each object includes `status`, `config_path`,
 `managed_entries`, `binary` (`name`, `resolved`, optional diagnostic path or
 error), `inline_hooks`, `trust_review`, and `warnings`. A missing executable
@@ -496,12 +533,14 @@ and Codex roots described above; changing `--home` does not move the
 database.
 
 SQLite migrations are embedded, numbered, and forward-only. Opening an older
-database applies the missing migrations in order. A v5 database upgrades to v6
-automatically: existing inventory and usage rows remain, v5 usage rows gain
-one backfilled evidence relation each, and the legacy `timestamp` column is
-retained for old readers. There is no automatic downgrade or remote migration
-service; copy a state file before an operational upgrade when rollback of
-local state matters. See [SQLite migration architecture](docs/migration-architecture.md)
+database applies the missing migrations in order. A v5 database upgrades to
+v7 automatically: v6 backfills one normalized evidence relation per existing
+usage row, and v7 adds empty capture/presence epoch tables without fabricating
+historical epochs. Existing inventory, usage rows, fingerprints, and the
+legacy `timestamp` column remain available to old readers. There is no
+automatic downgrade or remote migration service; copy a state file before an
+operational upgrade when rollback of local state matters. See [SQLite
+migration architecture](docs/migration-architecture.md)
 for the runner invariants and preservation boundaries.
 
 The MVP has no automatic event retention, pruning, or destructive cleanup
@@ -550,6 +589,15 @@ the host `os.UserConfigDir`, and local runtime conventions; other operating
 systems may require path/layout validation. The current MVP intentionally
 supports only Claude Code and Codex adapters.
 
+## Known limitations
+
+Known limitations include best-effort discovery and transcript import, no
+direct-hook source timestamp in the current runtime payloads, no Claude/Codex
+telemetry parity, no proof of runtime trust or UI review decisions, and no
+proof that a missing event means non-use. The local store is intentionally
+daemonless: there is no server, scheduler, remote service, restore workflow,
+or automatic retention/pruning policy.
+
 ## Verification
 
 Run the repository checks:
@@ -563,29 +611,21 @@ go vet ./...
 go build -trimpath ./cmd/harness-lint
 ```
 
-The following practical smokes exercise every command in a fresh temporary
-tree (each `:memory:` invocation is independent):
+The following practical smoke exercises every required command in one fresh
+temporary tree and uses only temporary HOME/config/SQLite paths:
 
 ```sh
-m2_smoke_root="$(mktemp -d)"
-mkdir -p "$m2_smoke_root/home" "$m2_smoke_root/project"
-go build -trimpath -o "$m2_smoke_root/harness-lint" ./cmd/harness-lint
-PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" --help
-PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks --help
-PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks status --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
-PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks install --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
-PATH="$m2_smoke_root:$PATH" "$m2_smoke_root/harness-lint" hooks uninstall --dry-run --home "$m2_smoke_root/home" --codex-home "$m2_smoke_root/home/.codex" --claude-config "$m2_smoke_root/home/.claude"
-"$m2_smoke_root/harness-lint" scan --db :memory: --home "$m2_smoke_root/home" --project "$m2_smoke_root/project" --now 2026-08-13T15:00:00Z
-"$m2_smoke_root/harness-lint" usage --db :memory: --days 90 --now 2026-08-13T15:00:00Z
-"$m2_smoke_root/harness-lint" report --db :memory: --now 2026-08-13T15:00:00Z
-"$m2_smoke_root/harness-lint" context --db :memory: --now 2026-08-13T15:00:00Z
-"$m2_smoke_root/harness-lint" stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
-"$m2_smoke_root/harness-lint" doctor --home "$m2_smoke_root/home" --project "$m2_smoke_root/project" --now 2026-08-13T15:00:00Z
+smoke_binary_root="$(mktemp -d)"
+trap 'rm -rf "$smoke_binary_root"' EXIT
+go build -trimpath -o "$smoke_binary_root/harness-lint" ./cmd/harness-lint
+./scripts/isolated-smoke.sh "$smoke_binary_root/harness-lint"
 ```
 
-Use a fresh temporary directory and put the built binary on that test
-process's `PATH` for an actual install/uninstall smoke. Never aim those
-commands at live Claude or Codex configuration during automated verification.
+The script runs help, scan, hooks status/test, usage (normal, custom days,
+monthly, and JSON), stale (normal and JSON), context, doctor, and database
+status/check/backup. It must receive the built binary path; it creates and
+removes its own disposable tree and never targets live Claude or Codex
+configuration.
 
 ## License
 
