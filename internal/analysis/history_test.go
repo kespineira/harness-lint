@@ -70,16 +70,18 @@ func TestAnalyzeHistoryLongPositiveCoverageWithZeroUsesRemainsReview(t *testing.
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	capability := testCapability("long-positive-zero-use")
 	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	positiveDuration := 3 * 365 * 24 * time.Hour
 	aggregate := history.Aggregate{
 		Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name,
-		EffectiveCoverage: &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now.Add(-7 * 24 * time.Hour), End: now.Add(time.Hour)}}},
+		EffectiveCoverage: &history.EffectiveCoverage{Key: key, Status: history.CoveragePartial, Intervals: []history.Interval{{Start: now.Add(-positiveDuration), End: now.Add(time.Hour)}}},
 	}
 	report, err := AnalyzeHistory([]domain.Capability{capability}, []history.Aggregate{aggregate}, DefaultConfig(), now)
 	if err != nil {
 		t.Fatalf("AnalyzeHistory() error = %v", err)
 	}
 	evidence := report.Capabilities[0]
-	if evidence.Classification != REVIEW || evidence.Classification == DEAD || !strings.Contains(evidence.Basis, "modeled coverage status=partial duration=168h0m0s") {
+	wantCoverage := "modeled coverage status=partial duration=" + positiveDuration.String()
+	if evidence.Classification != REVIEW || evidence.Classification == DEAD || !strings.Contains(evidence.Basis, wantCoverage) {
 		t.Fatalf("long positive coverage with zero uses = %q/%q, want partial coverage and REVIEW", evidence.Classification, evidence.Basis)
 	}
 }
