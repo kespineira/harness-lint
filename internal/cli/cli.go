@@ -19,11 +19,8 @@ type Options struct {
 	CWD         string
 	ProjectRoot string
 	ConfigDir   string
-	// DataDir is the local data root used by artifact-producing commands.
-	// Injecting it keeps database backups hermetic in tests.
-	DataDir  string
-	Now      func() time.Time
-	LookPath func(string) (string, error)
+	Now         func() time.Time
+	LookPath    func(string) (string, error)
 
 	// VersionResolver and VersionRunner are used only by low-frequency
 	// doctor/hooks-test diagnostics. They are deliberately absent from the

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -399,7 +398,6 @@ type commandConfig struct {
 	now             time.Time
 	days            int
 	json            bool
-	dataDir         string
 	lookPath        func(string) (string, error)
 	versionResolver compatibility.ExecutableResolver
 	versionRunner   compatibility.CommandRunner
@@ -407,7 +405,7 @@ type commandConfig struct {
 
 // resolveDBConfig is intentionally narrower than resolveConfig. Database
 // diagnostics and backups do not inspect HOME, project trees, or runtime
-// configuration, and backup's data root is explicitly injectable.
+// configuration.
 func resolveDBConfig(options Options, flags parsedFlags) (commandConfig, error) {
 	currentDir, err := resolveCurrentDirectory(options)
 	if err != nil {
@@ -449,35 +447,7 @@ func resolveDBConfig(options Options, flags parsedFlags) (commandConfig, error) 
 	if now.IsZero() {
 		return commandConfig{}, errors.New("observation clock returned zero time")
 	}
-	dataDir := ""
-	if flags.dbAction == "backup" {
-		dataDir = options.DataDir
-		if dataDir == "" {
-			dataDir, err = userDataDirectory()
-			if err != nil {
-				return commandConfig{}, errors.New("resolve user data directory")
-			}
-		}
-		dataDir, err = absolutePath(dataDir, currentDir)
-		if err != nil {
-			return commandConfig{}, errors.New("resolve data directory")
-		}
-	}
-	return commandConfig{dbPath: dbPath, currentDir: currentDir, now: now.UTC(), json: flags.json, dataDir: dataDir}, nil
-}
-
-func userDataDirectory() (string, error) {
-	if value := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); value != "" {
-		return value, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if runtime.GOOS == "darwin" {
-		return filepath.Join(home, "Library", "Application Support"), nil
-	}
-	return filepath.Join(home, ".local", "share"), nil
+	return commandConfig{dbPath: dbPath, currentDir: currentDir, now: now.UTC(), json: flags.json}, nil
 }
 
 func resolveConfig(options Options, flags parsedFlags) (commandConfig, error) {

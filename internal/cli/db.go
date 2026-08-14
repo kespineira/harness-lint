@@ -16,7 +16,7 @@ import (
 )
 
 // DatabaseStatusSchemaVersion is the public JSON schema version for db
-// status. The DTO intentionally omits the local database path and all event
+// status. The DTO includes only diagnostic metadata and omits all event
 // identifiers or payloads.
 const DatabaseStatusSchemaVersion = 1
 
@@ -32,6 +32,7 @@ type DatabaseSchemaDTO struct {
 type DatabaseStatusDocument struct {
 	SchemaVersion    int               `json:"schema_version"`
 	GeneratedAt      string            `json:"generated_at"`
+	Path             string            `json:"path"`
 	Schema           DatabaseSchemaDTO `json:"schema"`
 	SizeBytes        *int64            `json:"size_bytes"`
 	UsageEventCount  int64             `json:"usage_event_count"`
@@ -89,8 +90,8 @@ func runDatabaseStatus(ctx context.Context, db *store.Store, config commandConfi
 	if document.SizeBytes != nil {
 		size = strconv.FormatInt(*document.SizeBytes, 10)
 	}
-	fmt.Fprintf(out, "db status schema-current=%d schema-latest=%d size-bytes=%s usage-events=%d oldest-observed=%s latest-observed=%s integrity=not-checked\n",
-		document.Schema.Current, document.Schema.Latest, size, document.UsageEventCount,
+	fmt.Fprintf(out, "db status path=%s schema-current=%d schema-latest=%d size-bytes=%s usage-events=%d oldest-observed=%s latest-observed=%s integrity=not-checked\n",
+		document.Path, document.Schema.Current, document.Schema.Latest, size, document.UsageEventCount,
 		statusTimestamp(document.OldestObservedAt), statusTimestamp(document.LatestObservedAt))
 	return nil
 }
@@ -124,53 +125,75 @@ func runDatabaseCheck(ctx context.Context, db *store.Store, config commandConfig
 }
 
 func runDatabaseBackup(ctx context.Context, db *store.Store, config commandConfig, flags parsedFlags, out io.Writer) error {
-	destination := ""
 	if flags.outputSet {
 		var err error
-		destination, err = absolutePath(flags.output, config.currentDir)
+		destination, err := absolutePath(flags.output, config.currentDir)
 		if err != nil || strings.TrimSpace(destination) == "" {
 			return errors.New("resolve backup output")
 		}
-	} else {
-		backupDir := filepath.Join(config.dataDir, "harness-lint", "backups")
-		if err := os.MkdirAll(backupDir, 0o700); err != nil {
-			return errors.New("create backup directory")
+		if err := db.Backup(ctx, destination); err != nil {
+			return databaseBackupError(err)
 		}
-		destination = nextBackupDestination(backupDir, config.now)
+		return writeDatabaseBackupResult(out, destination)
 	}
-	if err := db.Backup(ctx, destination); err != nil {
-		switch {
-		case errors.Is(err, store.ErrBackupDestinationExists):
-			return errors.New("backup destination exists")
-		case errors.Is(err, store.ErrBackupSourceDestinationSame):
-			return errors.New("backup destination is the source database")
-		case errors.Is(err, store.ErrBackupDestinationParent):
-			return errors.New("backup destination parent is unavailable")
-		default:
-			return errors.New("create database backup")
+
+	if !isFilesystemDatabase(config.dbPath) {
+		return errors.New("default backup requires a filesystem database")
+	}
+	backupDir := filepath.Join(filepath.Dir(config.dbPath), "backups")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return errors.New("create backup directory")
+	}
+	base := filepath.Join(backupDir, "harness-lint-"+config.now.UTC().Format("20060102T150405Z"))
+	for attempt := 0; attempt < maxDefaultBackupAttempts; attempt++ {
+		destination := base + ".db"
+		if attempt > 0 {
+			destination = base + "-" + strconv.Itoa(attempt) + ".db"
 		}
+		if err := db.Backup(ctx, destination); err != nil {
+			if errors.Is(err, store.ErrBackupDestinationExists) {
+				continue
+			}
+			return databaseBackupError(err)
+		}
+		return writeDatabaseBackupResult(out, destination)
 	}
-	fmt.Fprintf(out, "db backup output=%s\n", destination)
+	return errors.New("too many database backup destinations")
+}
+
+const maxDefaultBackupAttempts = 100
+
+func databaseBackupError(err error) error {
+	switch {
+	case errors.Is(err, store.ErrBackupDestinationExists):
+		return errors.New("backup destination exists")
+	case errors.Is(err, store.ErrBackupSourceDestinationSame):
+		return errors.New("backup destination is the source database")
+	case errors.Is(err, store.ErrBackupDestinationParent):
+		return errors.New("backup destination parent is unavailable")
+	default:
+		return errors.New("create database backup")
+	}
+}
+
+func writeDatabaseBackupResult(out io.Writer, destination string) error {
+	info, err := os.Stat(destination)
+	if err != nil {
+		return errors.New("read database backup size")
+	}
+	fmt.Fprintf(out, "db backup output=%s size-bytes=%d\n", destination, info.Size())
 	return nil
 }
 
-func nextBackupDestination(dir string, now time.Time) string {
-	base := filepath.Join(dir, "harness-lint-"+now.UTC().Format("20060102T150405Z"))
-	for index := 0; ; index++ {
-		name := base + ".db"
-		if index > 0 {
-			name = base + "-" + strconv.Itoa(index) + ".db"
-		}
-		if _, err := os.Stat(name); errors.Is(err, os.ErrNotExist) {
-			return name
-		}
-	}
+func isFilesystemDatabase(path string) bool {
+	return path != ":memory:" && !strings.HasPrefix(path, "file:")
 }
 
 func databaseStatusDocument(status store.DatabaseStatus, now time.Time) DatabaseStatusDocument {
 	return DatabaseStatusDocument{
 		SchemaVersion:    DatabaseStatusSchemaVersion,
 		GeneratedAt:      now.UTC().Format(time.RFC3339Nano),
+		Path:             status.Path,
 		Schema:           DatabaseSchemaDTO{Current: status.Schema.Current, Latest: status.Schema.Latest},
 		SizeBytes:        status.SizeBytes,
 		UsageEventCount:  status.UsageEventCount,

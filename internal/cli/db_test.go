@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,10 @@ func TestDatabaseHelpAndStatusJSONAreStableAndPrivate(t *testing.T) {
 	if document.SchemaVersion != DatabaseStatusSchemaVersion || document.UsageEventCount != 0 || document.IntegrityChecked || document.Schema.Current != document.Schema.Latest {
 		t.Fatalf("empty status document = %#v", document)
 	}
-	if strings.Contains(stdout.String(), "private-status-sentinel") || strings.Contains(stderr.String(), "private-status-sentinel") {
+	if document.Path != dbPath {
+		t.Fatalf("status path = %q, want %q", document.Path, dbPath)
+	}
+	if strings.Contains(stdout.String(), "session-private-sentinel") || strings.Contains(stdout.String(), "project-private-sentinel") || strings.Contains(stdout.String(), "PROMPT_SENTINEL") || strings.Contains(stderr.String(), "private-status-sentinel") {
 		t.Fatalf("status leaked private sentinel: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
@@ -52,10 +56,10 @@ func TestDatabaseStatusPopulatedAndCheckHealthy(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"db", "status", "--db", dbPath}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("populated status: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "usage-events=1") || !strings.Contains(stdout.String(), "integrity=not-checked") {
+	if !strings.Contains(stdout.String(), "path="+dbPath) || !strings.Contains(stdout.String(), "usage-events=1") || !strings.Contains(stdout.String(), "integrity=not-checked") {
 		t.Fatalf("populated status = %q", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "private-event-sentinel") {
+	if strings.Contains(stdout.String(), "private-event-sentinel") || strings.Contains(stdout.String(), "session-private-sentinel") || strings.Contains(stdout.String(), "project-private-sentinel") || strings.Contains(stdout.String(), "PROMPT_SENTINEL") {
 		t.Fatalf("status leaked event sentinel: %q", stdout.String())
 	}
 	stdout.Reset()
@@ -79,6 +83,8 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 	dbPath := filepath.Join(root, "state", "source.db")
 	seedDatabase(t, dbPath, "backup-private-sentinel")
 	options := databaseTestOptions(root)
+	xdgData := filepath.Join(root, "xdg-data")
+	t.Setenv("XDG_DATA_HOME", xdgData)
 	var stdout, stderr bytes.Buffer
 	badDB := filepath.Join(root, "state", "invalid-private-sentinel.db")
 	if err := os.WriteFile(badDB, []byte("not sqlite"), 0o600); err != nil {
@@ -97,6 +103,13 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 		t.Fatalf("explicit backup: %v", err)
 	}
 	assertOpensAsStore(t, explicit, 1)
+	explicitInfo, err := os.Stat(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "size-bytes="+strconv.FormatInt(explicitInfo.Size(), 10)) {
+		t.Fatalf("backup output = %q, want final size %d", stdout.String(), explicitInfo.Size())
+	}
 	if !strings.Contains(stdout.String(), explicit) {
 		t.Fatalf("backup output = %q, want explicit destination", stdout.String())
 	}
@@ -120,13 +133,37 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"db", "backup", "--db", dbPath}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("default backup: %v", err)
 	}
-	backups, err := filepath.Glob(filepath.Join(root, "data", "harness-lint", "backups", "*.db"))
+	backups, err := filepath.Glob(filepath.Join(root, "state", "backups", "*.db"))
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("default backups = %v, err=%v output=%q", backups, err, stdout.String())
 	}
 	assertOpensAsStore(t, backups[0], 1)
+	defaultInfo, err := os.Stat(backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "size-bytes="+strconv.FormatInt(defaultInfo.Size(), 10)) {
+		t.Fatalf("default backup output = %q, want final size %d", stdout.String(), defaultInfo.Size())
+	}
+	stdout.Reset()
+	if err := ExecuteWithOptions(options, []string{"db", "backup", "--db", dbPath}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("colliding default backup: %v", err)
+	}
+	if !strings.Contains(stdout.String(), filepath.Join(root, "state", "backups", "harness-lint-20260814T120000Z-1.db")) {
+		t.Fatalf("colliding default backup output = %q", stdout.String())
+	}
 	if _, err := os.Stat(filepath.Join(root, "home")); !os.IsNotExist(err) {
 		t.Fatalf("backup mutated injected HOME: %v", err)
+	}
+	if _, err := os.Stat(xdgData); !os.IsNotExist(err) {
+		t.Fatalf("backup mutated XDG data directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "data")); !os.IsNotExist(err) {
+		t.Fatalf("backup created obsolete data directory: %v", err)
+	}
+
+	if err := ExecuteWithOptions(options, []string{"db", "backup", "--db", ":memory:"}, nil, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "filesystem database") {
+		t.Fatalf("in-memory default backup error = %v", err)
 	}
 }
 
@@ -134,7 +171,6 @@ func databaseTestOptions(root string) Options {
 	return Options{
 		CWD:       root,
 		ConfigDir: filepath.Join(root, "config"),
-		DataDir:   filepath.Join(root, "data"),
 		Home:      filepath.Join(root, "home"),
 		Now:       func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) },
 	}
