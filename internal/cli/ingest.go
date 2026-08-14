@@ -35,7 +35,7 @@ func runIngest(ctx context.Context, config commandConfig, flags parsedFlags, std
 		return errors.New("--event cannot be empty")
 	}
 	if flags.eventSet && !validIngestEvent(runtimeName, wantedEvent) {
-		return fmt.Errorf("unknown event for %s hook runtime", runtimeDisplayName(runtimeName))
+		return recordIngestFailure(ctx, config, runtimeName, capture.FailureUnsupportedEvent)
 	}
 
 	payload, err := readIngestPayload(stdin)
@@ -56,7 +56,7 @@ func runIngest(ctx context.Context, config commandConfig, flags parsedFlags, std
 
 	db, err := openStore(config)
 	if err != nil {
-		return safeIngestError(runtimeName, classifyStoreError(err), false)
+		return safeIngestError(runtimeName, classifyStoreError(err), false, true)
 	}
 	defer db.Close()
 	if err := db.IngestUsageEvent(ctx, event); err != nil {
@@ -66,9 +66,9 @@ func runIngest(ctx context.Context, config commandConfig, flags parsedFlags, std
 			FailedAt: observedAt,
 			Kind:     kind,
 		}); recordErr != nil {
-			return safeIngestError(runtimeName, classifyStoreError(recordErr), false)
+			return safeIngestError(runtimeName, classifyStoreError(recordErr), false, false)
 		}
-		return safeIngestError(runtimeName, kind, true)
+		return safeIngestError(runtimeName, kind, true, false)
 	}
 	return nil
 }
@@ -81,7 +81,7 @@ func runIngest(ctx context.Context, config commandConfig, flags parsedFlags, std
 func recordIngestFailure(ctx context.Context, config commandConfig, runtimeName domain.Runtime, kind capture.FailureKind) error {
 	db, err := openStore(config)
 	if err != nil {
-		return safeIngestError(runtimeName, kind, false)
+		return safeIngestError(runtimeName, kind, false, true)
 	}
 	defer db.Close()
 	if err := db.RecordCaptureFailure(ctx, capture.CaptureFailure{
@@ -89,13 +89,16 @@ func recordIngestFailure(ctx context.Context, config commandConfig, runtimeName 
 		FailedAt: config.now.UTC(),
 		Kind:     kind,
 	}); err != nil {
-		return safeIngestError(runtimeName, classifyStoreError(err), false)
+		return safeIngestError(runtimeName, classifyStoreError(err), false, false)
 	}
-	return safeIngestError(runtimeName, kind, true)
+	return safeIngestError(runtimeName, kind, true, false)
 }
 
-func safeIngestError(runtimeName domain.Runtime, kind capture.FailureKind, recorded bool) error {
+func safeIngestError(runtimeName domain.Runtime, kind capture.FailureKind, recorded, databaseUnavailable bool) error {
 	message := "ingest " + runtimeDisplayName(runtimeName) + " hook: " + ingestFailureMessage(kind)
+	if databaseUnavailable && kind != capture.FailureDatabaseUnavailable {
+		message += "; database unavailable"
+	}
 	if !recorded {
 		message += "; capture health was not recorded"
 	}

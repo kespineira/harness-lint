@@ -103,7 +103,6 @@ func TestExecuteIngestRejectsUnsafeInvocationWithoutReadingPayload(t *testing.T)
 		want string
 	}{
 		{name: "unknown runtime", args: []string{"ingest", "--runtime", "other", "--db", dbPath}, want: "unknown runtime"},
-		{name: "unknown event", args: []string{"ingest", "--runtime", "codex", "--event", "SessionStart", "--db", dbPath}, want: "unknown event"},
 		{name: "now override", args: []string{"ingest", "--runtime", "codex", "--now", "2026-08-14T12:00:00Z", "--db", dbPath}, want: "does not accept --now"},
 		{name: "marker", args: []string{"ingest", "--runtime", "codex", "--managed-by", "wrong", "--db", dbPath}, want: "unsupported --managed-by"},
 	}
@@ -121,6 +120,39 @@ func TestExecuteIngestRejectsUnsafeInvocationWithoutReadingPayload(t *testing.T)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Fatalf("invalid ingest invocation created database: %v", err)
+	}
+}
+
+func TestExecuteIngestUnknownEventFlagRecordsUnsupportedEvent(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "state", "harness-lint.db")
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	var stdout, stderr bytes.Buffer
+	err := ExecuteWithOptions(Options{Now: func() time.Time { return now }}, []string{"ingest", "--runtime", "codex", "--event", "SessionStart", "--db", dbPath}, strings.NewReader(`{"prompt":"PROMPT_SENTINEL"}`), &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "unsupported event") {
+		t.Fatalf("unknown event error = %v, want unsupported event", err)
+	}
+	if strings.Contains(err.Error(), "PROMPT_SENTINEL") || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("unknown event leaked payload/output: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	health, err := db.GetCaptureHealth(context.Background(), domain.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.ConsecutiveFailures != 1 || health.LastFailureKind == nil || *health.LastFailureKind != capture.FailureUnsupportedEvent {
+		t.Fatalf("unknown event health = %#v, want one unsupported_event failure", health)
+	}
+	events, err := db.ListUsageEvents(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("unknown event wrote usage events: %#v", events)
 	}
 }
 
@@ -364,8 +396,8 @@ func TestExecuteIngestUnavailableDatabaseReturnsSafeError(t *testing.T) {
 	sentinel := `{"hook_event_name":"PostToolUse","prompt":"PROMPT_SENTINEL","tool_input":{"command":"COMMAND_SENTINEL"}`
 	var stdout, stderr bytes.Buffer
 	err := ExecuteWithOptions(Options{Now: func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }}, []string{"ingest", "--runtime", "codex", "--db", dbPath}, strings.NewReader(sentinel), &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "malformed payload") {
-		t.Fatalf("unavailable database error = %v, want safe malformed payload error", err)
+	if err == nil || !strings.Contains(err.Error(), "malformed payload") || !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf("unavailable database error = %v, want malformed payload and database unavailable", err)
 	}
 	if strings.Contains(err.Error(), "PROMPT_SENTINEL") || strings.Contains(err.Error(), "COMMAND_SENTINEL") || stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Fatalf("unavailable database leaked data/output: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())

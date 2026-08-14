@@ -1,16 +1,14 @@
 // Package health evaluates direct-hook readiness without invoking a runtime.
 //
-// Health is deliberately a read-only, runtime-neutral diagnostic boundary. It
-// inspects structural hook status, the executable lookup result, database
-// schema/self-test state, and coarse delivery observations. It never receives
-// or stores hook payloads, parser errors, commands, prompts, or tool output.
+// The package is a read-only, runtime-neutral diagnostic boundary. It inspects
+// structural hook status, executable resolution, database schema/self-test
+// state, and coarse delivery observations; it never receives or stores hook
+// payloads, parser errors, commands, prompts, or tool output.
 package health
 
 import (
 	"context"
 	"errors"
-	"strings"
-	"time"
 
 	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
@@ -27,14 +25,6 @@ const (
 	Degraded State = "degraded"
 	Broken   State = "broken"
 	Unknown  State = "unknown"
-
-	// State-prefixed aliases keep call sites readable when several state enums
-	// are in scope while preserving the concise canonical values above.
-	StateHealthy  = Healthy
-	StateIdle     = Idle
-	StateDegraded = Degraded
-	StateBroken   = Broken
-	StateUnknown  = Unknown
 )
 
 func (s State) Valid() bool {
@@ -46,8 +36,8 @@ func (s State) Valid() bool {
 	}
 }
 
-// ComponentState describes one bounded readiness check. Values are stable
-// categories only; component reports never retain source error text.
+// ComponentState is a bounded category for one readiness check. Reports do
+// not retain source errors, paths, or untrusted input.
 type ComponentState string
 
 const (
@@ -65,19 +55,14 @@ const (
 	ComponentUnknown     ComponentState = "unknown"
 )
 
-// Check is a privacy-safe component result. It intentionally has no Detail,
-// Error, Path, or source-data field.
+// Check is a privacy-safe component result.
 type Check struct {
 	State ComponentState
 }
 
-func (c Check) OK() bool { return c.State == ComponentOK || c.State == ComponentNone }
-
-// Components groups the independent checks used to derive the aggregate
-// state. Config and Hooks are both exposed: Config describes the file's
-// existence/shape, while Hooks describes the structural status reported by
-// the manager. ManagedEntries and Executable remain separate so callers can
-// distinguish incomplete ownership from a missing PATH command.
+// Components exposes independent checks so callers can distinguish missing
+// or malformed hook configuration, incomplete ownership, executable lookup,
+// database availability, schema, self-test, and delivery state.
 type Components struct {
 	Config         Check
 	Hooks          Check
@@ -89,9 +74,8 @@ type Components struct {
 	Delivery       Check
 }
 
-// Report is the complete privacy-safe health result. Delivery contains only
-// bounded timestamps, runtime, failure count, and the allow-listed failure
-// kind from capture.DeliveryHealth.
+// Report is the privacy-safe health result. Delivery contains only bounded
+// timestamps, runtime, failure count, and an allow-listed failure kind.
 type Report struct {
 	Runtime    domain.Runtime
 	State      State
@@ -99,59 +83,20 @@ type Report struct {
 	Delivery   capture.DeliveryHealth
 }
 
-// Result and Health are compatibility aliases for callers that prefer those
-// names for an aggregate evaluator result.
-type Result = Report
-type Health = Report
-
-// Snapshot is a pure evaluator input. It is useful for tests and callers that
-// already performed the read-only dependency calls. Errors are consumed only
-// to select a bounded component state and are never copied into Report.
-type Snapshot struct {
-	Runtime domain.Runtime
-
-	HookStatus    hooks.StatusReport `json:"-"`
-	HookStatusErr error              `json:"-"`
-
-	DatabaseAvailable bool
-	Schema            store.SchemaStatus     `json:"-"`
-	SchemaErr         error                  `json:"-"`
-	SelfTestErr       error                  `json:"-"`
-	Delivery          capture.DeliveryHealth `json:"-"`
-	DeliveryErr       error                  `json:"-"`
-
-	// Now is intentionally ignored for state derivation. A successful capture
-	// does not become broken merely because it is old.
-	Now time.Time
-}
-
-// Inputs describes the dependencies for Evaluate. StoreOpenErr represents an
-// unsuccessful open before a store could be handed to the evaluator. A nil
-// Store is treated as an unavailable dependency, while a non-nil Store is
-// checked only through store.HealthReader.
+// Inputs contains only the narrow read-only dependency surfaces needed by
+// Evaluate. StoreOpenErr represents a failure before a store was available;
+// its text is consumed only as a presence signal and is never returned.
 type Inputs struct {
-	Runtime domain.Runtime     `json:"-"`
-	Hooks   hooks.StatusReader `json:"-"`
-	Store   store.HealthReader `json:"-"`
+	Runtime domain.Runtime
+	Hooks   hooks.StatusReader
+	Store   store.HealthReader
 
-	StoreOpenErr error     `json:"-"`
-	Now          time.Time `json:"-"`
-
-	// HookStatus allows callers that already called hooks.Status to use the
-	// same evaluator without another filesystem read. Hooks takes precedence
-	// when non-nil.
-	HookStatus    hooks.StatusReport `json:"-"`
-	HookStatusErr error              `json:"-"`
+	StoreOpenErr error
 }
 
-// Input and Dependencies are aliases for the evaluator input vocabulary.
-type Input = Inputs
-type Dependencies = Inputs
-
-// Evaluate reads the configured hook and store surfaces, then derives one
-// canonical state. Component failures are represented in the returned report
-// rather than returned as raw errors, so malformed configuration and database
-// failures remain actionable without leaking paths or untrusted text.
+// Evaluate reads hook status and store health, then derives one canonical
+// state. Dependency failures are represented as bounded component states;
+// only context cancellation is returned as an error.
 func Evaluate(ctx context.Context, input Inputs) (Report, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -160,81 +105,87 @@ func Evaluate(ctx context.Context, input Inputs) (Report, error) {
 		return Report{}, err
 	}
 
-	snapshot := Snapshot{
-		Runtime:           input.Runtime,
-		HookStatus:        input.HookStatus,
-		HookStatusErr:     input.HookStatusErr,
-		DatabaseAvailable: false,
-		Now:               input.Now,
-	}
-
-	if input.Hooks != nil {
-		snapshot.HookStatus, snapshot.HookStatusErr = input.Hooks.Status(ctx)
-	}
-
-	if snapshot.Runtime == domain.RuntimeUnknown {
-		snapshot.Runtime = domainRuntime(snapshot.HookStatus.Runtime)
-	}
-
-	switch {
-	case input.StoreOpenErr != nil:
-		snapshot.DatabaseAvailable = false
-	case input.Store != nil:
-		snapshot.DatabaseAvailable = true
-		snapshot.Schema, snapshot.SchemaErr = input.Store.SchemaStatus(ctx)
-		snapshot.SelfTestErr = input.Store.SelfTestCaptureIngest(ctx)
-		snapshot.Delivery, snapshot.DeliveryErr = input.Store.GetCaptureHealth(ctx, snapshot.Runtime)
-	default:
-		// A missing dependency without an open error is still unavailable to
-		// diagnostics; keep all store-derived checks bounded and error-free.
-		snapshot.SchemaErr = errMissingStore
-		snapshot.SelfTestErr = errMissingStore
-		snapshot.DeliveryErr = errMissingStore
-	}
-
-	return Assess(snapshot), nil
-}
-
-// EvaluateHealth is a concise alias for Evaluate.
-func EvaluateHealth(ctx context.Context, input Inputs) (Report, error) {
-	return Evaluate(ctx, input)
-}
-
-// Assess evaluates an already collected snapshot without calling any
-// filesystem, database, runtime, model, MCP, or network operation.
-func Assess(snapshot Snapshot) Report {
-	runtimeName := snapshot.Runtime
-	if runtimeName == domain.RuntimeUnknown {
-		runtimeName = domainRuntime(snapshot.HookStatus.Runtime)
-	}
-	result := Report{
-		Runtime: runtimeName,
-		State:   Unknown,
-	}
-	if snapshot.HookStatus.Runtime == "" {
-		snapshot.HookStatus.Runtime = hooksRuntime(runtimeName)
-	}
-	if runtimeName.Valid() {
-		result.Delivery = sanitizeDelivery(snapshot.Delivery, runtimeName)
+	runtimeName := input.Runtime
+	var hookStatus hooks.StatusReport
+	var hookErr error
+	if input.Hooks == nil {
+		hookErr = errHooksUnavailable
 	} else {
-		result.Delivery = sanitizeDelivery(snapshot.Delivery, domain.RuntimeUnknown)
+		hookStatus, hookErr = input.Hooks.Status(ctx)
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+	}
+	if runtimeName == domain.RuntimeUnknown {
+		runtimeName = domainRuntime(hookStatus.Runtime)
+	}
+	if !runtimeName.Valid() {
+		runtimeName = domain.RuntimeUnknown
 	}
 
-	result.Components = assessComponents(snapshot)
-	if !runtimeName.Valid() {
+	snapshot := evaluationSnapshot{
+		runtime:     runtimeName,
+		hooks:       hookStatus,
+		hookErr:     hookErr,
+		delivery:    capture.DeliveryHealth{Runtime: runtimeName},
+		deliveryErr: errStoreUnavailable,
+	}
+	if input.StoreOpenErr == nil && input.Store != nil {
+		snapshot.dbAvailable = true
+		snapshot.schema, snapshot.schemaErr = input.Store.SchemaStatus(ctx)
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+		snapshot.selfTestErr = input.Store.SelfTestCaptureIngest(ctx)
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+		snapshot.delivery, snapshot.deliveryErr = input.Store.GetCaptureHealth(ctx, runtimeName)
+		if err := ctx.Err(); err != nil {
+			return Report{}, err
+		}
+	} else if input.StoreOpenErr == nil {
+		snapshot.schemaErr = errStoreUnavailable
+		snapshot.selfTestErr = errStoreUnavailable
+	}
+
+	return evaluateSnapshot(snapshot), nil
+}
+
+type evaluationSnapshot struct {
+	runtime domain.Runtime
+	hooks   hooks.StatusReport
+	hookErr error
+
+	dbAvailable bool
+	schema      store.SchemaStatus
+	schemaErr   error
+	selfTestErr error
+	delivery    capture.DeliveryHealth
+	deliveryErr error
+}
+
+var (
+	errHooksUnavailable = errors.New("hook status is unavailable")
+	errStoreUnavailable = errors.New("store is unavailable")
+)
+
+func evaluateSnapshot(snapshot evaluationSnapshot) Report {
+	result := Report{
+		Runtime:  snapshot.runtime,
+		State:    Unknown,
+		Delivery: sanitizeDelivery(snapshot.delivery, snapshot.runtime),
+	}
+	if !snapshot.runtime.Valid() {
 		return result
 	}
-
-	if hardFailure(result.Components) {
-		if hasUnknownComponent(result.Components) && !hasKnownComponentFailure(result.Components) {
+	result.Components = assessComponents(snapshot)
+	if staticFailure(result.Components) {
+		if onlyUnknownStaticFailure(result.Components) {
 			result.State = Unknown
 		} else {
 			result.State = Broken
 		}
-		return result
-	}
-	if result.Components.Delivery.State == ComponentUnknown || result.Components.Delivery.State == ComponentUnavailable || result.Components.Delivery.State == ComponentInvalid {
-		result.State = Unknown
 		return result
 	}
 	switch result.Components.Delivery.State {
@@ -242,56 +193,51 @@ func Assess(snapshot Snapshot) Report {
 		result.State = Idle
 	case ComponentFailed:
 		result.State = Degraded
-	default:
+	case ComponentOK:
 		result.State = Healthy
+	default:
+		result.State = Unknown
 	}
 	return result
 }
 
-var errMissingStore = errors.New("health store dependency is missing")
-
-func assessComponents(snapshot Snapshot) Components {
+func assessComponents(snapshot evaluationSnapshot) Components {
 	var result Components
-	databaseAvailable := snapshot.DatabaseAvailable
-	statusRuntime := domainRuntime(snapshot.HookStatus.Runtime)
-	if snapshot.HookStatusErr != nil || (snapshot.Runtime.Valid() && statusRuntime.Valid() && statusRuntime != snapshot.Runtime) {
+	statusRuntime := domainRuntime(snapshot.hooks.Runtime)
+	if snapshot.hookErr != nil || (snapshot.runtime.Valid() && statusRuntime.Valid() && statusRuntime != snapshot.runtime) {
 		result.Config = Check{State: ComponentUnknown}
 		result.Hooks = Check{State: ComponentUnknown}
-	} else {
-		result.Config = assessConfig(snapshot.HookStatus)
-		result.Hooks = assessHooks(snapshot.HookStatus)
-	}
-	result.ManagedEntries = assessManagedEntries(snapshot.HookStatus)
-	if snapshot.HookStatusErr != nil {
 		result.ManagedEntries = Check{State: ComponentUnknown}
-	}
-	if snapshot.HookStatus.Binary.Resolved {
-		result.Executable = Check{State: ComponentOK}
-	} else if snapshot.HookStatusErr != nil {
 		result.Executable = Check{State: ComponentUnknown}
 	} else {
-		result.Executable = Check{State: ComponentUnresolved}
+		result.Config = assessConfig(snapshot.hooks)
+		result.Hooks = assessHooks(snapshot.hooks)
+		result.ManagedEntries = assessManagedEntries(snapshot.hooks)
+		if snapshot.hooks.Binary.Resolved {
+			result.Executable = Check{State: ComponentOK}
+		} else {
+			result.Executable = Check{State: ComponentUnresolved}
+		}
 	}
 
-	if databaseAvailable {
+	if snapshot.dbAvailable {
 		result.Database = Check{State: ComponentOK}
 	} else {
 		result.Database = Check{State: ComponentUnavailable}
 	}
-
 	switch {
-	case !databaseAvailable:
+	case !snapshot.dbAvailable:
 		result.Schema = Check{State: ComponentUnavailable}
 		result.SelfTest = Check{State: ComponentUnavailable}
-	case snapshot.SchemaErr != nil:
+	case snapshot.schemaErr != nil:
 		result.Schema = Check{State: ComponentUnavailable}
 		result.SelfTest = Check{State: ComponentUnknown}
-	case snapshot.Schema.Current <= 0 || snapshot.Schema.Latest <= 0 || snapshot.Schema.Current != snapshot.Schema.Latest:
+	case snapshot.schema.Current <= 0 || snapshot.schema.Latest <= 0 || snapshot.schema.Current != snapshot.schema.Latest:
 		result.Schema = Check{State: ComponentMismatch}
-		result.SelfTest = assessSelfTest(snapshot.SelfTestErr)
+		result.SelfTest = assessSelfTest(snapshot.selfTestErr)
 	default:
 		result.Schema = Check{State: ComponentOK}
-		result.SelfTest = assessSelfTest(snapshot.SelfTestErr)
+		result.SelfTest = assessSelfTest(snapshot.selfTestErr)
 	}
 	result.Delivery = assessDelivery(snapshot)
 	return result
@@ -304,10 +250,7 @@ func assessConfig(status hooks.StatusReport) Check {
 	if status.Code == hooks.StatusMalformed {
 		return Check{State: ComponentMalformed}
 	}
-	if status.Code == hooks.StatusInstalled {
-		return Check{State: ComponentOK}
-	}
-	if status.ConfigExists {
+	if status.Code == hooks.StatusInstalled || status.ConfigExists {
 		return Check{State: ComponentOK}
 	}
 	if status.Code == hooks.StatusUnsupported {
@@ -333,43 +276,19 @@ func assessHooks(status hooks.StatusReport) Check {
 	}
 }
 
+// The manager's StatusReport is authoritative for the expected event set.
+// Health checks only the aggregate status and every entry returned by the
+// manager; it does not maintain a second Claude/Codex event vocabulary.
 func assessManagedEntries(status hooks.StatusReport) Check {
-	if status.Managed != hooks.ManagedEntryInstalled || len(status.ManagedEntries) == 0 {
+	if status.Code != hooks.StatusInstalled || status.Managed != hooks.ManagedEntryInstalled || len(status.ManagedEntries) == 0 {
 		return Check{State: ComponentIncomplete}
 	}
-	expected := expectedEvents(status.Runtime)
-	if len(expected) == 0 || len(status.ManagedEntries) != len(expected) {
-		return Check{State: ComponentIncomplete}
-	}
-	seen := make(map[string]struct{}, len(status.ManagedEntries))
 	for _, entry := range status.ManagedEntries {
-		if _, ok := expected[entry.Event]; !ok || strings.TrimSpace(entry.Event) == "" {
-			return Check{State: ComponentIncomplete}
-		}
-		if _, duplicate := seen[entry.Event]; duplicate {
-			return Check{State: ComponentIncomplete}
-		}
-		seen[entry.Event] = struct{}{}
 		if entry.State != hooks.ManagedEntryInstalled || entry.ExactHandlers != 1 || entry.Partial != 0 {
 			return Check{State: ComponentIncomplete}
 		}
 	}
 	return Check{State: ComponentOK}
-}
-
-func expectedEvents(runtime hooks.Runtime) map[string]struct{} {
-	switch runtime {
-	case hooks.RuntimeClaude:
-		return map[string]struct{}{
-			"PostToolUse":         {},
-			"PostToolUseFailure":  {},
-			"UserPromptExpansion": {},
-		}
-	case hooks.RuntimeCodex:
-		return map[string]struct{}{"PostToolUse": {}}
-	default:
-		return nil
-	}
 }
 
 func assessSelfTest(err error) Check {
@@ -379,15 +298,15 @@ func assessSelfTest(err error) Check {
 	return Check{State: ComponentOK}
 }
 
-func assessDelivery(snapshot Snapshot) Check {
-	if snapshot.DeliveryErr != nil {
+func assessDelivery(snapshot evaluationSnapshot) Check {
+	if snapshot.deliveryErr != nil {
 		return Check{State: ComponentUnavailable}
 	}
-	health := snapshot.Delivery
-	if !health.Runtime.Valid() && snapshot.Runtime.Valid() {
-		health.Runtime = snapshot.Runtime
+	health := snapshot.delivery
+	if !health.Runtime.Valid() && snapshot.runtime.Valid() {
+		health.Runtime = snapshot.runtime
 	}
-	if !health.Runtime.Valid() || (snapshot.Runtime.Valid() && health.Runtime != snapshot.Runtime) {
+	if !health.Runtime.Valid() || health.Runtime != snapshot.runtime {
 		return Check{State: ComponentInvalid}
 	}
 	if err := health.Validate(); err != nil {
@@ -425,7 +344,7 @@ func sanitizeDelivery(input capture.DeliveryHealth, runtime domain.Runtime) capt
 	return result
 }
 
-func hardFailure(components Components) bool {
+func staticFailure(components Components) bool {
 	for _, check := range []Check{
 		components.Config,
 		components.Hooks,
@@ -442,25 +361,7 @@ func hardFailure(components Components) bool {
 	return false
 }
 
-func hasUnknownComponent(components Components) bool {
-	for _, check := range []Check{
-		components.Config,
-		components.Hooks,
-		components.ManagedEntries,
-		components.Executable,
-		components.Database,
-		components.Schema,
-		components.SelfTest,
-		components.Delivery,
-	} {
-		if check.State == ComponentUnknown {
-			return true
-		}
-	}
-	return false
-}
-
-func hasKnownComponentFailure(components Components) bool {
+func onlyUnknownStaticFailure(components Components) bool {
 	for _, check := range []Check{
 		components.Config,
 		components.Hooks,
@@ -471,10 +372,10 @@ func hasKnownComponentFailure(components Components) bool {
 		components.SelfTest,
 	} {
 		if check.State != ComponentOK && check.State != ComponentUnknown {
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func domainRuntime(runtime hooks.Runtime) domain.Runtime {
@@ -486,28 +387,4 @@ func domainRuntime(runtime hooks.Runtime) domain.Runtime {
 	default:
 		return domain.RuntimeUnknown
 	}
-}
-
-func hooksRuntime(runtime domain.Runtime) hooks.Runtime {
-	switch runtime {
-	case domain.RuntimeClaudeCode:
-		return hooks.RuntimeClaude
-	case domain.RuntimeCodex:
-		return hooks.RuntimeCodex
-	default:
-		return ""
-	}
-}
-
-// Evaluator is a reusable dependency-backed evaluator. It is intentionally
-// small so callers can construct it once while retaining the read-only
-// interfaces rather than a concrete manager or store.
-type Evaluator struct {
-	Input Inputs
-}
-
-func NewEvaluator(input Inputs) Evaluator { return Evaluator{Input: input} }
-
-func (e Evaluator) Evaluate(ctx context.Context) (Report, error) {
-	return Evaluate(ctx, e.Input)
 }
