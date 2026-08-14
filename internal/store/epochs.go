@@ -193,9 +193,10 @@ func (s *Store) ListCaptureEpochs(ctx context.Context, runtimes ...domain.Runtim
 	return result, nil
 }
 
-// ListCapabilityPresenceEpochs returns presence intervals in chronological
-// key order. A key filter is optional; no flattened inventory ranges are read.
-func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...history.CoverageKey) ([]history.CapabilityPresenceEpoch, error) {
+// ListCapabilityPresenceEpochs returns persisted presence intervals in
+// chronological full-identity order. A key filter is optional; no flattened
+// inventory ranges or canonical history aggregates are read.
+func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...CapabilityPresenceKey) ([]CapabilityPresenceEpoch, error) {
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
@@ -203,25 +204,25 @@ func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...histor
 		return nil, errors.New("at most one capability presence key filter is allowed")
 	}
 	query := `SELECT runtime, capability_type, capability_name, scope, source, started_at, ended_at FROM capability_presence_epochs`
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 5)
 	if len(keys) == 1 {
 		if err := keys[0].Validate(); err != nil {
 			return nil, err
 		}
-		query += ` WHERE runtime = ? AND capability_type = ? AND capability_name = ?`
-		args = append(args, keys[0].Runtime, keys[0].CapabilityType, keys[0].CapabilityName)
+		query += ` WHERE runtime = ? AND capability_type = ? AND capability_name = ? AND scope = ? AND source = ?`
+		args = append(args, keys[0].Runtime, keys[0].CapabilityType, keys[0].CapabilityName, keys[0].Scope, keys[0].Source)
 	}
-	query += ` ORDER BY runtime, capability_type, capability_name, started_at, id`
+	query += ` ORDER BY runtime, capability_type, capability_name, scope, source, started_at, id`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list capability presence epochs: %w", err)
 	}
 	defer rows.Close()
-	result := make([]history.CapabilityPresenceEpoch, 0)
+	result := make([]CapabilityPresenceEpoch, 0)
 	for rows.Next() {
-		var row capabilityPresenceRow
+		var row CapabilityPresenceEpoch
 		var started, ended sql.NullString
-		if err := rows.Scan(&row.Key.runtime, &row.Key.typ, &row.Key.name, &row.Key.scope, &row.Key.source, &started, &ended); err != nil {
+		if err := rows.Scan(&row.Key.Runtime, &row.Key.CapabilityType, &row.Key.CapabilityName, &row.Key.Scope, &row.Key.Source, &started, &ended); err != nil {
 			return nil, fmt.Errorf("scan capability presence epoch: %w", err)
 		}
 		row.Interval.Start, err = parseEpochTimestamp(started.String, "capability presence start")
@@ -234,11 +235,10 @@ func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...histor
 				return nil, err
 			}
 		}
-		epoch := row.HistoryEpoch()
-		if err := epoch.Validate(); err != nil {
+		if err := row.Validate(); err != nil {
 			return nil, fmt.Errorf("validate persisted capability presence epoch: %w", err)
 		}
-		result = append(result, epoch)
+		result = append(result, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate capability presence epochs: %w", err)
@@ -246,41 +246,64 @@ func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...histor
 	return result, nil
 }
 
-type presenceKey struct {
-	runtime domain.Runtime
-	typ     domain.CapabilityType
-	name    string
-	scope   domain.Scope
-	source  string
+// CapabilityPresenceKey identifies one persisted capability definition. It
+// intentionally retains scope and source; history.CoverageKey is a separate
+// canonical aggregation key for effective coverage queries.
+type CapabilityPresenceKey struct {
+	Runtime        domain.Runtime
+	CapabilityType domain.CapabilityType
+	CapabilityName string
+	Scope          domain.Scope
+	Source         string
 }
 
-// capabilityPresenceRow keeps the persistence identity intact while the
-// public history DTO intentionally aggregates by CoverageKey (runtime/type/name).
-type capabilityPresenceRow struct {
-	Key presenceKey
+func (k CapabilityPresenceKey) Validate() error {
+	if !k.Runtime.Valid() {
+		return fmt.Errorf("invalid capability presence runtime %q", k.Runtime)
+	}
+	if !k.CapabilityType.Valid() {
+		return fmt.Errorf("invalid capability presence type %q", k.CapabilityType)
+	}
+	if strings.TrimSpace(k.CapabilityName) == "" {
+		return errors.New("capability presence name is required")
+	}
+	if !k.Scope.Valid() {
+		return fmt.Errorf("invalid capability presence scope %q", k.Scope)
+	}
+	return nil
+}
+
+// CapabilityPresenceEpoch is one persisted, full-identity capability
+// presence interval. It is deliberately not a history.CapabilityPresenceEpoch
+// because persistence retains definition scope and source.
+type CapabilityPresenceEpoch struct {
+	Key CapabilityPresenceKey
 	history.Interval
 }
 
-func (r capabilityPresenceRow) HistoryEpoch() history.CapabilityPresenceEpoch {
-	return history.CapabilityPresenceEpoch{
-		CoverageKey: history.CoverageKey{Runtime: r.Key.runtime, CapabilityType: r.Key.typ, CapabilityName: r.Key.name},
-		Interval:    r.Interval,
+func (e CapabilityPresenceEpoch) Validate() error {
+	if err := e.Key.Validate(); err != nil {
+		return fmt.Errorf("invalid capability presence key: %w", err)
 	}
+	if err := e.Interval.Validate(); err != nil {
+		return fmt.Errorf("invalid capability presence interval: %w", err)
+	}
+	return nil
 }
 
 func transitionPresenceEpochsTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime, observedAt time.Time, capabilities []domain.Capability) error {
-	newKeys := make(map[presenceKey]struct{}, len(capabilities))
+	newKeys := make(map[CapabilityPresenceKey]struct{}, len(capabilities))
 	for _, capability := range capabilities {
-		newKeys[presenceKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name, scope: capability.Scope, source: capability.Source}] = struct{}{}
+		newKeys[CapabilityPresenceKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name, Scope: capability.Scope, Source: capability.Source}] = struct{}{}
 	}
-	oldKeys := make(map[presenceKey]struct{})
+	oldKeys := make(map[CapabilityPresenceKey]struct{})
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, name, scope, source FROM current_inventory WHERE runtime = ?`, runtime)
 	if err != nil {
 		return fmt.Errorf("read previous inventory presence keys: %w", err)
 	}
 	for rows.Next() {
-		var key presenceKey
-		if err := rows.Scan(&key.runtime, &key.typ, &key.name, &key.scope, &key.source); err != nil {
+		var key CapabilityPresenceKey
+		if err := rows.Scan(&key.Runtime, &key.CapabilityType, &key.CapabilityName, &key.Scope, &key.Source); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan previous inventory presence key: %w", err)
 		}
@@ -315,23 +338,23 @@ func transitionPresenceEpochsTx(ctx context.Context, tx *sql.Tx, runtime domain.
 		if _, open := openKeys[key]; open {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO capability_presence_epochs(runtime, capability_type, capability_name, scope, source, started_at) VALUES (?, ?, ?, ?, ?, ?)`, key.runtime, key.typ, key.name, key.scope, key.source, formatEpochTimestamp(observedAt)); err != nil {
-			return fmt.Errorf("open capability presence %q: %w", key.name, err)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO capability_presence_epochs(runtime, capability_type, capability_name, scope, source, started_at) VALUES (?, ?, ?, ?, ?, ?)`, key.Runtime, key.CapabilityType, key.CapabilityName, key.Scope, key.Source, formatEpochTimestamp(observedAt)); err != nil {
+			return fmt.Errorf("open capability presence %q: %w", key.CapabilityName, err)
 		}
 	}
 	return nil
 }
 
-func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime) (map[presenceKey]struct{}, error) {
+func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime) (map[CapabilityPresenceKey]struct{}, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT runtime, capability_type, capability_name, scope, source FROM capability_presence_epochs WHERE runtime = ? AND ended_at IS NULL`, runtime)
 	if err != nil {
 		return nil, fmt.Errorf("read open capability presence epochs: %w", err)
 	}
 	defer rows.Close()
-	result := make(map[presenceKey]struct{})
+	result := make(map[CapabilityPresenceKey]struct{})
 	for rows.Next() {
-		var key presenceKey
-		if err := rows.Scan(&key.runtime, &key.typ, &key.name, &key.scope, &key.source); err != nil {
+		var key CapabilityPresenceKey
+		if err := rows.Scan(&key.Runtime, &key.CapabilityType, &key.CapabilityName, &key.Scope, &key.Source); err != nil {
 			return nil, fmt.Errorf("scan open capability presence key: %w", err)
 		}
 		result[key] = struct{}{}
@@ -342,15 +365,15 @@ func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime)
 	return result, nil
 }
 
-func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key presenceKey, endedAt time.Time) error {
+func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key CapabilityPresenceKey, endedAt time.Time) error {
 	var id int64
 	var started string
-	err := tx.QueryRowContext(ctx, `SELECT id, started_at FROM capability_presence_epochs WHERE runtime = ? AND capability_type = ? AND capability_name = ? AND scope = ? AND source = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1`, key.runtime, key.typ, key.name, key.scope, key.source).Scan(&id, &started)
+	err := tx.QueryRowContext(ctx, `SELECT id, started_at FROM capability_presence_epochs WHERE runtime = ? AND capability_type = ? AND capability_name = ? AND scope = ? AND source = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1`, key.Runtime, key.CapabilityType, key.CapabilityName, key.Scope, key.Source).Scan(&id, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read open capability presence %q: %w", key.name, err)
+		return fmt.Errorf("read open capability presence %q: %w", key.CapabilityName, err)
 	}
 	start, err := parseEpochTimestamp(started, "capability presence start")
 	if err != nil {
@@ -361,7 +384,7 @@ func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key presenceKey, ende
 		// A same-timestamp replacement has no positive half-open interval;
 		// do not persist a zero-length epoch.
 		if _, err := tx.ExecContext(ctx, `DELETE FROM capability_presence_epochs WHERE id = ?`, id); err != nil {
-			return fmt.Errorf("discard zero-length capability presence %q: %w", key.name, err)
+			return fmt.Errorf("discard zero-length capability presence %q: %w", key.CapabilityName, err)
 		}
 		return nil
 	}
@@ -369,7 +392,7 @@ func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key presenceKey, ende
 		return fmt.Errorf("capability presence end %s precedes start %s", endedAt.Format(time.RFC3339Nano), start.Format(time.RFC3339Nano))
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE capability_presence_epochs SET ended_at = ? WHERE id = ? AND ended_at IS NULL`, formatEpochTimestamp(endedAt), id); err != nil {
-		return fmt.Errorf("close capability presence %q: %w", key.name, err)
+		return fmt.Errorf("close capability presence %q: %w", key.CapabilityName, err)
 	}
 	return nil
 }

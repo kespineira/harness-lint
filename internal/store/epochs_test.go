@@ -65,7 +65,7 @@ func TestRecordInventoryTransitionsPresenceEpochsWithoutFlattenedBackfill(t *tes
 	s := openTestStore(t)
 	base := time.Date(2026, 8, 14, 23, 59, 59, 999000000, time.FixedZone("CEST", 2*60*60))
 	capability := testCapability("present", time.Time{}, time.Time{})
-	key := history.CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	key := CapabilityPresenceKey{Runtime: domain.RuntimeCodex, CapabilityType: capability.Type, CapabilityName: capability.Name, Scope: capability.Scope, Source: capability.Source}
 	if err := s.RecordInventory(ctx, domain.RuntimeCodex, base, []domain.Capability{capability}); err != nil {
 		t.Fatalf("RecordInventory(first): %v", err)
 	}
@@ -79,9 +79,9 @@ func TestRecordInventoryTransitionsPresenceEpochsWithoutFlattenedBackfill(t *tes
 	if err != nil {
 		t.Fatalf("ListCapabilityPresenceEpochs(): %v", err)
 	}
-	want := []history.CapabilityPresenceEpoch{
-		{CoverageKey: key, Interval: history.Interval{Start: base.UTC(), End: base.Add(time.Hour).UTC()}},
-		{CoverageKey: key, Interval: history.Interval{Start: base.Add(2 * time.Hour).UTC()}},
+	want := []CapabilityPresenceEpoch{
+		{Key: key, Interval: history.Interval{Start: base.UTC(), End: base.Add(time.Hour).UTC()}},
+		{Key: key, Interval: history.Interval{Start: base.Add(2 * time.Hour).UTC()}},
 	}
 	if !reflect.DeepEqual(epochs, want) {
 		t.Fatalf("presence epochs = %#v, want %#v", epochs, want)
@@ -105,7 +105,8 @@ func TestRecordInventoryPreservesPresenceIdentityAcrossScopeAndSource(t *testing
 	user := project
 	user.Scope = domain.ScopeUser
 	user.Source = "/user/same-name"
-	key := history.CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: project.Type, CapabilityName: project.Name}
+	projectKey := CapabilityPresenceKey{Runtime: domain.RuntimeCodex, CapabilityType: project.Type, CapabilityName: project.Name, Scope: project.Scope, Source: project.Source}
+	userKey := CapabilityPresenceKey{Runtime: domain.RuntimeCodex, CapabilityType: user.Type, CapabilityName: user.Name, Scope: user.Scope, Source: user.Source}
 
 	if err := s.RecordInventory(ctx, domain.RuntimeCodex, base, []domain.Capability{project, user}); err != nil {
 		t.Fatalf("RecordInventory(first): %v", err)
@@ -151,12 +152,58 @@ func TestRecordInventoryPreservesPresenceIdentityAcrossScopeAndSource(t *testing
 		t.Fatalf("user continuation row = %#v", got[2])
 	}
 
-	epochs, err := s.ListCapabilityPresenceEpochs(ctx, key)
+	epochs, err := s.ListCapabilityPresenceEpochs(ctx)
 	if err != nil {
 		t.Fatalf("ListCapabilityPresenceEpochs(): %v", err)
 	}
-	if len(epochs) != 3 {
-		t.Fatalf("canonical presence epochs = %#v, want three intervals", epochs)
+	wantEpochs := []CapabilityPresenceEpoch{
+		{Key: projectKey, Interval: history.Interval{Start: base.UTC(), End: base.Add(time.Hour).UTC()}},
+		{Key: projectKey, Interval: history.Interval{Start: base.Add(2 * time.Hour).UTC()}},
+		{Key: userKey, Interval: history.Interval{Start: base.UTC()}},
+	}
+	if !reflect.DeepEqual(epochs, wantEpochs) {
+		t.Fatalf("presence epochs = %#v, want full-identity intervals %#v", epochs, wantEpochs)
+	}
+	projectEpochs, err := s.ListCapabilityPresenceEpochs(ctx, projectKey)
+	if err != nil {
+		t.Fatalf("ListCapabilityPresenceEpochs(project): %v", err)
+	}
+	if !reflect.DeepEqual(projectEpochs, wantEpochs[:2]) {
+		t.Fatalf("project presence epochs = %#v, want %#v", projectEpochs, wantEpochs[:2])
+	}
+	userEpochs, err := s.ListCapabilityPresenceEpochs(ctx, userKey)
+	if err != nil {
+		t.Fatalf("ListCapabilityPresenceEpochs(user): %v", err)
+	}
+	if !reflect.DeepEqual(userEpochs, wantEpochs[2:]) {
+		t.Fatalf("user presence epochs = %#v, want %#v", userEpochs, wantEpochs[2:])
+	}
+}
+
+func TestCapabilityPresenceEpochValidation(t *testing.T) {
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	valid := CapabilityPresenceEpoch{
+		Key: CapabilityPresenceKey{
+			Runtime:        domain.RuntimeCodex,
+			CapabilityType: domain.CapabilitySkill,
+			CapabilityName: "valid",
+			Scope:          domain.ScopeProject,
+			Source:         "/project/valid",
+		},
+		Interval: history.Interval{Start: base, End: base.Add(time.Hour)},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid capability presence epoch rejected: %v", err)
+	}
+	invalidKey := valid
+	invalidKey.Key.Scope = domain.ScopeUnknown
+	if err := invalidKey.Validate(); err == nil {
+		t.Fatal("invalid capability presence scope accepted")
+	}
+	invalidInterval := valid
+	invalidInterval.Interval.End = base
+	if err := invalidInterval.Validate(); err == nil {
+		t.Fatal("zero-duration capability presence interval accepted")
 	}
 }
 
@@ -186,7 +233,7 @@ func TestEpochCloseWithoutOpenAndZeroDurationAreIdempotent(t *testing.T) {
 	}
 
 	capability := testCapability("zero-duration", time.Time{}, time.Time{})
-	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	key := CapabilityPresenceKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name, Scope: capability.Scope, Source: capability.Source}
 	if err := s.RecordInventory(ctx, capability.Runtime, base, []domain.Capability{capability}); err != nil {
 		t.Fatalf("RecordInventory(open): %v", err)
 	}
@@ -220,7 +267,7 @@ func TestEpochTimestampsUseFixedNanosecondOrderingAndChecks(t *testing.T) {
 		t.Fatalf("fixed capture timestamps = %q..%q, want fixed-width lexical order", captureStarted, captureEnded)
 	}
 	capability := testCapability("nanosecond-order", time.Time{}, time.Time{})
-	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	key := CapabilityPresenceKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name, Scope: capability.Scope, Source: capability.Source}
 	if err := s.RecordInventory(ctx, capability.Runtime, base, []domain.Capability{capability}); err != nil {
 		t.Fatalf("RecordInventory(exact second): %v", err)
 	}
