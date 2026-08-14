@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/kespineira/harness-lint/internal/history"
 )
@@ -14,9 +15,8 @@ import (
 // QueryEffectiveCoverage computes modeled coverage from the sparse epoch
 // tables. Usage events are consulted only for distinct aggregate keys; event
 // rows themselves are never loaded into memory. Presence epochs for different
-// scopes/sources intentionally collapse to the canonical history key after
-// applying any requested scope/source filter.
-func (s *Store) QueryEffectiveCoverage(ctx context.Context, query history.Query) ([]history.EffectiveCoverage, error) {
+// scopes/sources intentionally collapse to the canonical history key.
+func (s *Store) QueryEffectiveCoverage(ctx context.Context, query history.CoverageQuery) ([]history.EffectiveCoverage, error) {
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
@@ -45,7 +45,7 @@ func (s *Store) QueryEffectiveCoverage(ctx context.Context, query history.Query)
 // QueryCapabilityCoverage computes one canonical capability bucket. It is
 // useful when the caller needs unknown (rather than an empty result) for a
 // key with no presence epoch.
-func (s *Store) QueryCapabilityCoverage(ctx context.Context, key history.CoverageKey, query history.Query) (history.EffectiveCoverage, error) {
+func (s *Store) QueryCapabilityCoverage(ctx context.Context, key history.CoverageKey, query history.CoverageQuery) (history.EffectiveCoverage, error) {
 	if s.isClosed() {
 		return history.EffectiveCoverage{}, errors.New("store is closed")
 	}
@@ -55,9 +55,20 @@ func (s *Store) QueryCapabilityCoverage(ctx context.Context, key history.Coverag
 	if err := key.Validate(); err != nil {
 		return history.EffectiveCoverage{}, err
 	}
-	if query.Runtime != "" && query.Runtime != key.Runtime || query.CapabilityType != "" && query.CapabilityType != key.CapabilityType || query.CapabilityName != "" && query.CapabilityName != key.CapabilityName {
-		return history.EffectiveCoverage{Key: key, Status: history.CoverageUnknown, Intervals: []history.Interval{}}, nil
+	if query.Runtime != "" && query.Runtime != key.Runtime {
+		return history.EffectiveCoverage{}, fmt.Errorf("coverage query runtime %q conflicts with capability key %q", query.Runtime, key.Runtime)
 	}
+	if query.CapabilityType != "" && query.CapabilityType != key.CapabilityType {
+		return history.EffectiveCoverage{}, fmt.Errorf("coverage query capability type %q conflicts with capability key %q", query.CapabilityType, key.CapabilityType)
+	}
+	if query.CapabilityName != "" && query.CapabilityName != key.CapabilityName {
+		return history.EffectiveCoverage{}, fmt.Errorf("coverage query capability name %q conflicts with capability key %q", query.CapabilityName, key.CapabilityName)
+	}
+	// Force all canonical key predicates into both epoch reads. This keeps a
+	// single-key query sparse and prevents an accidental runtime-wide scan.
+	query.Runtime = key.Runtime
+	query.CapabilityType = key.CapabilityType
+	query.CapabilityName = key.CapabilityName
 	capture, presence, err := s.readCoverageEpochs(ctx, query)
 	if err != nil {
 		return history.EffectiveCoverage{}, err
@@ -68,7 +79,7 @@ func (s *Store) QueryCapabilityCoverage(ctx context.Context, key history.Coverag
 // ExplainCoverageQueryPlan returns plans for both indexed epoch lookups used
 // by QueryEffectiveCoverage. It is intentionally diagnostic-only and does not
 // execute the coverage calculation.
-func (s *Store) ExplainCoverageQueryPlan(ctx context.Context, query history.Query) ([]string, error) {
+func (s *Store) ExplainCoverageQueryPlan(ctx context.Context, query history.CoverageQuery) ([]string, error) {
 	if s.isClosed() {
 		return nil, errors.New("store is closed")
 	}
@@ -107,9 +118,9 @@ func (s *Store) ExplainCoverageQueryPlan(ctx context.Context, query history.Quer
 	return plans, nil
 }
 
-func (s *Store) coverageKeys(ctx context.Context, query history.Query) ([]history.CoverageKey, error) {
+func (s *Store) coverageKeys(ctx context.Context, query history.CoverageQuery) ([]history.CoverageKey, error) {
 	keys := make(map[history.CoverageKey]struct{})
-	usageClause, usageArgs := historyUsageFilters("u", query)
+	usageClause, usageArgs := coverageIdentityFilters("u", "capability_name", query)
 	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT u.runtime, u.capability_type, u.capability_name FROM usage_events AS u`+usageClause, usageArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("query effective coverage usage keys: %w", err)
@@ -130,7 +141,7 @@ func (s *Store) coverageKeys(ctx context.Context, query history.Query) ([]histor
 		return nil, fmt.Errorf("close effective coverage usage keys: %w", err)
 	}
 
-	currentClause, currentArgs := historyCurrentFilters("c", query)
+	currentClause, currentArgs := coverageIdentityFilters("c", "name", query)
 	rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT c.runtime, c.capability_type, c.name FROM current_inventory AS ci INNER JOIN capabilities AS c ON c.runtime = ci.runtime AND c.capability_type = ci.capability_type AND c.name = ci.name AND c.scope = ci.scope AND c.source = ci.source`+currentClause, currentArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("query effective coverage inventory keys: %w", err)
@@ -152,7 +163,12 @@ func (s *Store) coverageKeys(ctx context.Context, query history.Query) ([]histor
 	}
 
 	// A capability with only epoch evidence is still a valid query result.
-	rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, capability_name FROM capability_presence_epochs`+coveragePresenceWhere(query), coveragePresenceArgs(query)...)
+	// Discover canonical keys independently of the requested interval so a
+	// known key with no overlap is returned as unknown rather than disappearing.
+	identityQuery := query
+	identityQuery.Start = time.Time{}
+	identityQuery.End = time.Time{}
+	rows, err = s.db.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, capability_name FROM capability_presence_epochs`+coveragePresenceWhere(identityQuery), coveragePresenceArgs(identityQuery)...)
 	if err != nil {
 		return nil, fmt.Errorf("query effective coverage epoch keys: %w", err)
 	}
@@ -190,7 +206,7 @@ func (s *Store) coverageKeys(ctx context.Context, query history.Query) ([]histor
 	return result, nil
 }
 
-func (s *Store) readCoverageEpochs(ctx context.Context, query history.Query) ([]history.CaptureEpoch, []history.CapabilityPresenceEpoch, error) {
+func (s *Store) readCoverageEpochs(ctx context.Context, query history.CoverageQuery) ([]history.CaptureEpoch, []history.CapabilityPresenceEpoch, error) {
 	captureRows, err := s.db.QueryContext(ctx, `SELECT runtime, started_at, ended_at, start_reason, end_reason FROM capture_epochs`+coverageCaptureWhere(query)+` ORDER BY runtime, started_at, id`, coverageCaptureArgs(query)...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query effective capture epochs: %w", err)
@@ -271,15 +287,12 @@ func (s *Store) readCoverageEpochs(ctx context.Context, query history.Query) ([]
 	return capture, presence, nil
 }
 
-func computeQueryCoverage(key history.CoverageKey, capture []history.CaptureEpoch, presence []history.CapabilityPresenceEpoch, query history.Query) (history.EffectiveCoverage, error) {
+func computeQueryCoverage(key history.CoverageKey, capture []history.CaptureEpoch, presence []history.CapabilityPresenceEpoch, query history.CoverageQuery) (history.EffectiveCoverage, error) {
 	coverage, err := history.ComputeEffectiveCoverage(key, capture, presence, nil)
 	if err != nil {
 		return history.EffectiveCoverage{}, err
 	}
 	start, end := query.Start, query.End
-	if !query.AsOf.IsZero() && (end.IsZero() || query.AsOf.Before(end)) {
-		end = query.AsOf
-	}
 	if !start.IsZero() && !end.IsZero() && !end.After(start) {
 		coverage.Intervals = []history.Interval{}
 		coverage.Status = history.CoverageUnknown
@@ -306,21 +319,38 @@ func computeQueryCoverage(key history.CoverageKey, capture []history.CaptureEpoc
 	return coverage, nil
 }
 
-func coverageCaptureWhere(query history.Query) string {
-	if query.Runtime == "" {
+func coverageCaptureWhere(query history.CoverageQuery) string {
+	conditions := make([]string, 0, 3)
+	if query.Runtime != "" {
+		conditions = append(conditions, "runtime = ?")
+	}
+	if !query.Start.IsZero() {
+		conditions = append(conditions, "(ended_at IS NULL OR ended_at > ?)")
+	}
+	if !query.End.IsZero() {
+		conditions = append(conditions, "started_at < ?")
+	}
+	if len(conditions) == 0 {
 		return ""
 	}
-	return " WHERE runtime = ?"
+	return " WHERE " + strings.Join(conditions, " AND ")
 }
 
-func coverageCaptureArgs(query history.Query) []any {
-	if query.Runtime == "" {
-		return nil
+func coverageCaptureArgs(query history.CoverageQuery) []any {
+	args := make([]any, 0, 3)
+	if query.Runtime != "" {
+		args = append(args, query.Runtime)
 	}
-	return []any{query.Runtime}
+	if !query.Start.IsZero() {
+		args = append(args, formatEpochTimestamp(query.Start))
+	}
+	if !query.End.IsZero() {
+		args = append(args, formatEpochTimestamp(query.End))
+	}
+	return args
 }
 
-func coveragePresenceWhere(query history.Query) string {
+func coveragePresenceWhere(query history.CoverageQuery) string {
 	conditions := make([]string, 0, 5)
 	if query.Runtime != "" {
 		conditions = append(conditions, "runtime = ?")
@@ -331,11 +361,11 @@ func coveragePresenceWhere(query history.Query) string {
 	if query.CapabilityName != "" {
 		conditions = append(conditions, "capability_name = ?")
 	}
-	if query.Scope != "" {
-		conditions = append(conditions, "scope = ?")
+	if !query.Start.IsZero() {
+		conditions = append(conditions, "(ended_at IS NULL OR ended_at > ?)")
 	}
-	if query.Source != "" {
-		conditions = append(conditions, "source = ?")
+	if !query.End.IsZero() {
+		conditions = append(conditions, "started_at < ?")
 	}
 	if len(conditions) == 0 {
 		return ""
@@ -343,7 +373,7 @@ func coveragePresenceWhere(query history.Query) string {
 	return " WHERE " + strings.Join(conditions, " AND ")
 }
 
-func coveragePresenceArgs(query history.Query) []any {
+func coveragePresenceArgs(query history.CoverageQuery) []any {
 	args := make([]any, 0, 5)
 	if query.Runtime != "" {
 		args = append(args, query.Runtime)
@@ -354,11 +384,32 @@ func coveragePresenceArgs(query history.Query) []any {
 	if query.CapabilityName != "" {
 		args = append(args, query.CapabilityName)
 	}
-	if query.Scope != "" {
-		args = append(args, query.Scope)
+	if !query.Start.IsZero() {
+		args = append(args, formatEpochTimestamp(query.Start))
 	}
-	if query.Source != "" {
-		args = append(args, query.Source)
+	if !query.End.IsZero() {
+		args = append(args, formatEpochTimestamp(query.End))
 	}
 	return args
+}
+
+func coverageIdentityFilters(alias, nameColumn string, query history.CoverageQuery) (string, []any) {
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+	if query.Runtime != "" {
+		conditions = append(conditions, alias+`.runtime = ?`)
+		args = append(args, query.Runtime)
+	}
+	if query.CapabilityType != "" {
+		conditions = append(conditions, alias+`.capability_type = ?`)
+		args = append(args, query.CapabilityType)
+	}
+	if query.CapabilityName != "" {
+		conditions = append(conditions, alias+`.`+nameColumn+` = ?`)
+		args = append(args, query.CapabilityName)
+	}
+	if len(conditions) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
 }

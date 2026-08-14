@@ -161,9 +161,12 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 			result[index].InstalledScopes = scopes
 		}
 		result[index].Coverage = coverage[key]
-		result[index].ObservationOnlyCoverage = coverage[key]
 	}
-	effective, err := s.QueryEffectiveCoverage(ctx, query)
+	coverageQuery, err := coverageQueryForHistoryQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	effective, err := s.QueryEffectiveCoverage(ctx, coverageQuery)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +178,7 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 	for index := range result {
 		key := historyKey{runtime: result[index].Runtime, typ: result[index].CapabilityType, name: result[index].CapabilityName}
 		if item, ok := effectiveByKey[key]; ok {
-			result[index].EffectiveCoverage = item
+			result[index].EffectiveCoverage = cloneEffectiveCoverage(*item)
 		} else {
 			result[index].EffectiveCoverage = &history.EffectiveCoverage{
 				Key:       history.CoverageKey{Runtime: key.runtime, CapabilityType: key.typ, CapabilityName: key.name},
@@ -203,19 +206,51 @@ func historyUsageFilters(alias string, query history.Query) (string, []any) {
 }
 
 func historyCurrentFilters(alias string, query history.Query) (string, []any) {
-	conditions, args := historyIdentityConditions(alias, "name", query)
-	if query.Scope != "" {
-		conditions = append(conditions, alias+`.scope = ?`)
-		args = append(args, query.Scope)
+	return historyIdentityFilters(alias, "name", query)
+}
+
+// coverageQueryForHistoryQuery translates the released closed event interval
+// [Start, End] to the explicit half-open coverage interval [Start, End+1ns).
+// A nanosecond is the store's timestamp precision. At the representable time
+// ceiling there is no greater endpoint; retaining End is the only safe
+// half-open bound and, importantly, avoids an overflow or an unbounded scan.
+func coverageQueryForHistoryQuery(query history.Query) (history.CoverageQuery, error) {
+	coverage := history.CoverageQuery{
+		Start:          query.Start,
+		Runtime:        query.Runtime,
+		CapabilityType: query.CapabilityType,
+		CapabilityName: query.CapabilityName,
 	}
-	if query.Source != "" {
-		conditions = append(conditions, alias+`.source = ?`)
-		args = append(args, query.Source)
+	if query.End.IsZero() {
+		return coverage, nil
 	}
-	if len(conditions) == 0 {
-		return "", args
+	coverage.End = addCoveragePrecision(query.End)
+	if err := coverage.Validate(); err != nil {
+		return history.CoverageQuery{}, fmt.Errorf("translate history interval to coverage interval: %w", err)
 	}
-	return " WHERE " + strings.Join(conditions, " AND "), args
+	return coverage, nil
+}
+
+func addCoveragePrecision(value time.Time) (result time.Time) {
+	value = value.UTC()
+	defer func() {
+		if recover() != nil {
+			result = value
+		}
+	}()
+	next := value.Add(time.Nanosecond)
+	// Epoch persistence accepts the fixed four-digit UTC timestamp form. If
+	// the increment leaves that representable range, retain the finite bound
+	// rather than turning it into an open interval or an invalid SQL value.
+	if !next.After(value) || next.Year() < 0 || next.Year() > 9999 || len(next.Format(epochTimestampLayout)) != len(epochTimestampLayout) {
+		return value
+	}
+	return next
+}
+
+func cloneEffectiveCoverage(value history.EffectiveCoverage) *history.EffectiveCoverage {
+	value.Intervals = append([]history.Interval(nil), value.Intervals...)
+	return &value
 }
 
 func historyIdentityConditions(alias, nameColumn string, query history.Query) ([]string, []any) {
