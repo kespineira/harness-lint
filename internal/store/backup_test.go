@@ -41,7 +41,7 @@ func TestBackupHealthyPopulatedDatabasePreservesSchemaAndEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backup SchemaStatus(): %v", err)
 	}
-	if status != (SchemaStatus{Current: 6, Latest: 6}) {
+	if status != (SchemaStatus{Current: 7, Latest: 7}) {
 		t.Fatalf("backup schema = %#v", status)
 	}
 	got, err := backup.ListUsageEvents(ctx, time.Time{})

@@ -21,7 +21,7 @@ func TestDatabaseStatusEmptyAndPopulatedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DatabaseStatus(empty): %v", err)
 	}
-	if status.Path != ":memory:" || status.Schema != (SchemaStatus{Current: 6, Latest: 6}) || status.SizeBytes != nil || status.UsageEventCount != 0 || status.OldestObservedAt != nil || status.LatestObservedAt != nil {
+	if status.Path != ":memory:" || status.Schema != (SchemaStatus{Current: 7, Latest: 7}) || status.SizeBytes != nil || status.UsageEventCount != 0 || status.OldestObservedAt != nil || status.LatestObservedAt != nil {
 		t.Fatalf("empty status = %#v", status)
 	}
 
@@ -45,7 +45,7 @@ func TestDatabaseStatusEmptyAndPopulatedDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DatabaseStatus(populated): %v", err)
 	}
-	if status.Path != path || status.Schema != (SchemaStatus{Current: 6, Latest: 6}) || status.SizeBytes == nil || *status.SizeBytes <= 0 || status.UsageEventCount != 2 {
+	if status.Path != path || status.Schema != (SchemaStatus{Current: 7, Latest: 7}) || status.SizeBytes == nil || *status.SizeBytes <= 0 || status.UsageEventCount != 2 {
 		t.Fatalf("populated status = %#v", status)
 	}
 	if status.OldestObservedAt == nil || !status.OldestObservedAt.Equal(first.ObservedAt) || status.LatestObservedAt == nil || !status.LatestObservedAt.Equal(second.ObservedAt) {
