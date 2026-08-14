@@ -213,10 +213,13 @@ func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing
 	if !installed.Installed || !reflect.DeepEqual(installed.InstalledScopes, []domain.Scope{domain.ScopeProject}) || installed.Uses != 0 {
 		t.Fatalf("installed zero-use aggregate = %#v", installed)
 	}
+	if installed.AdvertisedObservations != 0 || installed.LoadedObservations != 0 || installed.ObservedAdvertisedSessions != nil {
+		t.Fatalf("installed zero-use observation counts = %#v", installed)
+	}
 	if installed.Coverage == nil || installed.Coverage.FirstInventoryObservedAt == nil || !installed.Coverage.FirstInventoryObservedAt.Equal(observed) || installed.Coverage.LastInventoryObservedAt == nil || !installed.Coverage.LastInventoryObservedAt.Equal(observed) || installed.Coverage.FirstUsageObservedAt != nil || installed.Coverage.LastUsageObservedAt != nil || installed.Coverage.FirstDirectHookObservedAt != nil || installed.Coverage.LastDirectHookObservedAt != nil {
 		t.Fatalf("installed zero-use coverage = %#v", installed.Coverage)
 	}
-	if used.Installed || used.Uses != 1 || used.DistinctInvocationSessions != 1 {
+	if used.Installed || used.Uses != 1 || used.DistinctInvocationSessions != 1 || used.AdvertisedObservations != 1 || used.LoadedObservations != 0 {
 		t.Fatalf("usage aggregate identity counts = %#v", used)
 	}
 	if used.InvocationEvidence[domain.ProvenanceHook] != 1 || used.InvocationEvidence[domain.ProvenanceTranscript] != 1 {
@@ -240,6 +243,92 @@ func TestHistoryAggregatesInventoryUsageEvidenceAndAdvertisedSessions(t *testing
 	}
 	if len(evidence) != 2 || evidence[0].Provenance != domain.ProvenanceHook || evidence[1].Provenance != domain.ProvenanceTranscript {
 		t.Fatalf("normalized evidence = %#v", evidence)
+	}
+}
+
+func TestHistoryStateObservationCountsUseClosedIntervalAndStayIndependent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	start := time.Date(2026, 8, 14, 11, 30, 0, 0, time.UTC)
+	end := start.Add(2 * time.Minute)
+
+	installed := testCapability("inventory-only", time.Time{}, time.Time{})
+	installed.Type = domain.CapabilityTool
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, start, []domain.Capability{installed}); err != nil {
+		t.Fatalf("RecordInventory(): %v", err)
+	}
+
+	advertisedAtStart := testUsageEvent(start, "stateful", domain.EventAdvertised)
+	advertisedAtStart.SessionID = "advertised-session"
+	advertisedAtStart.SourceIdentity = "advertised-start"
+	advertisedAtEnd := advertisedAtStart
+	advertisedAtEnd.ObservedAt = end
+	advertisedAtEnd.SourceIdentity = "advertised-end"
+	loadedAtStart := testUsageEvent(start, "stateful", domain.EventLoaded)
+	loadedAtStart.SessionID = "loaded-session"
+	loadedAtStart.SourceIdentity = "loaded-start"
+	invokedAtEnd := testUsageEvent(end, "stateful", domain.EventInvoked)
+	invokedAtEnd.SessionID = "invocation-session"
+	invokedAtEnd.SourceIdentity = "invoked-end"
+	advertisedBefore := testUsageEvent(start.Add(-time.Second), "stateful", domain.EventAdvertised)
+	advertisedBefore.SessionID = advertisedAtStart.SessionID
+	advertisedBefore.SourceIdentity = "advertised-before"
+	loadedAfter := testUsageEvent(end.Add(time.Second), "stateful", domain.EventLoaded)
+	loadedAfter.SessionID = loadedAtStart.SessionID
+	loadedAfter.SourceIdentity = "loaded-after"
+	invokedAfter := testUsageEvent(end.Add(time.Second), "stateful", domain.EventInvoked)
+	invokedAfter.SessionID = invokedAtEnd.SessionID
+	invokedAfter.SourceIdentity = "invoked-after"
+
+	otherAdvertised := testUsageEvent(start, "other-name", domain.EventAdvertised)
+	otherAdvertised.Runtime = domain.RuntimeClaude
+	otherAdvertised.SessionID = "other-advertised-session"
+	otherAdvertised.SourceIdentity = "other-advertised"
+	otherLoaded := testUsageEvent(end, "other-name", domain.EventLoaded)
+	otherLoaded.Runtime = domain.RuntimeClaude
+	otherLoaded.SessionID = "other-loaded-session"
+	otherLoaded.SourceIdentity = "other-loaded"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{
+		advertisedAtStart, advertisedAtEnd, loadedAtStart, invokedAtEnd,
+		advertisedBefore, loadedAfter, invokedAfter, otherAdvertised, otherLoaded,
+	}); err != nil {
+		t.Fatalf("InsertUsageEvents(state observations): %v", err)
+	}
+
+	rows, err := s.QueryInvocationHistory(ctx, history.Query{CapabilityType: domain.CapabilityTool, Start: start, End: end})
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(state observations): %v", err)
+	}
+	byKey := make(map[string]history.Aggregate, len(rows))
+	for _, row := range rows {
+		byKey[string(row.Runtime)+"/"+row.CapabilityName] = row
+	}
+	if len(byKey) != 3 {
+		t.Fatalf("state observation rows = %#v, want codex stateful, codex inventory-only, and claude other-name", rows)
+	}
+
+	stateful, ok := byKey["codex/stateful"]
+	if !ok {
+		t.Fatalf("stateful aggregate missing from %#v", byKey)
+	}
+	if stateful.AdvertisedObservations != 2 || stateful.LoadedObservations != 1 {
+		t.Fatalf("state observation counts = %#v, want advertised=2 loaded=1", stateful)
+	}
+	if stateful.ObservedAdvertisedSessions == nil || *stateful.ObservedAdvertisedSessions != 1 {
+		t.Fatalf("state advertised sessions = %#v, want one session", stateful.ObservedAdvertisedSessions)
+	}
+	if stateful.Uses != 1 || stateful.DistinctInvocationSessions != 1 || stateful.FirstObservedAt == nil || !stateful.FirstObservedAt.Equal(end) || stateful.LastObservedAt == nil || !stateful.LastObservedAt.Equal(end) || stateful.FirstEffectiveActivityAt == nil || !stateful.FirstEffectiveActivityAt.Equal(end) || stateful.LastEffectiveActivityAt == nil || !stateful.LastEffectiveActivityAt.Equal(end) {
+		t.Fatalf("state invocation-only aggregate = %#v", stateful)
+	}
+
+	inventory := byKey["codex/inventory-only"]
+	if !inventory.Installed || inventory.Uses != 0 || inventory.DistinctInvocationSessions != 0 || inventory.AdvertisedObservations != 0 || inventory.LoadedObservations != 0 || inventory.ObservedAdvertisedSessions != nil || inventory.FirstObservedAt != nil || inventory.LastObservedAt != nil || inventory.Coverage == nil || inventory.Coverage.FirstUsageObservedAt != nil || inventory.Coverage.LastUsageObservedAt != nil || inventory.Coverage.FirstDirectHookObservedAt != nil || inventory.Coverage.LastDirectHookObservedAt != nil {
+		t.Fatalf("current inventory without interval events = %#v", inventory)
+	}
+
+	other := byKey[string(domain.RuntimeClaude)+"/other-name"]
+	if other.Uses != 0 || other.DistinctInvocationSessions != 0 || other.AdvertisedObservations != 1 || other.LoadedObservations != 1 || other.ObservedAdvertisedSessions == nil || *other.ObservedAdvertisedSessions != 1 || other.FirstObservedAt != nil || other.LastObservedAt != nil {
+		t.Fatalf("multiple runtime/name state aggregate = %#v", other)
 	}
 }
 
@@ -415,6 +504,9 @@ func TestHistoryFallbackAndAdvertisedUnknownRemainConservative(t *testing.T) {
 	}
 	if rows[0].ObservedAdvertisedSessions != nil {
 		t.Fatalf("advertised sessions without advertised evidence = %#v, want unknown", rows[0].ObservedAdvertisedSessions)
+	}
+	if rows[0].AdvertisedObservations != 0 || rows[0].LoadedObservations != 0 {
+		t.Fatalf("fallback state counts = %#v, want zero", rows[0])
 	}
 }
 

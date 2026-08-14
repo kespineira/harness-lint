@@ -35,10 +35,9 @@ func (s *Store) QueryInvocationHistory(ctx context.Context, query history.Query)
 	currentClause, currentArgs := historyCurrentFilters("c", query)
 	invocationClause, invocationArgs := historyUsageFilters("u", query)
 	evidenceClause, evidenceArgs := historyUsageFilters("u", query)
-	advertisedClause, advertisedArgs := historyUsageFilters("u", query)
+	stateClause, stateArgs := historyUsageFilters("u", query)
 	invocationClause += historyEventTypeFilter(invocationClause, "invoked")
 	evidenceClause += historyEventTypeFilter(evidenceClause, "invoked")
-	advertisedClause += historyEventTypeFilter(advertisedClause, "advertised")
 	statement := `WITH keys AS (
 	SELECT u.runtime, u.capability_type, u.capability_name
 	FROM usage_events AS u` + usageClause + `
@@ -69,10 +68,12 @@ SELECT c.runtime, c.capability_type, c.name
 	FROM usage_events AS u
 	INNER JOIN usage_event_evidence AS e ON e.fingerprint = u.fingerprint` + evidenceClause + `
 	GROUP BY u.runtime, u.capability_type, u.capability_name
-), advertised AS (
+), state_counts AS (
 	SELECT u.runtime, u.capability_type, u.capability_name,
-		COUNT(DISTINCT u.session_id) AS advertised_sessions
-	FROM usage_events AS u` + advertisedClause + `
+		SUM(CASE WHEN u.event_type = 'advertised' THEN 1 ELSE 0 END) AS advertised_observations,
+		SUM(CASE WHEN u.event_type = 'loaded' THEN 1 ELSE 0 END) AS loaded_observations,
+		NULLIF(COUNT(DISTINCT CASE WHEN u.event_type = 'advertised' THEN u.session_id END), 0) AS advertised_sessions
+	FROM usage_events AS u` + stateClause + `
 	GROUP BY u.runtime, u.capability_type, u.capability_name
 )
 SELECT k.runtime, k.capability_type, k.capability_name,
@@ -80,19 +81,20 @@ SELECT k.runtime, k.capability_type, k.capability_name,
 	i.first_observed_at, i.last_observed_at,
 	i.first_effective_at, i.last_effective_at,
 	COALESCE(e.hook_count, 0), COALESCE(e.transcript_count, 0), COALESCE(e.import_count, 0),
-	ad.advertised_sessions
+	COALESCE(sc.advertised_observations, 0), COALESCE(sc.loaded_observations, 0),
+	sc.advertised_sessions
 FROM keys AS k
 LEFT JOIN invocation AS i ON i.runtime = k.runtime AND i.capability_type = k.capability_type AND i.capability_name = k.capability_name
 LEFT JOIN evidence AS e ON e.runtime = k.runtime AND e.capability_type = k.capability_type AND e.capability_name = k.capability_name
-LEFT JOIN advertised AS ad ON ad.runtime = k.runtime AND ad.capability_type = k.capability_type AND ad.capability_name = k.capability_name
+LEFT JOIN state_counts AS sc ON sc.runtime = k.runtime AND sc.capability_type = k.capability_type AND sc.capability_name = k.capability_name
 ORDER BY k.runtime, k.capability_type, k.capability_name`
 
-	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(invocationArgs)+len(evidenceArgs)+len(advertisedArgs))
+	args := make([]any, 0, len(usageArgs)+len(currentArgs)+len(invocationArgs)+len(evidenceArgs)+len(stateArgs))
 	args = append(args, usageArgs...)
 	args = append(args, currentArgs...)
 	args = append(args, invocationArgs...)
 	args = append(args, evidenceArgs...)
-	args = append(args, advertisedArgs...)
+	args = append(args, stateArgs...)
 	rows, err := s.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query invocation history: %w", err)
@@ -103,12 +105,15 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 		var aggregate history.Aggregate
 		var firstObserved, lastObserved, firstEffective, lastEffective sql.NullString
 		var uses, sessions, hookCount, transcriptCount, importCount int64
+		var advertisedObservations, loadedObservations int64
 		var advertisedSessions sql.NullInt64
-		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &aggregate.CapabilityName, &uses, &sessions, &firstObserved, &lastObserved, &firstEffective, &lastEffective, &hookCount, &transcriptCount, &importCount, &advertisedSessions); err != nil {
+		if err := rows.Scan(&aggregate.Runtime, &aggregate.CapabilityType, &aggregate.CapabilityName, &uses, &sessions, &firstObserved, &lastObserved, &firstEffective, &lastEffective, &hookCount, &transcriptCount, &importCount, &advertisedObservations, &loadedObservations, &advertisedSessions); err != nil {
 			return nil, fmt.Errorf("scan invocation history: %w", err)
 		}
 		aggregate.Uses = uses
 		aggregate.DistinctInvocationSessions = sessions
+		aggregate.AdvertisedObservations = advertisedObservations
+		aggregate.LoadedObservations = loadedObservations
 		aggregate.FirstObservedAt, err = parseNullableTimestamp(firstObserved)
 		if err != nil {
 			return nil, fmt.Errorf("parse history first observed time: %w", err)

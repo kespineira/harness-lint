@@ -75,6 +75,11 @@ type Aggregate struct {
 	// each source while Uses remains one.
 	InvocationEvidence map[domain.Provenance]int64
 
+	// AdvertisedObservations and LoadedObservations are canonical non-negative
+	// event counts from usage_events in the selected interval. They are
+	// independent of invocation totals and current inventory state.
+	AdvertisedObservations int64
+	LoadedObservations     int64
 	// ObservedAdvertisedSessions is nil when no explicit advertised-event
 	// evidence exists; it is non-nil only when such evidence exists in the
 	// selected interval.
