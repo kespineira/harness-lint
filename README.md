@@ -75,8 +75,8 @@ database.
 ## Commands and flags
 
 The implemented commands are `scan`, `usage`, `report`, `context`, `stale`,
-`doctor`, `hooks`, and `ingest`. Run `harness-lint <command> --help` for the
-same options shown by the binary. The relevant command forms are:
+`doctor`, `hooks`, `db`, and `ingest`. Run `harness-lint <command> --help` for
+the same options shown by the binary. The relevant command forms are:
 
 ```text
 harness-lint scan    [--db PATH] [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--hook-capture PATH]... [--since RFC3339] [--now RFC3339]
@@ -85,7 +85,8 @@ harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint context [--db PATH] [--days N] [--now RFC3339]
 harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
 harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint db      <status|check|backup> [--json] [--db PATH] [--config-dir PATH] [--output PATH] [--now RFC3339]
+harness-lint db      <status|check> [--json] [--db PATH] [--config-dir PATH] [--now RFC3339]
+harness-lint db      backup [--db PATH] [--config-dir PATH] [--output PATH] [--now RFC3339]
 harness-lint hooks status    [claude|codex] [--json] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint hooks test      [claude|codex] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
 harness-lint hooks install   [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
@@ -171,9 +172,12 @@ Command responsibilities:
   keeping metadata and body semantics separate.
 - `stale` prints the same capability evidence focused on `KEEP`, `REVIEW`,
   and `STALE` classifications. A definition is stale only when its last
-  loaded/invoked observation is older than the threshold; equality is still
-  `KEEP`. `DEAD` is reserved for a future completeness signal: an absent
-  event, source, or scan cannot prove terminal non-use.
+  observed invocation is older than the threshold; loaded-only observations
+  do not establish recency, and equality is still `KEEP`. Stale wording is
+  about the last observed invocation in this store only; it never loads a
+  capability or claims lifetime non-use. `DEAD` is reserved for a future
+  completeness signal: an absent event, source, or scan cannot prove terminal
+  non-use.
 - `doctor` performs discovery and prints malformed, duplicate, broken-path,
   and unresolved-command findings without opening or creating the SQLite
   database.
@@ -474,8 +478,9 @@ inventory. Such unmatched events are printed as `usage-only` rather than
 invented inventory.
 
 For both human and JSON output, an advertised-session count is `unknown` (or
-`null`/omitted in the documented JSON shape) when no explicit advertised
-event was observed. It is not reported as zero: zero would assert that an
+`null` in JSON) when no explicit advertised event was observed. The JSON field
+`observed_advertised_sessions` is always emitted and is `null` when unknown;
+it is never omitted. It is not reported as zero: zero would assert that an
 advertised event occurred in zero sessions. See the [public JSON schema
 reference](docs/cli-json-schemas.md) for the command-specific nullability.
 
@@ -487,6 +492,17 @@ separate capture epoch. Modeled effective coverage is only the intersection
 of those confirmed epochs, and observation windows alone never establish
 continuity or lifetime completeness. This is why `coverage_confidence` can
 remain `unknown` even when events exist.
+
+The opt-in 100,000-row metadata-only storage check is:
+
+```sh
+go test -tags storage_scale ./internal/store -run '^TestStorageScale100kMetadataOnly$' -count=1 -v
+```
+
+Approximate evidence from one accepted local run was insertion `~7.3s`, usage
+history `~516ms`, monthly usage `~194ms`, effective coverage `<1ms`, quick
+check `~365ms`, backup `~216ms`, and a database of `~114MB`. These are local,
+non-guaranteed measurements for orientation, not performance promises.
 
 ## JSON contracts and examples
 
@@ -576,7 +592,8 @@ Codex hooks/files/transcripts ───────┘                         �
 - Analysis is deterministic: it validates inputs, separates advertised,
   loaded, and invoked evidence, propagates confidence, detects duplicates,
   and applies explicit stale/review policy without opaque scores.
-- Scan, report, context, stale, doctor, and ingest are read-only against
+- Scan, report, context, stale, doctor, ingest, and database diagnostics are
+  read-only against
   harness sources and write only local state or output. The opt-in hook
   manager is the sole configuration writer and edits only its exact owned
   entries. `usage` and `hooks test` are also read-only. Command lookup is used
@@ -621,11 +638,12 @@ go build -trimpath -o "$smoke_binary_root/harness-lint" ./cmd/harness-lint
 ./scripts/isolated-smoke.sh "$smoke_binary_root/harness-lint"
 ```
 
-The script runs help, scan, hooks status/test, usage (normal, custom days,
-monthly, and JSON), stale (normal and JSON), context, doctor, and database
-status/check/backup. It must receive the built binary path; it creates and
-removes its own disposable tree and never targets live Claude or Codex
-configuration.
+The script runs help, scan, hooks install/status/test, usage (default, 90
+days, runtime/type filters, monthly, and JSON), report/stale (default and
+JSON), context, doctor, and database status/check (default and JSON). It also
+checks both default and explicit database backups are nonempty. It must
+receive the built binary path; it creates and removes its own disposable tree
+and never targets live Claude or Codex configuration.
 
 ## License
 

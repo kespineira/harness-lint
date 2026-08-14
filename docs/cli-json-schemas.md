@@ -25,6 +25,11 @@ Every collection is emitted as an array. Empty collections are `[]`, not
 `null`, unless a field is explicitly documented as a nullable object or
 scalar below.
 
+Nullable scalar fields are still emitted. In particular,
+`observed_advertised_sessions` is always present on report/stale capability
+and usage-only rows; it is `null` when no explicit advertised-event session
+evidence exists, never omitted.
+
 ## `report --json`
 
 The top-level object is:
@@ -81,7 +86,7 @@ The remaining capability fields are:
 | `evidence` | Privacy-safe explanation of what the evidence can establish. |
 | `evidence_sources` | Sorted distinct provenance names such as `hook`, `transcript`, and `import`. |
 | `advertised` | Observed advertised-event count for this key. |
-| `observed_advertised_sessions` | Distinct sessions for explicit advertised events. Omitted when no advertised-event evidence exists; it is not `0` in that case. |
+| `observed_advertised_sessions` | Always emitted; distinct sessions for explicit advertised events, or `null` when no advertised-event evidence exists. It is not `0` in that case. |
 | `invoked_in_advertised_sessions` | Distinct invoked sessions that intersect explicit advertised sessions. Nullable for the same reason as `observed_advertised_sessions`; this is an evidence intersection, not a percentage or cost metric. |
 | `loaded` | Observed loaded-event count, independent of advertised and invoked counts. |
 | `invocation_count` | Observed invoked-event count only. |
@@ -90,10 +95,11 @@ The remaining capability fields are:
 | `first_effective_activity_at`, `last_effective_activity_at` | Nullable invocation effective-time bounds. Effective time uses a recognized source timestamp, otherwise local `observed_at`. |
 | `first_invocation_observed_at`, `last_invocation_observed_at` | Nullable invocation receive/import-time bounds. |
 | `first_invocation_effective_at`, `last_invocation_effective_at` | Nullable invocation effective-time bounds. |
+| `first_seen`, `last_seen` | Nullable inventory-definition observation bounds from the current capability DTO. |
 | `last_invocation_age` | Nullable duration string relative to `generated_at`; null when no invocation exists. |
 | `last_invocation_in_future` | Whether the latest effective invocation was after the analysis clock. |
 | `coverage` | Optional observation-window object; see [observation coverage](#observation-coverage). |
-| `effective_coverage` | Modeled capture/presence intersection with `status` and nullable `covered_duration`; it is `unknown` without confirmed intersection. |
+| `effective_coverage` | Modeled confirmed direct-capture/presence intersection with `status` and nullable `covered_duration`; it is `unknown` without a positive intersection. |
 
 `advertised`, `loaded`, and `invocation_count` are intentionally independent.
 An advertised observation does not become a load or invocation; a loaded
@@ -117,11 +123,13 @@ could be justified.
 
 `usage_only[]` has the same aggregate evidence fields as a capability where
 applicable: `runtime`, `type`, `name`, `advertised`,
-`observed_advertised_sessions`, `invoked_in_advertised_sessions`, `loaded`, `invocation_count`,
-`distinct_sessions`, `evidence_sources`, all eight nullable timestamp fields,
-and optional `coverage`. It has no installed/configuration fields because its
-definition is not in the current inventory. This is an explicit observation,
-not invented inventory.
+`observed_advertised_sessions`, `invoked_in_advertised_sessions`, `loaded`,
+`invocation_count`, `distinct_sessions`, `evidence_sources`, all eight
+nullable timestamp fields, optional `coverage`, and `effective_coverage`.
+`invoked_in_advertised_sessions` is always emitted and nullable when the
+advertised-session denominator is unknown. It has no installed/configuration
+fields because its definition is not in the current inventory. This is an
+explicit observation, not invented inventory.
 
 `findings[]` contains `runtime`, `type`, `name`, `code`, `severity`,
 `confidence`, `definitions`, and `message`. `definitions` is a count; the
@@ -134,7 +142,9 @@ JSON contract never embeds source-bearing definitions, paths, or hashes.
 `report --json`. It intentionally omits `usage_only` because stale policy
 evaluates current installed definitions only. It emits JSON only: terminal
 headings such as `as-of=` and `capabilities:` are not mixed into the JSON
-stream.
+stream. Its capability rows therefore include the report fields `first_seen`,
+`last_seen`, and `effective_coverage` (as well as the always emitted nullable
+`observed_advertised_sessions`).
 
 The stale boundary is strict: an invocation exactly `N` days old is still
 within the threshold; only an older invocation is `STALE`. A definition with
@@ -180,11 +190,11 @@ Each `capabilities[]` row contains:
 | `first_effective_activity_at`, `last_effective_activity_at` | Nullable invocation effective-time bounds. |
 | `provenance` | `{ "hook": N, "transcript": N, "import": N, "sources": [...] }`; source subtotals can each include the same stable invocation when evidence arrived through multiple paths, while `uses` remains deduplicated. |
 | `advertised_observations` | Advertised-event count, independent of `uses`. |
-| `advertised_sessions` | Nullable distinct advertised-event session count. `null` means no explicit advertised-event evidence, not zero sessions. |
+| `advertised_sessions` | Always emitted; nullable distinct advertised-event session count. `null` means no explicit advertised-event evidence, not zero sessions. |
 | `invoked_in_advertised_sessions` | Nullable distinct-session intersection between invocation and advertised evidence; an observation-efficiency count, never a percentage. |
 | `loaded_observations` | Loaded-event count, independent of advertised and invoked counts. |
 | `observation_only_coverage` | Nullable observation-window object; it is not a completeness or continuity claim. |
-| `effective_coverage` | Modeled capture/presence intersection with `status` and nullable `covered_duration`; it is not implied by observation-only windows. |
+| `effective_coverage` | Modeled confirmed direct-capture/presence intersection with `status` and nullable `covered_duration`; it is not implied by observation-only windows. |
 | `monthly` | Omitted unless `--monthly` is supplied; then it contains UTC calendar-month buckets. |
 
 With `--monthly`, every month touched by the period is present, including
@@ -216,7 +226,12 @@ runtime delivery. Missing, malformed, unsupported, or uninstalled sources
 can make coverage incomplete. `effective_coverage` is a separate modeled
 field: it is the intersection of confirmed direct-capture epochs and
 capability-presence epochs, and is `unknown` when no positive intersection is
-proven. An observation window never upgrades coverage confidence by itself.
+proven. Its `status` is `unknown` or `partial`; `complete` is reserved and is
+never emitted. `covered_duration` is nullable and is present only for a
+positive partial intersection. Capture and presence epochs are half-open UTC
+intervals, and open or future endpoints are clipped at the command's
+`generated_at` before the duration is calculated. An observation window never
+upgrades coverage confidence by itself.
 
 ## `hooks status --json`
 
