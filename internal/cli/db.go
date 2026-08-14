@@ -91,7 +91,7 @@ func runDatabaseStatus(ctx context.Context, db *store.Store, config commandConfi
 		size = strconv.FormatInt(*document.SizeBytes, 10)
 	}
 	fmt.Fprintf(out, "db status path=%s schema-current=%d schema-latest=%d size-bytes=%s usage-events=%d oldest-observed=%s latest-observed=%s integrity=not-checked\n",
-		document.Path, document.Schema.Current, document.Schema.Latest, size, document.UsageEventCount,
+		cleanText(document.Path), document.Schema.Current, document.Schema.Latest, size, document.UsageEventCount,
 		statusTimestamp(document.OldestObservedAt), statusTimestamp(document.LatestObservedAt))
 	return nil
 }
@@ -181,7 +181,7 @@ func writeDatabaseBackupResult(out io.Writer, destination string) error {
 	if err != nil {
 		return errors.New("read database backup size")
 	}
-	fmt.Fprintf(out, "db backup output=%s size-bytes=%d\n", destination, info.Size())
+	fmt.Fprintf(out, "db backup output=%s size-bytes=%d\n", cleanText(destination), info.Size())
 	return nil
 }
 
