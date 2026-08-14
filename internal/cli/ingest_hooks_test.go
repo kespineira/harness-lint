@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
 	"github.com/kespineira/harness-lint/internal/store"
 )
@@ -215,5 +216,158 @@ func TestExecuteHooksLifecycleAndStableJSON(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); err != nil {
 		t.Fatalf("dry-run removed config: %v", err)
+	}
+}
+
+func TestExecuteIngestFailuresRecordOneBoundedPrivacySafeHealthObservation(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "state", "harness-lint.db")
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	options := Options{Now: func() time.Time { return now }}
+	malformed := `{"hook_event_name":"PostToolUse","prompt":"PROMPT_SENTINEL"`
+	unsupported := `{"hook_event_name":"UserPromptSubmit","session_id":"s","cwd":"/project","tool_name":"Bash","tool_input":{"query":"ARGS_SENTINEL"},"tool_response":"OUTPUT_SENTINEL"}`
+	mismatch := `{"hook_event_name":"UserPromptExpansion","session_id":"s","cwd":"/project","expansion_type":"slash_command","command_name":"review","prompt":"PROMPT_SENTINEL"}`
+	cases := []struct {
+		name     string
+		args     []string
+		stdin    string
+		wantErr  string
+		wantKind capture.FailureKind
+	}{
+		{name: "malformed JSON", args: []string{"ingest", "--runtime", "codex", "--db", dbPath}, stdin: malformed, wantErr: "malformed payload", wantKind: capture.FailureMalformedPayload},
+		{name: "empty stdin", args: []string{"ingest", "--runtime", "codex", "--db", dbPath}, stdin: "", wantErr: "malformed payload", wantKind: capture.FailureMalformedPayload},
+		{name: "unsupported event", args: []string{"ingest", "--runtime", "codex", "--db", dbPath}, stdin: unsupported, wantErr: "unsupported event", wantKind: capture.FailureUnsupportedEvent},
+		{name: "payload mismatch", args: []string{"ingest", "--runtime", "claude", "--event", "PostToolUse", "--db", dbPath}, stdin: mismatch, wantErr: "unsupported event", wantKind: capture.FailureUnsupportedEvent},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := ExecuteWithOptions(options, test.args, strings.NewReader(test.stdin), &stdout, &stderr)
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("ingest error = %v, want %q", err, test.wantErr)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("failure output stdout=%q stderr=%q, want quiet Execute", stdout.String(), stderr.String())
+			}
+			for _, sentinel := range []string{"PROMPT_SENTINEL", "ARGS_SENTINEL", "OUTPUT_SENTINEL"} {
+				if strings.Contains(err.Error(), sentinel) {
+					t.Fatalf("error retained privacy sentinel %q: %v", sentinel, err)
+				}
+			}
+		})
+	}
+	db, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	health, err := db.GetCaptureHealth(context.Background(), domain.RuntimeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.ConsecutiveFailures != 3 || health.LastFailureKind == nil || *health.LastFailureKind != capture.FailureUnsupportedEvent {
+		t.Fatalf("Codex failure health = %#v, want three failures ending in unsupported_event", health)
+	}
+	claudeHealth, err := db.GetCaptureHealth(context.Background(), domain.RuntimeClaudeCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claudeHealth.ConsecutiveFailures != 1 || claudeHealth.LastFailureKind == nil || *claudeHealth.LastFailureKind != capture.FailureUnsupportedEvent {
+		t.Fatalf("Claude failure health = %#v, want one payload mismatch failure", claudeHealth)
+	}
+	events, err := db.ListUsageEvents(context.Background(), time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("failed ingest wrote usage events: %#v", events)
+	}
+}
+
+func TestExecuteIngestSuccessUpdatesDirectHealthButTranscriptImportDoesNot(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		runtime string
+		payload string
+		domain  domain.Runtime
+	}{
+		{
+			name:    "Claude",
+			runtime: "claude",
+			domain:  domain.RuntimeClaudeCode,
+			payload: `{"hook_event_name":"PostToolUse","session_id":"claude-session","cwd":"/project","tool_name":"Skill","tool_use_id":"claude-tool","tool_input":{"skill":"review"},"tool_response":{"text":"OUTPUT_SENTINEL"}}`,
+		},
+		{
+			name:    "Codex",
+			runtime: "codex",
+			domain:  domain.RuntimeCodex,
+			payload: `{"hook_event_name":"PostToolUse","session_id":"codex-session","cwd":"/project","turn_id":"turn-a","tool_name":"Bash","tool_use_id":"codex-tool","tool_input":{"command":"COMMAND_SENTINEL"},"tool_response":{"body":"OUTPUT_SENTINEL"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			dbPath := filepath.Join(root, "state", "harness-lint.db")
+			var stdout, stderr bytes.Buffer
+			if err := ExecuteWithOptions(Options{Now: func() time.Time { return now }}, []string{"ingest", "--runtime", test.runtime, "--db", dbPath}, strings.NewReader(test.payload), &stdout, &stderr); err != nil {
+				t.Fatalf("successful %s ingest error = %v", test.name, err)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("successful ingest output stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			db, err := store.Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			before, err := db.GetCaptureHealth(context.Background(), test.domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.LastSuccessfulDelivery == nil || !before.LastSuccessfulDelivery.Equal(now) || before.ConsecutiveFailures != 0 {
+				t.Fatalf("direct health = %#v, want successful delivery at receive time", before)
+			}
+			transcript := domain.UsageEvent{
+				ObservedAt:       now.Add(time.Minute),
+				Runtime:          test.domain,
+				SessionID:        "transcript-session",
+				ProjectID:        "transcript-project",
+				CapabilityType:   domain.CapabilityTool,
+				CapabilityName:   "transcript-tool",
+				EventType:        domain.EventInvoked,
+				Provenance:       domain.ProvenanceTranscript,
+				InvocationOrigin: domain.InvocationOriginUnknown,
+				SchemaVersion:    domain.CurrentUsageEventSchemaVersion,
+			}
+			if err := db.InsertUsageEvents(context.Background(), []domain.UsageEvent{transcript}); err != nil {
+				t.Fatalf("transcript import error = %v", err)
+			}
+			after, err := db.GetCaptureHealth(context.Background(), test.domain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.ConsecutiveFailures != before.ConsecutiveFailures || after.LastSuccessfulDelivery == nil || !after.LastSuccessfulDelivery.Equal(*before.LastSuccessfulDelivery) {
+				t.Fatalf("transcript import changed direct health: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestExecuteIngestUnavailableDatabaseReturnsSafeError(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(blocker, "state.db")
+	sentinel := `{"hook_event_name":"PostToolUse","prompt":"PROMPT_SENTINEL","tool_input":{"command":"COMMAND_SENTINEL"}`
+	var stdout, stderr bytes.Buffer
+	err := ExecuteWithOptions(Options{Now: func() time.Time { return time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC) }}, []string{"ingest", "--runtime", "codex", "--db", dbPath}, strings.NewReader(sentinel), &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "malformed payload") {
+		t.Fatalf("unavailable database error = %v, want safe malformed payload error", err)
+	}
+	if strings.Contains(err.Error(), "PROMPT_SENTINEL") || strings.Contains(err.Error(), "COMMAND_SENTINEL") || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("unavailable database leaked data/output: err=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
 }

@@ -13,6 +13,18 @@ import (
 	"github.com/kespineira/harness-lint/internal/domain"
 )
 
+// HealthReader is the narrow, read-only store surface consumed by capture
+// diagnostics. The self-test writes only inside a transaction that it rolls
+// back; callers still cannot reach arbitrary tables or mutation operations
+// through this interface.
+type HealthReader interface {
+	SchemaStatus(context.Context) (SchemaStatus, error)
+	SelfTestCaptureIngest(context.Context) error
+	GetCaptureHealth(context.Context, domain.Runtime) (capture.DeliveryHealth, error)
+}
+
+var _ HealthReader = (*Store)(nil)
+
 // IngestUsageEvent is the direct-hook write boundary. It requires hook
 // provenance and commits the canonical deduplicated event, its evidence row,
 // and a successful-delivery health update in one SQLite transaction. A retry

@@ -131,6 +131,13 @@ type Manager interface {
 	DryRun(context.Context, Action) (OperationResult, error)
 }
 
+// StatusReader is the read-only surface used by diagnostics. Keeping status
+// evaluation separate from mutation methods makes it impossible for a health
+// check to install, uninstall, or otherwise rewrite a runtime configuration.
+type StatusReader interface {
+	Status(context.Context) (StatusReport, error)
+}
+
 const (
 	// BinaryName is intentionally a PATH-based name. No temporary Go test or
 	// development path is ever written into a runtime configuration.

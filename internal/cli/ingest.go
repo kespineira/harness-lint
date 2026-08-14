@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
 	"github.com/kespineira/harness-lint/internal/hooks"
 	"github.com/kespineira/harness-lint/internal/runtime/claude"
@@ -39,29 +40,110 @@ func runIngest(ctx context.Context, config commandConfig, flags parsedFlags, std
 
 	payload, err := readIngestPayload(stdin)
 	if err != nil {
-		return err
+		return recordIngestFailure(ctx, config, runtimeName, capture.FailureMalformedPayload)
 	}
 	observedAt := config.now.UTC()
 	event, err := parseIngestPayload(runtimeName, payload, observedAt)
 	if err != nil {
-		return fmt.Errorf("ingest %s hook: %w", runtimeDisplayName(runtimeName), err)
+		return recordIngestFailure(ctx, config, runtimeName, classifyIngestParseError(err))
 	}
 	if flags.eventSet {
 		payloadEvent, ok := ingestPayloadEvent(payload)
 		if !ok || payloadEvent != wantedEvent {
-			return errors.New("hook payload event does not match --event")
+			return recordIngestFailure(ctx, config, runtimeName, capture.FailureUnsupportedEvent)
 		}
 	}
 
 	db, err := openStore(config)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return safeIngestError(runtimeName, classifyStoreError(err), false)
 	}
 	defer db.Close()
-	if err := db.InsertUsageEvents(ctx, []domain.UsageEvent{event}); err != nil {
-		return fmt.Errorf("insert usage event: %w", err)
+	if err := db.IngestUsageEvent(ctx, event); err != nil {
+		kind := classifyStoreError(err)
+		if recordErr := db.RecordCaptureFailure(ctx, capture.CaptureFailure{
+			Runtime:  runtimeName,
+			FailedAt: observedAt,
+			Kind:     kind,
+		}); recordErr != nil {
+			return safeIngestError(runtimeName, classifyStoreError(recordErr), false)
+		}
+		return safeIngestError(runtimeName, kind, true)
 	}
 	return nil
+}
+
+// recordIngestFailure opens the store only after the invocation has passed the
+// safe command-line checks. This lets malformed or unsupported hook documents
+// leave one bounded health observation without ever persisting their payload or
+// parser error. If the store cannot be opened, the primary error remains a
+// stable category and the database failure is not copied into the response.
+func recordIngestFailure(ctx context.Context, config commandConfig, runtimeName domain.Runtime, kind capture.FailureKind) error {
+	db, err := openStore(config)
+	if err != nil {
+		return safeIngestError(runtimeName, kind, false)
+	}
+	defer db.Close()
+	if err := db.RecordCaptureFailure(ctx, capture.CaptureFailure{
+		Runtime:  runtimeName,
+		FailedAt: config.now.UTC(),
+		Kind:     kind,
+	}); err != nil {
+		return safeIngestError(runtimeName, classifyStoreError(err), false)
+	}
+	return safeIngestError(runtimeName, kind, true)
+}
+
+func safeIngestError(runtimeName domain.Runtime, kind capture.FailureKind, recorded bool) error {
+	message := "ingest " + runtimeDisplayName(runtimeName) + " hook: " + ingestFailureMessage(kind)
+	if !recorded {
+		message += "; capture health was not recorded"
+	}
+	return errors.New(message)
+}
+
+func ingestFailureMessage(kind capture.FailureKind) string {
+	switch kind {
+	case capture.FailureMalformedPayload:
+		return "malformed payload; expected one metadata-only JSON document on stdin"
+	case capture.FailureUnsupportedEvent:
+		return "unsupported event; verify the runtime hook event"
+	case capture.FailureDatabaseBusy:
+		return "database busy; retry the hook"
+	case capture.FailureDatabaseUnavailable:
+		return "database unavailable; verify the configured database"
+	case capture.FailureSchemaError:
+		return "database schema error; reopen or migrate the database"
+	default:
+		return "internal ingestion error"
+	}
+}
+
+func classifyIngestParseError(err error) capture.FailureKind {
+	if errors.Is(err, claude.ErrUnsupportedHookEvent) || strings.Contains(err.Error(), "only PostToolUse") || strings.Contains(err.Error(), "other hook events") {
+		return capture.FailureUnsupportedEvent
+	}
+	if errors.Is(err, claude.ErrMalformedHookPayload) || strings.Contains(err.Error(), "payload") || strings.Contains(err.Error(), "JSON") {
+		return capture.FailureMalformedPayload
+	}
+	return capture.FailureInternalError
+}
+
+func classifyStoreError(err error) capture.FailureKind {
+	if err == nil {
+		return capture.FailureInternalError
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "busy"), strings.Contains(message, "locked"):
+		return capture.FailureDatabaseBusy
+	case strings.Contains(message, "schema"), strings.Contains(message, "migration"), strings.Contains(message, "no such table"), strings.Contains(message, "no such column"), strings.Contains(message, "constraint"):
+		return capture.FailureSchemaError
+	case strings.Contains(message, "open"), strings.Contains(message, "closed"), strings.Contains(message, "unavailable"), strings.Contains(message, "permission denied"), strings.Contains(message, "no such file"), strings.Contains(message, "not a directory"), strings.Contains(message, "read-only"), strings.Contains(message, "operation not permitted"), strings.Contains(message, "i/o error"), strings.Contains(message, "disk"), strings.Contains(message, "connection"):
+		return capture.FailureDatabaseUnavailable
+	default:
+		return capture.FailureInternalError
+	}
 }
 
 func readIngestPayload(stdin io.Reader) ([]byte, error) {
