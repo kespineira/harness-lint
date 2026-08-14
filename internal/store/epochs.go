@@ -13,9 +13,8 @@ import (
 )
 
 // OpenCaptureEpoch starts a reliable capture interval after confirmed direct
-// delivery evidence. Repeating the same open operation is a no-op; a second
-// open while an interval is active is rejected rather than silently extending
-// or replacing the interval.
+// delivery evidence. A same-or-later delivery while an interval is active is
+// an idempotent continuation; an earlier delivery is rejected.
 func (s *Store) OpenCaptureEpoch(ctx context.Context, runtime domain.Runtime, startedAt time.Time, reason history.CaptureStartReason) error {
 	if s.isClosed() {
 		return errors.New("store is closed")
@@ -44,9 +43,8 @@ func (s *Store) OpenCaptureEpoch(ctx context.Context, runtime domain.Runtime, st
 }
 
 func openCaptureEpochTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime, startedAt time.Time, reason history.CaptureStartReason) error {
-	var id int64
-	var existingStart, existingEnd, existingStartReason, existingEndReason sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id, started_at, ended_at, start_reason, end_reason FROM capture_epochs WHERE runtime = ? ORDER BY started_at DESC, id DESC LIMIT 1`, runtime).Scan(&id, &existingStart, &existingEnd, &existingStartReason, &existingEndReason)
+	var existingStart, existingEnd sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT started_at, ended_at FROM capture_epochs WHERE runtime = ? ORDER BY started_at DESC, id DESC LIMIT 1`, runtime).Scan(&existingStart, &existingEnd)
 	if err == nil {
 		parsedStart, parseErr := parseEpochTimestamp(existingStart.String, "capture epoch start")
 		if parseErr != nil {
@@ -54,10 +52,12 @@ func openCaptureEpochTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime,
 		}
 		startedAt = startedAt.UTC()
 		if !existingEnd.Valid || existingEnd.String == "" {
-			if parsedStart.Equal(startedAt) && existingStartReason.String == string(reason) {
-				return nil
+			if startedAt.Before(parsedStart) {
+				return fmt.Errorf("capture epoch start %s precedes open epoch start %s", startedAt.Format(time.RFC3339Nano), parsedStart.Format(time.RFC3339Nano))
 			}
-			return fmt.Errorf("capture epoch for %q is already open", runtime)
+			// A confirmed delivery at the same or a later time proves that the
+			// current epoch is still open; it does not create a new interval.
+			return nil
 		}
 		parsedEnd, parseErr := parseEpochTimestamp(existingEnd.String, "capture epoch end")
 		if parseErr != nil {
@@ -69,7 +69,7 @@ func openCaptureEpochTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime,
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read latest capture epoch: %w", err)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO capture_epochs(runtime, started_at, start_reason) VALUES (?, ?, ?)`, runtime, startedAt.UTC().Format(time.RFC3339Nano), reason)
+	_, err = tx.ExecContext(ctx, `INSERT INTO capture_epochs(runtime, started_at, start_reason) VALUES (?, ?, ?)`, runtime, formatEpochTimestamp(startedAt), reason)
 	if err != nil {
 		return fmt.Errorf("insert capture epoch: %w", err)
 	}
@@ -107,33 +107,31 @@ func (s *Store) CloseCaptureEpoch(ctx context.Context, runtime domain.Runtime, e
 
 func closeCaptureEpochTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime, endedAt time.Time, reason history.CaptureEndReason) error {
 	var id int64
-	var started, existingEnd, existingReason sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id, started_at, ended_at, end_reason FROM capture_epochs WHERE runtime = ? ORDER BY started_at DESC, id DESC LIMIT 1`, runtime).Scan(&id, &started, &existingEnd, &existingReason)
+	var started string
+	err := tx.QueryRowContext(ctx, `SELECT id, started_at FROM capture_epochs WHERE runtime = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1`, runtime).Scan(&id, &started)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("no capture epoch exists for %q", runtime)
+		// Closing an already-closed or never-opened runtime is deliberately
+		// idempotent; uninstall delivery may be repeated by lifecycle code.
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read latest capture epoch: %w", err)
 	}
 	end := endedAt.UTC()
-	if existingEnd.Valid && existingEnd.String != "" {
-		parsedEnd, parseErr := parseEpochTimestamp(existingEnd.String, "capture epoch end")
-		if parseErr != nil {
-			return parseErr
-		}
-		if parsedEnd.Equal(end) && existingReason.String == string(reason) {
-			return nil
-		}
-		return fmt.Errorf("capture epoch for %q is already closed", runtime)
-	}
-	start, err := parseEpochTimestamp(started.String, "capture epoch start")
+	start, err := parseEpochTimestamp(started, "capture epoch start")
 	if err != nil {
 		return err
 	}
-	if !end.After(start) {
+	if end.Before(start) {
 		return fmt.Errorf("capture epoch end %s must be after start %s", end.Format(time.RFC3339Nano), start.Format(time.RFC3339Nano))
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE capture_epochs SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL`, end.Format(time.RFC3339Nano), reason, id); err != nil {
+	if end.Equal(start) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM capture_epochs WHERE id = ? AND ended_at IS NULL`, id); err != nil {
+			return fmt.Errorf("discard zero-length capture epoch: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE capture_epochs SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL`, formatEpochTimestamp(end), reason, id); err != nil {
 		return fmt.Errorf("close capture epoch: %w", err)
 	}
 	return nil
@@ -204,7 +202,7 @@ func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...histor
 	if len(keys) > 1 {
 		return nil, errors.New("at most one capability presence key filter is allowed")
 	}
-	query := `SELECT runtime, capability_type, capability_name, started_at, ended_at FROM capability_presence_epochs`
+	query := `SELECT runtime, capability_type, capability_name, scope, source, started_at, ended_at FROM capability_presence_epochs`
 	args := make([]any, 0, 3)
 	if len(keys) == 1 {
 		if err := keys[0].Validate(); err != nil {
@@ -221,21 +219,22 @@ func (s *Store) ListCapabilityPresenceEpochs(ctx context.Context, keys ...histor
 	defer rows.Close()
 	result := make([]history.CapabilityPresenceEpoch, 0)
 	for rows.Next() {
-		var epoch history.CapabilityPresenceEpoch
+		var row capabilityPresenceRow
 		var started, ended sql.NullString
-		if err := rows.Scan(&epoch.Runtime, &epoch.CapabilityType, &epoch.CapabilityName, &started, &ended); err != nil {
+		if err := rows.Scan(&row.Key.runtime, &row.Key.typ, &row.Key.name, &row.Key.scope, &row.Key.source, &started, &ended); err != nil {
 			return nil, fmt.Errorf("scan capability presence epoch: %w", err)
 		}
-		epoch.Interval.Start, err = parseEpochTimestamp(started.String, "capability presence start")
+		row.Interval.Start, err = parseEpochTimestamp(started.String, "capability presence start")
 		if err != nil {
 			return nil, err
 		}
 		if ended.Valid && ended.String != "" {
-			epoch.Interval.End, err = parseEpochTimestamp(ended.String, "capability presence end")
+			row.Interval.End, err = parseEpochTimestamp(ended.String, "capability presence end")
 			if err != nil {
 				return nil, err
 			}
 		}
+		epoch := row.HistoryEpoch()
 		if err := epoch.Validate(); err != nil {
 			return nil, fmt.Errorf("validate persisted capability presence epoch: %w", err)
 		}
@@ -251,21 +250,37 @@ type presenceKey struct {
 	runtime domain.Runtime
 	typ     domain.CapabilityType
 	name    string
+	scope   domain.Scope
+	source  string
+}
+
+// capabilityPresenceRow keeps the persistence identity intact while the
+// public history DTO intentionally aggregates by CoverageKey (runtime/type/name).
+type capabilityPresenceRow struct {
+	Key presenceKey
+	history.Interval
+}
+
+func (r capabilityPresenceRow) HistoryEpoch() history.CapabilityPresenceEpoch {
+	return history.CapabilityPresenceEpoch{
+		CoverageKey: history.CoverageKey{Runtime: r.Key.runtime, CapabilityType: r.Key.typ, CapabilityName: r.Key.name},
+		Interval:    r.Interval,
+	}
 }
 
 func transitionPresenceEpochsTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime, observedAt time.Time, capabilities []domain.Capability) error {
 	newKeys := make(map[presenceKey]struct{}, len(capabilities))
 	for _, capability := range capabilities {
-		newKeys[presenceKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name}] = struct{}{}
+		newKeys[presenceKey{runtime: capability.Runtime, typ: capability.Type, name: capability.Name, scope: capability.Scope, source: capability.Source}] = struct{}{}
 	}
 	oldKeys := make(map[presenceKey]struct{})
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, name FROM current_inventory WHERE runtime = ?`, runtime)
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT runtime, capability_type, name, scope, source FROM current_inventory WHERE runtime = ?`, runtime)
 	if err != nil {
 		return fmt.Errorf("read previous inventory presence keys: %w", err)
 	}
 	for rows.Next() {
 		var key presenceKey
-		if err := rows.Scan(&key.runtime, &key.typ, &key.name); err != nil {
+		if err := rows.Scan(&key.runtime, &key.typ, &key.name, &key.scope, &key.source); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan previous inventory presence key: %w", err)
 		}
@@ -300,7 +315,7 @@ func transitionPresenceEpochsTx(ctx context.Context, tx *sql.Tx, runtime domain.
 		if _, open := openKeys[key]; open {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO capability_presence_epochs(runtime, capability_type, capability_name, started_at) VALUES (?, ?, ?, ?)`, key.runtime, key.typ, key.name, observedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO capability_presence_epochs(runtime, capability_type, capability_name, scope, source, started_at) VALUES (?, ?, ?, ?, ?, ?)`, key.runtime, key.typ, key.name, key.scope, key.source, formatEpochTimestamp(observedAt)); err != nil {
 			return fmt.Errorf("open capability presence %q: %w", key.name, err)
 		}
 	}
@@ -308,7 +323,7 @@ func transitionPresenceEpochsTx(ctx context.Context, tx *sql.Tx, runtime domain.
 }
 
 func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime) (map[presenceKey]struct{}, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT runtime, capability_type, capability_name FROM capability_presence_epochs WHERE runtime = ? AND ended_at IS NULL`, runtime)
+	rows, err := tx.QueryContext(ctx, `SELECT runtime, capability_type, capability_name, scope, source FROM capability_presence_epochs WHERE runtime = ? AND ended_at IS NULL`, runtime)
 	if err != nil {
 		return nil, fmt.Errorf("read open capability presence epochs: %w", err)
 	}
@@ -316,7 +331,7 @@ func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime)
 	result := make(map[presenceKey]struct{})
 	for rows.Next() {
 		var key presenceKey
-		if err := rows.Scan(&key.runtime, &key.typ, &key.name); err != nil {
+		if err := rows.Scan(&key.runtime, &key.typ, &key.name, &key.scope, &key.source); err != nil {
 			return nil, fmt.Errorf("scan open capability presence key: %w", err)
 		}
 		result[key] = struct{}{}
@@ -330,7 +345,7 @@ func openPresenceKeysTx(ctx context.Context, tx *sql.Tx, runtime domain.Runtime)
 func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key presenceKey, endedAt time.Time) error {
 	var id int64
 	var started string
-	err := tx.QueryRowContext(ctx, `SELECT id, started_at FROM capability_presence_epochs WHERE runtime = ? AND capability_type = ? AND capability_name = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1`, key.runtime, key.typ, key.name).Scan(&id, &started)
+	err := tx.QueryRowContext(ctx, `SELECT id, started_at FROM capability_presence_epochs WHERE runtime = ? AND capability_type = ? AND capability_name = ? AND scope = ? AND source = ? AND ended_at IS NULL ORDER BY started_at DESC, id DESC LIMIT 1`, key.runtime, key.typ, key.name, key.scope, key.source).Scan(&id, &started)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -353,14 +368,15 @@ func closePresenceEpochTx(ctx context.Context, tx *sql.Tx, key presenceKey, ende
 	if endedAt.Before(start) {
 		return fmt.Errorf("capability presence end %s precedes start %s", endedAt.Format(time.RFC3339Nano), start.Format(time.RFC3339Nano))
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE capability_presence_epochs SET ended_at = ? WHERE id = ? AND ended_at IS NULL`, endedAt.Format(time.RFC3339Nano), id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE capability_presence_epochs SET ended_at = ? WHERE id = ? AND ended_at IS NULL`, formatEpochTimestamp(endedAt), id); err != nil {
 		return fmt.Errorf("close capability presence %q: %w", key.name, err)
 	}
 	return nil
 }
 
 func parseEpochTimestamp(raw, label string) (time.Time, error) {
-	if strings.TrimSpace(raw) == "" {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return time.Time{}, fmt.Errorf("%s is empty", label)
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, raw)
@@ -368,4 +384,10 @@ func parseEpochTimestamp(raw, label string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse %s: %w", label, err)
 	}
 	return parsed.UTC(), nil
+}
+
+const epochTimestampLayout = "2006-01-02T15:04:05.000000000Z"
+
+func formatEpochTimestamp(value time.Time) string {
+	return value.UTC().Format(epochTimestampLayout)
 }

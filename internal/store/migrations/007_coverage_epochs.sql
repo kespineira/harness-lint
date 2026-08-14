@@ -10,6 +10,8 @@ CREATE TABLE capture_epochs (
     start_reason TEXT NOT NULL CHECK (start_reason = 'confirmed_direct_delivery'),
     end_reason TEXT CHECK (end_reason IS NULL OR end_reason IN ('confirmed_capture_failure', 'managed_hook_uninstall')),
     CHECK ((ended_at IS NULL AND end_reason IS NULL) OR (ended_at IS NOT NULL AND end_reason IS NOT NULL)),
+    CHECK (length(started_at) = 30 AND started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][.][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    CHECK (ended_at IS NULL OR (length(ended_at) = 30 AND ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][.][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z')),
     CHECK (ended_at IS NULL OR ended_at > started_at)
 );
 
@@ -24,14 +26,18 @@ CREATE TABLE capability_presence_epochs (
     runtime TEXT NOT NULL CHECK (runtime IN ('claude-code', 'codex', 'cursor')),
     capability_type TEXT NOT NULL,
     capability_name TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    source TEXT NOT NULL,
     started_at TEXT NOT NULL,
     ended_at TEXT,
+    CHECK (length(started_at) = 30 AND started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][.][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    CHECK (ended_at IS NULL OR (length(ended_at) = 30 AND ended_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][.][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z')),
     CHECK (ended_at IS NULL OR ended_at > started_at)
 );
 
 CREATE UNIQUE INDEX capability_presence_epochs_one_open_key_idx
-ON capability_presence_epochs(runtime, capability_type, capability_name)
+ON capability_presence_epochs(runtime, capability_type, capability_name, scope, source)
 WHERE ended_at IS NULL;
 
 CREATE INDEX capability_presence_epochs_key_time_idx
-ON capability_presence_epochs(runtime, capability_type, capability_name, started_at, ended_at);
+ON capability_presence_epochs(runtime, capability_type, capability_name, scope, source, started_at, ended_at);

@@ -23,8 +23,11 @@ func TestCaptureEpochPrimitivesAreChronologicalAndIdempotent(t *testing.T) {
 	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
 		t.Fatalf("idempotent OpenCaptureEpoch(): %v", err)
 	}
-	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Minute), history.CaptureStartReasonConfirmedDirectDelivery); err == nil {
-		t.Fatal("second open while active succeeded")
+	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Minute), history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("later delivery continuation: %v", err)
+	}
+	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(-time.Nanosecond), history.CaptureStartReasonConfirmedDirectDelivery); err == nil {
+		t.Fatal("earlier delivery while active succeeded")
 	}
 	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Hour), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
 		t.Fatalf("CloseCaptureEpoch(): %v", err)
@@ -32,8 +35,8 @@ func TestCaptureEpochPrimitivesAreChronologicalAndIdempotent(t *testing.T) {
 	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Hour), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
 		t.Fatalf("idempotent CloseCaptureEpoch(): %v", err)
 	}
-	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(2*time.Hour), history.CaptureEndReasonConfirmedCaptureFailure); err == nil {
-		t.Fatal("second close succeeded")
+	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(2*time.Hour), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
+		t.Fatalf("close without open: %v", err)
 	}
 	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(30*time.Minute), history.CaptureStartReasonConfirmedDirectDelivery); err == nil {
 		t.Fatal("overlapping capture epoch open succeeded")
@@ -89,6 +92,156 @@ func TestRecordInventoryTransitionsPresenceEpochsWithoutFlattenedBackfill(t *tes
 	}
 	if count != 2 {
 		t.Fatalf("presence epoch count = %d, want 2", count)
+	}
+}
+
+func TestRecordInventoryPreservesPresenceIdentityAcrossScopeAndSource(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	project := testCapability("same-name", time.Time{}, time.Time{})
+	project.Scope = domain.ScopeProject
+	project.Source = "/project/same-name"
+	user := project
+	user.Scope = domain.ScopeUser
+	user.Source = "/user/same-name"
+	key := history.CoverageKey{Runtime: domain.RuntimeCodex, CapabilityType: project.Type, CapabilityName: project.Name}
+
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, base, []domain.Capability{project, user}); err != nil {
+		t.Fatalf("RecordInventory(first): %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, base.Add(time.Hour), []domain.Capability{user}); err != nil {
+		t.Fatalf("RecordInventory(project disappears): %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, base.Add(2*time.Hour), []domain.Capability{project, user}); err != nil {
+		t.Fatalf("RecordInventory(project reappears): %v", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT scope, source, started_at, ended_at FROM capability_presence_epochs ORDER BY scope, source, started_at`)
+	if err != nil {
+		t.Fatalf("query presence rows: %v", err)
+	}
+	defer rows.Close()
+	type persisted struct {
+		scope, source, started, ended string
+	}
+	var got []persisted
+	for rows.Next() {
+		var row persisted
+		var ended sql.NullString
+		if err := rows.Scan(&row.scope, &row.source, &row.started, &ended); err != nil {
+			t.Fatalf("scan presence row: %v", err)
+		}
+		row.ended = ended.String
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate presence rows: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("persisted presence rows = %#v, want three full-identity rows", got)
+	}
+	if got[0].scope != string(domain.ScopeProject) || got[0].source != project.Source || got[0].ended == "" {
+		t.Fatalf("project disappearance row = %#v", got[0])
+	}
+	if got[1].scope != string(domain.ScopeProject) || got[1].source != project.Source || got[1].ended != "" {
+		t.Fatalf("project reappearance row = %#v", got[1])
+	}
+	if got[2].scope != string(domain.ScopeUser) || got[2].source != user.Source || got[2].ended != "" {
+		t.Fatalf("user continuation row = %#v", got[2])
+	}
+
+	epochs, err := s.ListCapabilityPresenceEpochs(ctx, key)
+	if err != nil {
+		t.Fatalf("ListCapabilityPresenceEpochs(): %v", err)
+	}
+	if len(epochs) != 3 {
+		t.Fatalf("canonical presence epochs = %#v, want three intervals", epochs)
+	}
+}
+
+func TestEpochCloseWithoutOpenAndZeroDurationAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	reason := history.CaptureEndReasonManagedHookUninstall
+	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base, reason); err != nil {
+		t.Fatalf("close without open: %v", err)
+	}
+	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base, reason); err != nil {
+		t.Fatalf("zero-duration close: %v", err)
+	}
+	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Hour), reason); err != nil {
+		t.Fatalf("repeated close after zero-duration discard: %v", err)
+	}
+	epochs, err := s.ListCaptureEpochs(ctx, domain.RuntimeCodex)
+	if err != nil {
+		t.Fatalf("ListCaptureEpochs(): %v", err)
+	}
+	if len(epochs) != 0 {
+		t.Fatalf("zero-duration capture epochs = %#v, want empty", epochs)
+	}
+
+	capability := testCapability("zero-duration", time.Time{}, time.Time{})
+	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	if err := s.RecordInventory(ctx, capability.Runtime, base, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(open): %v", err)
+	}
+	if err := s.RecordInventory(ctx, capability.Runtime, base, nil); err != nil {
+		t.Fatalf("RecordInventory(zero-duration): %v", err)
+	}
+	presence, err := s.ListCapabilityPresenceEpochs(ctx, key)
+	if err != nil {
+		t.Fatalf("ListCapabilityPresenceEpochs(): %v", err)
+	}
+	if len(presence) != 0 {
+		t.Fatalf("zero-duration presence epochs = %#v, want empty", presence)
+	}
+}
+
+func TestEpochTimestampsUseFixedNanosecondOrderingAndChecks(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	if err := s.OpenCaptureEpoch(ctx, domain.RuntimeCodex, base, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		t.Fatalf("OpenCaptureEpoch(exact second): %v", err)
+	}
+	if err := s.CloseCaptureEpoch(ctx, domain.RuntimeCodex, base.Add(time.Nanosecond), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
+		t.Fatalf("CloseCaptureEpoch(one nanosecond later): %v", err)
+	}
+	var captureStarted, captureEnded string
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, ended_at FROM capture_epochs WHERE runtime = ?`, domain.RuntimeCodex).Scan(&captureStarted, &captureEnded); err != nil {
+		t.Fatalf("read fixed capture timestamps: %v", err)
+	}
+	if captureStarted != formatEpochTimestamp(base) || captureEnded != formatEpochTimestamp(base.Add(time.Nanosecond)) || captureStarted >= captureEnded {
+		t.Fatalf("fixed capture timestamps = %q..%q, want fixed-width lexical order", captureStarted, captureEnded)
+	}
+	capability := testCapability("nanosecond-order", time.Time{}, time.Time{})
+	key := history.CoverageKey{Runtime: capability.Runtime, CapabilityType: capability.Type, CapabilityName: capability.Name}
+	if err := s.RecordInventory(ctx, capability.Runtime, base, []domain.Capability{capability}); err != nil {
+		t.Fatalf("RecordInventory(exact second): %v", err)
+	}
+	if err := s.RecordInventory(ctx, capability.Runtime, base.Add(time.Nanosecond), nil); err != nil {
+		t.Fatalf("RecordInventory(one nanosecond later): %v", err)
+	}
+	var started, ended string
+	if err := s.db.QueryRowContext(ctx, `SELECT started_at, ended_at FROM capability_presence_epochs WHERE runtime = ? AND capability_type = ? AND capability_name = ?`, key.Runtime, key.CapabilityType, key.CapabilityName).Scan(&started, &ended); err != nil {
+		t.Fatalf("read fixed epoch timestamps: %v", err)
+	}
+	if len(started) != len(epochTimestampLayout) || len(ended) != len(epochTimestampLayout) || started >= ended {
+		t.Fatalf("fixed epoch timestamps = %q..%q, want fixed-width lexical order", started, ended)
+	}
+	if started != formatEpochTimestamp(base) || ended != formatEpochTimestamp(base.Add(time.Nanosecond)) {
+		t.Fatalf("fixed epoch timestamps = %q..%q, want %q..%q", started, ended, formatEpochTimestamp(base), formatEpochTimestamp(base.Add(time.Nanosecond)))
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO capability_presence_epochs(runtime, capability_type, capability_name, scope, source, started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, capability.Runtime, capability.Type, "bad-check", capability.Scope, "bad-source", formatEpochTimestamp(base.Add(time.Nanosecond)), formatEpochTimestamp(base)); err == nil {
+		t.Fatal("reversed fixed timestamps bypassed SQL CHECK")
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO capture_epochs(runtime, started_at, ended_at, start_reason, end_reason) VALUES (?, ?, ?, ?, ?)`, domain.RuntimeCursor, formatEpochTimestamp(base.Add(time.Nanosecond)), formatEpochTimestamp(base), history.CaptureStartReasonConfirmedDirectDelivery, history.CaptureEndReasonConfirmedCaptureFailure); err == nil {
+		t.Fatal("reversed capture timestamps bypassed SQL CHECK")
 	}
 }
 
