@@ -144,7 +144,7 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 	if err != nil {
 		return nil, err
 	}
-	coverage, err := s.historyCoverage(ctx)
+	coverage, err := s.historyCoverage(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -161,20 +161,7 @@ ORDER BY k.runtime, k.capability_type, k.capability_name`
 }
 
 func historyUsageFilters(alias string, query history.Query) (string, []any) {
-	conditions := make([]string, 0, 5)
-	args := make([]any, 0, 5)
-	if query.Runtime != "" {
-		conditions = append(conditions, alias+`.runtime = ?`)
-		args = append(args, query.Runtime)
-	}
-	if query.CapabilityType != "" {
-		conditions = append(conditions, alias+`.capability_type = ?`)
-		args = append(args, query.CapabilityType)
-	}
-	if query.CapabilityName != "" {
-		conditions = append(conditions, alias+`.capability_name = ?`)
-		args = append(args, query.CapabilityName)
-	}
+	conditions, args := historyIdentityConditions(alias, "capability_name", query)
 	if !query.Start.IsZero() {
 		conditions = append(conditions, `COALESCE(`+alias+`.source_timestamp, `+alias+`.observed_at) >= ?`)
 		args = append(args, query.Start.UTC().Format(time.RFC3339Nano))
@@ -190,6 +177,10 @@ func historyUsageFilters(alias string, query history.Query) (string, []any) {
 }
 
 func historyCurrentFilters(alias string, query history.Query) (string, []any) {
+	return historyIdentityFilters(alias, "name", query)
+}
+
+func historyIdentityConditions(alias, nameColumn string, query history.Query) ([]string, []any) {
 	conditions := make([]string, 0, 3)
 	args := make([]any, 0, 3)
 	if query.Runtime != "" {
@@ -201,13 +192,26 @@ func historyCurrentFilters(alias string, query history.Query) (string, []any) {
 		args = append(args, query.CapabilityType)
 	}
 	if query.CapabilityName != "" {
-		conditions = append(conditions, alias+`.name = ?`)
+		conditions = append(conditions, alias+`.`+nameColumn+` = ?`)
 		args = append(args, query.CapabilityName)
 	}
+	return conditions, args
+}
+
+func historyIdentityFilters(alias, nameColumn string, query history.Query) (string, []any) {
+	conditions, args := historyIdentityConditions(alias, nameColumn, query)
 	if len(conditions) == 0 {
 		return "", args
 	}
 	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+func historyIdentityAndFilters(alias, nameColumn string, query history.Query) (string, []any) {
+	conditions, args := historyIdentityConditions(alias, nameColumn, query)
+	if len(conditions) == 0 {
+		return "", args
+	}
+	return " AND " + strings.Join(conditions, " AND "), args
 }
 
 func historyEventTypeFilter(clause, eventType string) string {
@@ -263,23 +267,34 @@ func containsScope(scopes []domain.Scope, want domain.Scope) bool {
 	return false
 }
 
-// historyCoverage reads all recorded observation ranges without applying the
-// caller's activity interval. Inventory windows come from the capability
-// first_seen/last_seen fields; usage windows come from usage_events; direct
-// hook windows come from the normalized evidence relation. These are
-// observations only and never imply continuity or lifetime completeness.
-func (s *Store) historyCoverage(ctx context.Context) (map[historyKey]*history.Coverage, error) {
+// historyCoverage reads all recorded observation ranges for the query's
+// identity filters, without applying its activity interval. Inventory windows
+// come from the capability first_seen/last_seen fields; usage windows come
+// from usage_events; direct-hook windows come from the normalized evidence
+// relation. These are observations only and never imply continuity or
+// lifetime completeness.
+func (s *Store) historyCoverage(ctx context.Context, query history.Query) (map[historyKey]*history.Coverage, error) {
+	if err := query.Validate(); err != nil {
+		return nil, err
+	}
+	inventoryClause, inventoryArgs := historyIdentityFilters("c", "name", query)
+	usageClause, usageArgs := historyIdentityFilters("u", "capability_name", query)
+	hookClause, hookArgs := historyIdentityAndFilters("u", "capability_name", query)
+	args := make([]any, 0, len(inventoryArgs)+len(usageArgs)+len(hookArgs))
+	args = append(args, inventoryArgs...)
+	args = append(args, usageArgs...)
+	args = append(args, hookArgs...)
 	rows, err := s.db.QueryContext(ctx, `WITH inventory AS (
 	SELECT runtime, capability_type, name,
 		MIN(NULLIF(first_seen, '')) AS first_inventory,
 		MAX(NULLIF(last_seen, '')) AS last_inventory
-	FROM capabilities
+	FROM capabilities AS c`+inventoryClause+`
 	GROUP BY runtime, capability_type, name
 ), usage AS (
 	SELECT runtime, capability_type, capability_name,
 		MIN(observed_at) AS first_usage,
 		MAX(observed_at) AS last_usage
-	FROM usage_events
+	FROM usage_events AS u`+usageClause+`
 	GROUP BY runtime, capability_type, capability_name
 ), direct_hook AS (
 	SELECT u.runtime, u.capability_type, u.capability_name,
@@ -287,7 +302,7 @@ func (s *Store) historyCoverage(ctx context.Context) (map[historyKey]*history.Co
 		MAX(e.observed_at) AS last_hook
 	FROM usage_events AS u
 	INNER JOIN usage_event_evidence AS e ON e.fingerprint = u.fingerprint
-	WHERE e.provenance = 'hook'
+	WHERE e.provenance = 'hook'`+hookClause+`
 	GROUP BY u.runtime, u.capability_type, u.capability_name
 ), keys AS (
 	SELECT runtime, capability_type, name AS capability_name FROM inventory
@@ -304,7 +319,7 @@ FROM keys AS k
 LEFT JOIN inventory AS i ON i.runtime = k.runtime AND i.capability_type = k.capability_type AND i.name = k.capability_name
 LEFT JOIN usage AS u ON u.runtime = k.runtime AND u.capability_type = k.capability_type AND u.capability_name = k.capability_name
 LEFT JOIN direct_hook AS h ON h.runtime = k.runtime AND h.capability_type = k.capability_type AND h.capability_name = k.capability_name
-ORDER BY k.runtime, k.capability_type, k.capability_name`)
+	ORDER BY k.runtime, k.capability_type, k.capability_name`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query history coverage: %w", err)
 	}

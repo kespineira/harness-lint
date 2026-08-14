@@ -262,6 +262,84 @@ func TestHistoryCoverageUnknownRemainsNil(t *testing.T) {
 	}
 }
 
+func TestHistoryCoverageIdentityFiltersIgnorePeriodAndUnrelatedKeys(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	middle := old.Add(24 * time.Hour)
+	recent := old.Add(48 * time.Hour)
+	targetCapability := testCapability("target", old, old)
+	targetCapability.Type = domain.CapabilityTool
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, old, []domain.Capability{targetCapability}); err != nil {
+		t.Fatalf("RecordInventory(target old): %v", err)
+	}
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, recent, []domain.Capability{targetCapability}); err != nil {
+		t.Fatalf("RecordInventory(target recent): %v", err)
+	}
+	otherNameCapability := targetCapability
+	otherNameCapability.Name = "other-name"
+	if err := s.RecordInventory(ctx, domain.RuntimeCodex, recent, []domain.Capability{otherNameCapability}); err != nil {
+		t.Fatalf("RecordInventory(other name): %v", err)
+	}
+	otherRuntimeCapability := targetCapability
+	otherRuntimeCapability.Runtime = domain.RuntimeClaude
+	otherRuntimeCapability.Name = "other-runtime"
+	if err := s.RecordInventory(ctx, domain.RuntimeClaude, recent, []domain.Capability{otherRuntimeCapability}); err != nil {
+		t.Fatalf("RecordInventory(other runtime): %v", err)
+	}
+	targetOld := testUsageEvent(old, "target", domain.EventInvoked)
+	targetOld.SourceIdentity = "coverage-target-old"
+	targetHook := testUsageEvent(middle, "target", domain.EventInvoked)
+	targetHook.Provenance = domain.ProvenanceHook
+	targetHook.SourceIdentity = "coverage-target-hook"
+	targetRecent := testUsageEvent(recent, "target", domain.EventInvoked)
+	targetRecent.SourceIdentity = "coverage-target-recent"
+	otherName := testUsageEvent(middle, "other-name", domain.EventInvoked)
+	otherName.SourceIdentity = "coverage-other-name"
+	otherRuntime := testUsageEvent(middle, "other-runtime", domain.EventInvoked)
+	otherRuntime.Runtime = domain.RuntimeClaude
+	otherRuntime.SourceIdentity = "coverage-other-runtime"
+	if err := s.InsertUsageEvents(ctx, []domain.UsageEvent{targetOld, targetRecent, otherName, otherRuntime}); err != nil {
+		t.Fatalf("InsertUsageEvents(coverage identities): %v", err)
+	}
+	if err := s.IngestUsageEvent(ctx, targetHook); err != nil {
+		t.Fatalf("IngestUsageEvent(target hook): %v", err)
+	}
+	narrow := history.Query{Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilityTool, CapabilityName: "target", Start: recent, End: recent}
+	allTime := narrow
+	allTime.Start = time.Time{}
+	allTime.End = time.Time{}
+	allCoverage, err := s.historyCoverage(ctx, allTime)
+	if err != nil {
+		t.Fatalf("historyCoverage(all time): %v", err)
+	}
+	narrowCoverage, err := s.historyCoverage(ctx, narrow)
+	if err != nil {
+		t.Fatalf("historyCoverage(narrow period): %v", err)
+	}
+	targetKey := historyKey{runtime: domain.RuntimeCodex, typ: domain.CapabilityTool, name: "target"}
+	if len(allCoverage) != 1 || len(narrowCoverage) != 1 || allCoverage[targetKey] == nil || narrowCoverage[targetKey] == nil {
+		t.Fatalf("coverage keys = all=%#v narrow=%#v, want only target", allCoverage, narrowCoverage)
+	}
+	if !reflect.DeepEqual(allCoverage[targetKey], narrowCoverage[targetKey]) {
+		t.Fatalf("coverage changed with period filter: all=%#v narrow=%#v", allCoverage[targetKey], narrowCoverage[targetKey])
+	}
+	rows, err := s.QueryInvocationHistory(ctx, narrow)
+	if err != nil {
+		t.Fatalf("QueryInvocationHistory(narrow identity/period): %v", err)
+	}
+	if len(rows) != 1 || rows[0].Runtime != domain.RuntimeCodex || rows[0].CapabilityName != "target" || rows[0].Coverage == nil {
+		t.Fatalf("narrow history rows = %#v, want only target with coverage", rows)
+	}
+	if !reflect.DeepEqual(rows[0].Coverage, allCoverage[targetKey]) {
+		t.Fatalf("query result coverage = %#v, want all-time target coverage %#v", rows[0].Coverage, allCoverage[targetKey])
+	}
+	coverage := rows[0].Coverage
+	if coverage.FirstUsageObservedAt == nil || !coverage.FirstUsageObservedAt.Equal(old) || coverage.LastUsageObservedAt == nil || !coverage.LastUsageObservedAt.Equal(recent) || coverage.FirstDirectHookObservedAt == nil || !coverage.FirstDirectHookObservedAt.Equal(middle) || coverage.LastDirectHookObservedAt == nil || !coverage.LastDirectHookObservedAt.Equal(middle) {
+		t.Fatalf("target all-time coverage = %#v", coverage)
+	}
+}
+
 func TestHistoryInvocationTimesExcludeNonInvocationsAndCoverageUsesAllRecordedHistory(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
