@@ -93,3 +93,17 @@ func (k FailureKind) FailureKindText() (string, error) {
 	}
 	return string(k), nil
 }
+
+// ProvesMissedDirectDelivery reports whether this failure is evidence that a
+// managed direct hook delivery was not captured. Unsupported events are
+// intentionally excluded: seeing an event outside the managed capture
+// contract does not establish that a relevant delivery was missed.
+func (k FailureKind) ProvesMissedDirectDelivery() bool {
+	switch k {
+	case FailureMalformedPayload, FailureDatabaseBusy, FailureDatabaseUnavailable,
+		FailureSchemaError, FailureInternalError:
+		return true
+	default:
+		return false
+	}
+}

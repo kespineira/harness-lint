@@ -694,7 +694,15 @@ func resolveHooksConfig(options Options, flags parsedFlags) (commandConfig, erro
 	if now.IsZero() {
 		return commandConfig{}, errors.New("observation clock returned zero time")
 	}
+	dbPath := ""
+	if flags.hooksAction == "uninstall" {
+		dbPath, err = resolveHookLifecycleDatabasePath(options, currentDir)
+		if err != nil {
+			return commandConfig{}, err
+		}
+	}
 	return commandConfig{
+		dbPath:          dbPath,
 		home:            home,
 		currentDir:      currentDir,
 		codexHome:       codexHome,
@@ -706,9 +714,31 @@ func resolveHooksConfig(options Options, flags parsedFlags) (commandConfig, erro
 	}, nil
 }
 
+// resolveHookLifecycleDatabasePath keeps hook configuration commands on the
+// same local database as the other commands without adding a database flag to
+// hooks install/uninstall. The path is resolved for uninstall, but the
+// database is opened only after a real managed uninstall mutation succeeds.
+func resolveHookLifecycleDatabasePath(options Options, currentDir string) (string, error) {
+	base := options.ConfigDir
+	if base == "" {
+		var err error
+		base, err = os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user config directory: %w", err)
+		}
+	}
+	path := filepath.Join(base, "harness-lint", "harness-lint.db")
+	path, err := absolutePath(path, currentDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve hook lifecycle database path: %w", err)
+	}
+	return path, nil
+}
+
 // resolveHooksTestConfig adds the isolated database selection needed by the
-// read-only hooks test command. Hook status/install/uninstall intentionally do
-// not open a database.
+// read-only hooks test command. Hook status and install remain database-free;
+// uninstall uses the lifecycle path resolved by resolveHooksConfig only after
+// a real managed mutation succeeds.
 func resolveHooksTestConfig(options Options, flags parsedFlags) (commandConfig, error) {
 	if flags.dbSet && strings.TrimSpace(flags.dbPath) == "" {
 		return commandConfig{}, errors.New("database path is empty")

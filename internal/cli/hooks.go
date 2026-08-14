@@ -12,6 +12,7 @@ import (
 	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
 	"github.com/kespineira/harness-lint/internal/health"
+	"github.com/kespineira/harness-lint/internal/history"
 	"github.com/kespineira/harness-lint/internal/hooks"
 )
 
@@ -108,10 +109,43 @@ func runHookOperation(ctx context.Context, config commandConfig, runtimes []hook
 		printHookOperation(out, result)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s %s: %s", runtime, action, cleanText(err.Error())))
+			continue
+		}
+		// A lifecycle close is evidence about the runtime only after the
+		// managed configuration mutation itself committed. Dry-runs, no-ops,
+		// installs, and failed config mutations must not touch capture epochs.
+		if action == "uninstall" && !dryRun && result.Changed {
+			if lifecycleErr := closeManagedHookCaptureEpoch(ctx, config, runtime); lifecycleErr != nil {
+				fmt.Fprintf(out, "  warning=capture lifecycle close failed after config mutation: %s\n", cleanText(lifecycleErr.Error()))
+				failures = append(failures, fmt.Sprintf("%s uninstall capture lifecycle: %s", runtime, cleanText(lifecycleErr.Error())))
+			}
 		}
 	}
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// closeManagedHookCaptureEpoch deliberately runs after the filesystem
+// mutation. If the database operation fails, the already-successful runtime
+// uninstall is never rolled back or retried; the caller reports the lifecycle
+// evidence gap explicitly instead.
+func closeManagedHookCaptureEpoch(ctx context.Context, config commandConfig, runtime hooks.Runtime) error {
+	if config.dbPath == "" {
+		return errors.New("capture lifecycle database path is unavailable")
+	}
+	db, err := openStore(config)
+	if err != nil {
+		return fmt.Errorf("open capture lifecycle database: %w", err)
+	}
+	lifecycleErr := db.CloseCaptureEpoch(ctx, hookDomainRuntime(runtime), config.now.UTC(), history.CaptureEndReasonManagedHookUninstall)
+	dbCloseErr := db.Close()
+	if lifecycleErr != nil {
+		return lifecycleErr
+	}
+	if dbCloseErr != nil {
+		return fmt.Errorf("close capture lifecycle database: %w", dbCloseErr)
 	}
 	return nil
 }

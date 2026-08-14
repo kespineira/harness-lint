@@ -11,6 +11,7 @@ import (
 
 	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/history"
 )
 
 // HealthReader is the narrow, read-only store surface consumed by capture
@@ -48,6 +49,9 @@ func (s *Store) IngestUsageEvent(ctx context.Context, event domain.UsageEvent) e
 	}
 	if err := markCaptureSuccessTx(ctx, tx, normalized.Runtime, normalized.ObservedAt); err != nil {
 		return fmt.Errorf("record successful hook delivery: %w", err)
+	}
+	if err := openCaptureEpochTx(ctx, tx, normalized.Runtime, normalized.ObservedAt, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		return fmt.Errorf("open capture epoch for successful hook delivery: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit hook usage ingest: %w", err)
@@ -92,6 +96,9 @@ func (s *Store) SelfTestCaptureIngest(ctx context.Context) error {
 	if err := markCaptureSuccessTx(ctx, tx, normalized.Runtime, normalized.ObservedAt); err != nil {
 		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test health: %w", err))
 	}
+	if err := openCaptureEpochTx(ctx, tx, normalized.Runtime, normalized.ObservedAt, history.CaptureStartReasonConfirmedDirectDelivery); err != nil {
+		return rollbackCaptureSelfTest(tx, fmt.Errorf("write capture self-test epoch: %w", err))
+	}
 	if err := tx.Rollback(); err != nil {
 		return fmt.Errorf("rollback capture self-test: %w", err)
 	}
@@ -109,6 +116,7 @@ type captureSelfTestState struct {
 	UsageCount    int64
 	EvidenceCount int64
 	Health        []capture.DeliveryHealth
+	Epochs        []history.CaptureEpoch
 }
 
 func (s *Store) captureSelfTestState(ctx context.Context) (captureSelfTestState, error) {
@@ -124,6 +132,11 @@ func (s *Store) captureSelfTestState(ctx context.Context) (captureSelfTestState,
 		return captureSelfTestState{}, fmt.Errorf("read capture health: %w", err)
 	}
 	state.Health = health
+	epochs, err := s.ListCaptureEpochs(ctx)
+	if err != nil {
+		return captureSelfTestState{}, fmt.Errorf("read capture epochs: %w", err)
+	}
+	state.Epochs = epochs
 	return state, nil
 }
 
@@ -151,6 +164,11 @@ func (s *Store) RecordCaptureFailure(ctx context.Context, failure capture.Captur
 	defer func() { _ = tx.Rollback() }()
 	if err := recordCaptureFailureTx(ctx, tx, failure); err != nil {
 		return err
+	}
+	if failure.Kind.ProvesMissedDirectDelivery() {
+		if err := closeCaptureEpochTx(ctx, tx, failure.Runtime, failure.FailedAt.UTC(), history.CaptureEndReasonConfirmedCaptureFailure); err != nil {
+			return fmt.Errorf("close capture epoch for failed delivery: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit capture failure: %w", err)

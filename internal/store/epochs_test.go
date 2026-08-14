@@ -9,9 +9,84 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/capture"
 	"github.com/kespineira/harness-lint/internal/domain"
 	"github.com/kespineira/harness-lint/internal/history"
 )
+
+func TestHookIngestAndCaptureFailuresDriveCaptureEpochLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
+	hook := testUsageEvent(base, "direct-hook", domain.EventInvoked)
+	hook.Provenance = domain.ProvenanceHook
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("first hook ingest: %v", err)
+	}
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("idempotent hook ingest: %v", err)
+	}
+	epochs, err := s.ListCaptureEpochs(ctx, domain.RuntimeCodex)
+	if err != nil || len(epochs) != 1 || !epochs[0].Start.Equal(base) || !epochs[0].IsOpen() {
+		t.Fatalf("open epoch after successful delivery = %#v, err=%v", epochs, err)
+	}
+	if err := s.RecordCaptureFailure(ctx, capture.CaptureFailure{
+		Runtime: domain.RuntimeCodex, FailedAt: base.Add(time.Hour), Kind: capture.FailureMalformedPayload,
+	}); err != nil {
+		t.Fatalf("confirmed parser failure: %v", err)
+	}
+	epochs, err = s.ListCaptureEpochs(ctx, domain.RuntimeCodex)
+	if err != nil || len(epochs) != 1 || !epochs[0].End.Equal(base.Add(time.Hour)) || epochs[0].EndReason != history.CaptureEndReasonConfirmedCaptureFailure {
+		t.Fatalf("closed epoch after parser failure = %#v, err=%v", epochs, err)
+	}
+	// An unsupported event is outside the managed capture contract and must
+	// not manufacture a lifecycle gap or close otherwise valid coverage.
+	if err := s.RecordCaptureFailure(ctx, capture.CaptureFailure{
+		Runtime: domain.RuntimeCodex, FailedAt: base.Add(2 * time.Hour), Kind: capture.FailureUnsupportedEvent,
+	}); err != nil {
+		t.Fatalf("unsupported event: %v", err)
+	}
+	hook.ObservedAt = base.Add(3 * time.Hour)
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("recovery hook ingest: %v", err)
+	}
+	epochs, err = s.ListCaptureEpochs(ctx, domain.RuntimeCodex)
+	if err != nil || len(epochs) != 2 || !epochs[1].Start.Equal(base.Add(3*time.Hour)) || !epochs[1].IsOpen() {
+		t.Fatalf("recovery epochs = %#v, err=%v", epochs, err)
+	}
+}
+
+func TestCaptureSelfTestRollsBackEpochAndUsageState(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base := time.Now().UTC().Add(-time.Hour)
+	hook := testUsageEvent(base, "existing-hook", domain.EventInvoked)
+	hook.Provenance = domain.ProvenanceHook
+	if err := s.IngestUsageEvent(ctx, hook); err != nil {
+		t.Fatalf("seed hook ingest: %v", err)
+	}
+	beforeEpochs, err := s.ListCaptureEpochs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SelfTestCaptureIngest(ctx); err != nil {
+		t.Fatalf("capture self-test: %v", err)
+	}
+	afterEpochs, err := s.ListCaptureEpochs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(beforeEpochs, afterEpochs) {
+		t.Fatalf("capture self-test changed epochs: before=%#v after=%#v", beforeEpochs, afterEpochs)
+	}
+	events, err := s.ListUsageEvents(ctx, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("capture self-test changed usage history: %#v", events)
+	}
+}
 
 func TestCaptureEpochPrimitivesAreChronologicalAndIdempotent(t *testing.T) {
 	ctx := context.Background()
