@@ -16,7 +16,9 @@ test_api=$test_fixture/api
 test_releases=$test_fixture/releases
 test_source=$test_fixture/source
 test_home=$test_root/home
-mkdir -p "$test_tmp" "$test_api/repos/example/project/releases" "$test_releases" "$test_source" "$test_home"
+test_fake_cosign_bin=$test_root/fake-cosign-bin
+test_sudo_bin=$test_root/fake-sudo-bin
+mkdir -p "$test_tmp" "$test_api/repos/example/project/releases" "$test_releases" "$test_source" "$test_home" "$test_fake_cosign_bin" "$test_sudo_bin"
 
 test_fail() {
     echo "install test: $*" >&2
@@ -26,7 +28,15 @@ test_fail() {
 test_assert_file_contains() {
     test_file=$1
     test_text=$2
-    grep -F "$test_text" "$test_file" >/dev/null 2>&1 || test_fail "missing '$test_text' in $test_file"
+    grep -F -e "$test_text" "$test_file" >/dev/null 2>&1 || test_fail "missing '$test_text' in $test_file"
+}
+
+test_assert_file_not_contains() {
+    test_file=$1
+    test_text=$2
+    if grep -F -e "$test_text" "$test_file" >/dev/null 2>&1; then
+        test_fail "unexpected '$test_text' in $test_file"
+    fi
 }
 
 test_assert_no_temp_dirs() {
@@ -70,12 +80,37 @@ test_run_install() {
     fi
 }
 
+# The generated fixture scripts intentionally retain their runtime expansions.
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/bin/sh' \
+    'set -eu' \
+    ': > "$HARNESS_LINT_FAKE_COSIGN_LOG"' \
+    'for test_arg do' \
+    '    printf "%s\\n" "$test_arg" >> "$HARNESS_LINT_FAKE_COSIGN_LOG"' \
+    'done' \
+    '[ "${HARNESS_LINT_FAKE_COSIGN_MODE:-success}" != fail ]' \
+    > "$test_fake_cosign_bin/cosign"
+chmod 755 "$test_fake_cosign_bin/cosign"
+# shellcheck disable=SC2016
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\\n" invoked > "$HARNESS_LINT_SUDO_MARKER"' \
+    'exit 127' \
+    > "$test_sudo_bin/sudo"
+chmod 755 "$test_sudo_bin/sudo"
+
 printf '{"tag_name":"v1.2.3"}\n' > "$test_api/repos/example/project/releases/latest"
 test_make_release 1.2.3 darwin amd64 mapping-darwin-amd64
 test_make_release 1.2.3 darwin arm64 mapping-darwin-arm64
 test_make_release 1.2.3 linux amd64 mapping-linux-amd64
 test_make_release 1.2.3 linux arm64 mapping-linux-arm64
 test_make_release 2.0.0 linux amd64 pinned-version
+test_make_release 3.0.0 linux amd64 cosign-success
+printf '%s\n' '{"bundle":"fixture"}' > "$test_releases/v3.0.0/checksums.txt.sigstore.json"
+test_make_release 3.0.1 linux amd64 cosign-missing-bundle
+test_make_release 3.0.2 linux amd64 cosign-verification-failure
+printf '%s\n' '{"bundle":"fixture"}' > "$test_releases/v3.0.2/checksums.txt.sigstore.json"
 
 # The four supported OS/architecture mappings are selected without uname calls.
 test_mapping_index=0
@@ -108,13 +143,14 @@ test_assert_no_temp_dirs
 
 # With no install override the installer uses the disposable HOME, never sudo.
 test_default_destination=$test_home/.local/bin
-test_path=/usr/bin:/bin
+test_path=$test_sudo_bin:/usr/bin:/bin
 test_run_install "$test_root/default.out" "$test_root/default.err" \
     HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=amd64 \
-    HARNESS_LINT_VERSION=1.2.3 || test_fail "default install directory failed"
+    HARNESS_LINT_VERSION=1.2.3 HARNESS_LINT_SUDO_MARKER="$test_root/sudo.marker" || test_fail "default install directory failed"
 test_assert_file_contains "$test_default_destination/harness-lint" "mapping-linux-amd64"
 test_assert_file_contains "$test_root/default.err" "Add $test_default_destination to PATH"
 test_assert_file_contains "$test_root/default.out" "Installed harness-lint 1.2.3"
+[ ! -e "$test_root/sudo.marker" ] || test_fail "installer invoked sudo"
 test_assert_no_temp_dirs
 
 test_pinned_destination=$test_root/pinned/bin
@@ -123,6 +159,51 @@ test_run_install "$test_root/pinned.out" "$test_root/pinned.err" \
     HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=x86_64 \
     HARNESS_LINT_VERSION=2.0.0 HARNESS_LINT_INSTALL_DIR="$test_pinned_destination" || test_fail "pinned release install failed"
 test_assert_file_contains "$test_pinned_destination/harness-lint" "pinned-version"
+test_assert_no_temp_dirs
+
+# When Cosign is present, the exact GitHub workflow identity and issuer are passed.
+test_cosign_destination=$test_root/cosign/bin
+test_cosign_log=$test_root/cosign-success.log
+test_path=$test_fake_cosign_bin:/usr/bin:/bin
+test_run_install "$test_root/cosign.out" "$test_root/cosign.err" \
+    HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=amd64 \
+    HARNESS_LINT_VERSION=3.0.0 HARNESS_LINT_INSTALL_DIR="$test_cosign_destination" \
+    HARNESS_LINT_FAKE_COSIGN_LOG="$test_cosign_log" HARNESS_LINT_FAKE_COSIGN_MODE=success || test_fail "Cosign success install failed"
+test_assert_file_contains "$test_cosign_destination/harness-lint" "cosign-success"
+test_assert_file_contains "$test_cosign_log" "--certificate-identity"
+test_assert_file_contains "$test_cosign_log" "https://github.com/example/project/.github/workflows/release.yml@refs/tags/v3.0.0"
+test_assert_file_contains "$test_cosign_log" "--certificate-oidc-issuer"
+test_assert_file_contains "$test_cosign_log" "https://token.actions.githubusercontent.com"
+test_assert_no_temp_dirs
+
+# A missing Cosign bundle is a hard failure and cannot create the destination.
+test_cosign_missing_destination=$test_root/cosign-missing/bin
+test_cosign_missing_log=$test_root/cosign-missing.log
+if test_run_install "$test_root/cosign-missing.out" "$test_root/cosign-missing.err" \
+    HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=amd64 \
+    HARNESS_LINT_VERSION=3.0.1 HARNESS_LINT_INSTALL_DIR="$test_cosign_missing_destination" \
+    HARNESS_LINT_FAKE_COSIGN_LOG="$test_cosign_missing_log" HARNESS_LINT_FAKE_COSIGN_MODE=success; then
+    test_fail "missing Cosign bundle was accepted"
+fi
+test_assert_file_contains "$test_root/cosign-missing.err" "unable to download or read checksum signature bundle"
+[ ! -e "$test_cosign_missing_destination" ] || test_fail "missing Cosign bundle created install directory"
+[ ! -e "$test_cosign_missing_log" ] || test_fail "Cosign ran without a bundle"
+test_assert_no_temp_dirs
+
+# A failed Cosign verification is also fail-closed and preserves an old binary.
+test_cosign_failure_destination=$test_root/cosign-failure/bin
+mkdir -p "$test_cosign_failure_destination"
+printf '%s\n' old-cosign-binary > "$test_cosign_failure_destination/harness-lint"
+test_cosign_failure_log=$test_root/cosign-failure.log
+if test_run_install "$test_root/cosign-failure.out" "$test_root/cosign-failure.err" \
+    HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=amd64 \
+    HARNESS_LINT_VERSION=3.0.2 HARNESS_LINT_INSTALL_DIR="$test_cosign_failure_destination" \
+    HARNESS_LINT_FAKE_COSIGN_LOG="$test_cosign_failure_log" HARNESS_LINT_FAKE_COSIGN_MODE=fail; then
+    test_fail "Cosign verification failure was accepted"
+fi
+test_assert_file_contains "$test_root/cosign-failure.err" "Cosign checksum authenticity verification failed"
+test_assert_file_contains "$test_cosign_failure_destination/harness-lint" "old-cosign-binary"
+test_assert_file_contains "$test_cosign_failure_log" "https://github.com/example/project/.github/workflows/release.yml@refs/tags/v3.0.2"
 test_assert_no_temp_dirs
 
 # An unsupported platform is rejected before any endpoint is contacted or directory is created.
@@ -170,11 +251,15 @@ test_assert_no_temp_dirs
 
 # Existing binaries are upgraded atomically after successful verification.
 test_upgrade_source=$test_root/upgrade/bin
+mkdir -p "$test_upgrade_source"
+printf '%s\n' old-version > "$test_upgrade_source/harness-lint"
+chmod 755 "$test_upgrade_source/harness-lint"
 test_path=$test_upgrade_source:/usr/bin:/bin
 test_run_install "$test_root/upgrade.out" "$test_root/upgrade.err" \
     HARNESS_LINT_UNAME_S=Linux HARNESS_LINT_UNAME_M=amd64 \
     HARNESS_LINT_VERSION=2.0.0 HARNESS_LINT_INSTALL_DIR="$test_upgrade_source" || test_fail "upgrade install failed"
 test_assert_file_contains "$test_upgrade_source/harness-lint" "pinned-version"
+test_assert_file_not_contains "$test_upgrade_source/harness-lint" "old-version"
 test_assert_no_temp_dirs
 
 echo "installer tests passed"

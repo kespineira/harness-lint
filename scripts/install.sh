@@ -160,18 +160,17 @@ fi
 
 if command -v cosign >/dev/null 2>&1; then
     installer_bundle="$installer_tmp/checksums.txt.sigstore.json"
-    if curl -fsSL -A harness-lint-installer "$installer_bundle_url" -o "$installer_bundle" 2>/dev/null; then
-        installer_identity="https://$installer_repository/.github/workflows/release.yml@refs/tags/v${installer_version}"
-        if ! cosign verify-blob "$installer_checksums" \
-            --bundle "$installer_bundle" \
-            --certificate-identity "$installer_identity" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
-            installer_die "Cosign checksum authenticity verification failed"
-        fi
-        echo "Checksum authenticity verified with Cosign." >&2
-    else
-        echo "Cosign is installed, but this release has no checksum signature bundle; SHA-256 was verified." >&2
+    if ! curl -fsSL -A harness-lint-installer "$installer_bundle_url" -o "$installer_bundle" 2>/dev/null || [ ! -r "$installer_bundle" ] || [ ! -s "$installer_bundle" ]; then
+        installer_die "unable to download or read checksum signature bundle"
     fi
+    installer_identity="https://github.com/$installer_owner/$installer_name/.github/workflows/release.yml@refs/tags/v${installer_version}"
+    if ! cosign verify-blob "$installer_checksums" \
+        --bundle "$installer_bundle" \
+        --certificate-identity "$installer_identity" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com; then
+        installer_die "Cosign checksum authenticity verification failed"
+    fi
+    echo "Checksum authenticity verified with Cosign." >&2
 else
     echo "Cosign is not installed; SHA-256 was verified, but checksum authenticity was not." >&2
 fi
@@ -196,7 +195,7 @@ while IFS= read -r installer_verbose_entry; do
         l*|h*) installer_die "release archive contains a link entry" ;;
     esac
 done < "$installer_verbose_listing"
-if ! tar -xzf "$installer_archive" -C "$installer_extract"; then
+if ! tar -xzf "$installer_archive" -C "$installer_extract" harness-lint; then
     installer_die "unable to unpack release archive"
 fi
 installer_binary="$installer_extract/harness-lint"
