@@ -8,9 +8,13 @@ not add a `.goreleaser.yml` until that automation is reviewed separately.
 
 Tags named `vX.Y.Z` are the release version source. The binary reports the
 semantic version without the tag's leading `v`, the source commit, and the
-build date through `harness-lint version` (and `--version`). Development,
-source, and `go install` builds use the safe defaults `0.0.0-dev`, `unknown`,
-and `unknown`; no generated version file is required.
+build date through `harness-lint version` (and `--version`). Development and
+source builds use safe `0.0.0-dev`, `unknown`, and `unknown` defaults; a
+`go install` build may recover a non-development module version and VCS
+revision/time from `runtime/debug.BuildInfo`. Empty or development build-info
+values (including a `(devel)` module version) are ignored, and the safe
+defaults remain when metadata is unavailable; no generated version file is
+required.
 
 The linker targets for GoReleaser are:
 
