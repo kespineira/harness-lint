@@ -73,7 +73,7 @@ nfpms:
     package_name: harness-lint
     vendor: Kespineira
     homepage: https://github.com/kespineira/harness-lint
-    maintainer: "Kevin Espiñeira <kevin.espineira@gmail.com>"
+    maintainer: "Kevin Espiñeira <kespineira@users.noreply.github.com>"
     description: Local context hygiene and usage analyzer for coding agent harnesses.
     license: Apache-2.0
     formats:
@@ -97,6 +97,10 @@ homebrew_casks:
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    commit_author:
+      name: goreleaserbot
+      email: kespineira@users.noreply.github.com
     description: Local context hygiene and usage analyzer for coding agent harnesses.
     homepage: https://github.com/kespineira/harness-lint
     license: Apache-2.0
@@ -109,7 +113,7 @@ homebrew_casks:
       post:
         install: |
           if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/harness-lint"]
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/harness-lint"], sudo: false
           end
 
 changelog:
@@ -118,16 +122,16 @@ changelog:
   abbrev: -1
   groups:
     - title: Features
-      regexp: '^.*?feat(?:\([[:word:]]+\))?!?:.+$'
+      regexp: '^.*?feat(\([[:word:]]+\))?!?:.+$'
       order: 0
     - title: Fixes
-      regexp: '^.*?(?:fix|bug)(?:\([[:word:]]+\))?!?:.+$'
+      regexp: '^.*?(fix|bug)(\([[:word:]]+\))?!?:.+$'
       order: 1
     - title: Documentation
-      regexp: '^.*?docs?(?:\([[:word:]]+\))?!?:.+$'
+      regexp: '^.*?docs?(\([[:word:]]+\))?!?:.+$'
       order: 2
     - title: Maintenance
-      regexp: '^.*?(?:build|chore|ci|perf|refactor|test)(?:\([[:word:]]+\))?!?:.+$'
+      regexp: '^.*?(build|chore|ci|perf|refactor|test)(\([[:word:]]+\))?!?:.+$'
       order: 3
     - title: Other changes
       order: 999
