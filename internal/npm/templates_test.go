@@ -32,10 +32,12 @@ type metadata struct {
 		Name string `json:"name"`
 	} `json:"root"`
 	Native []struct {
-		Name    string `json:"name"`
-		OS      string `json:"os"`
-		CPU     string `json:"cpu"`
-		Archive string `json:"archive"`
+		Name    string          `json:"name"`
+		OS      string          `json:"os"`
+		CPU     string          `json:"cpu"`
+		GoOS    string          `json:"goos"`
+		GoArch  string          `json:"goarch"`
+		Archive json.RawMessage `json:"archive"`
 	} `json:"native"`
 }
 
@@ -172,16 +174,19 @@ func TestPackageMetadataContract(t *testing.T) {
 	if got, want := len(meta.Native), 4; got != want {
 		t.Fatalf("native package count = %d, want %d", got, want)
 	}
-	wantNative := []struct{ name, os, cpu, archive string }{
-		{"@kespineira/harness-lint-darwin-arm64", "darwin", "arm64", "harness-lint_${VERSION}_darwin_arm64.tar.gz"},
-		{"@kespineira/harness-lint-darwin-x64", "darwin", "x64", "harness-lint_${VERSION}_darwin_amd64.tar.gz"},
-		{"@kespineira/harness-lint-linux-arm64", "linux", "arm64", "harness-lint_${VERSION}_linux_arm64.tar.gz"},
-		{"@kespineira/harness-lint-linux-x64", "linux", "x64", "harness-lint_${VERSION}_linux_amd64.tar.gz"},
+	wantNative := []struct{ name, os, cpu, goos, goarch string }{
+		{"@kespineira/harness-lint-darwin-arm64", "darwin", "arm64", "darwin", "arm64"},
+		{"@kespineira/harness-lint-darwin-x64", "darwin", "x64", "darwin", "amd64"},
+		{"@kespineira/harness-lint-linux-arm64", "linux", "arm64", "linux", "arm64"},
+		{"@kespineira/harness-lint-linux-x64", "linux", "x64", "linux", "amd64"},
 	}
 	for i, want := range wantNative {
 		got := meta.Native[i]
-		if got.Name != want.name || got.OS != want.os || got.CPU != want.cpu || got.Archive != want.archive {
-			t.Errorf("native[%d] = %#v, want name=%q os=%q cpu=%q archive=%q", i, got, want.name, want.os, want.cpu, want.archive)
+		if len(got.Archive) != 0 {
+			t.Errorf("native[%d] contains removed archive filename field", i)
+		}
+		if got.Name != want.name || got.OS != want.os || got.CPU != want.cpu || got.GoOS != want.goos || got.GoArch != want.goarch {
+			t.Errorf("native[%d] = %#v, want name=%q os=%q cpu=%q goos=%q goarch=%q", i, got, want.name, want.os, want.cpu, want.goos, want.goarch)
 		}
 	}
 }

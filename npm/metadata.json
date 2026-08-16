@@ -16,25 +16,29 @@
       "name": "@kespineira/harness-lint-darwin-arm64",
       "os": "darwin",
       "cpu": "arm64",
-      "archive": "harness-lint_${VERSION}_darwin_arm64.tar.gz"
+      "goos": "darwin",
+      "goarch": "arm64"
     },
     {
       "name": "@kespineira/harness-lint-darwin-x64",
       "os": "darwin",
       "cpu": "x64",
-      "archive": "harness-lint_${VERSION}_darwin_amd64.tar.gz"
+      "goos": "darwin",
+      "goarch": "amd64"
     },
     {
       "name": "@kespineira/harness-lint-linux-arm64",
       "os": "linux",
       "cpu": "arm64",
-      "archive": "harness-lint_${VERSION}_linux_arm64.tar.gz"
+      "goos": "linux",
+      "goarch": "arm64"
     },
     {
       "name": "@kespineira/harness-lint-linux-x64",
       "os": "linux",
       "cpu": "x64",
-      "archive": "harness-lint_${VERSION}_linux_amd64.tar.gz"
+      "goos": "linux",
+      "goarch": "amd64"
     }
   ]
 }
