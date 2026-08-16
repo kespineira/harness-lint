@@ -1,27 +1,30 @@
 # npm distribution architecture (ADR)
 
-**Status:** proposed
+**Status:** accepted
 
 **Date:** 2026-08-16
 
-**Baseline:** `7f96b171ffbf3fba4002fe82a766446657b08349`
+**Baseline:** `5abea42`
 
-**Scope:** npm distribution of the existing Go CLI; this ADR does not change
-the current Go release workflow or package manifests.
+**Scope:** npm distribution of the existing Go CLI, including the accepted
+tag-triggered release workflow and npm package manifests.
+
+This ADR records the accepted workflow contract, not a publication result; no
+successful npm registry publication is asserted here.
 
 ## Decision
 
-Once bootstrap confirms ownership and publishability, publish one small
-cross-platform launcher and four native implementation packages. Until then,
-these are proposed names, not a guarantee that npm will allow publication:
+The accepted implementation publishes one small cross-platform launcher and
+four native implementation packages after the one-time bootstrap confirms
+ownership and publishability:
 
 | Package | Node selector | GoReleaser archive member |
 | --- | --- | --- |
 | `harness-lint` | launcher; selects at runtime | — |
-| `@kespineira/harness-lint-darwin-x64` | `darwin` / `x64` | `harness-lint_<version>_darwin_amd64.tar.gz` |
 | `@kespineira/harness-lint-darwin-arm64` | `darwin` / `arm64` | `harness-lint_<version>_darwin_arm64.tar.gz` |
-| `@kespineira/harness-lint-linux-x64` | `linux` / `x64` | `harness-lint_<version>_linux_amd64.tar.gz` |
+| `@kespineira/harness-lint-darwin-x64` | `darwin` / `x64` | `harness-lint_<version>_darwin_amd64.tar.gz` |
 | `@kespineira/harness-lint-linux-arm64` | `linux` / `arm64` | `harness-lint_<version>_linux_arm64.tar.gz` |
+| `@kespineira/harness-lint-linux-x64` | `linux` / `x64` | `harness-lint_<version>_linux_amd64.tar.gz` |
 
 The root package declares all four platform packages as exact-version
 `optionalDependencies`. Each platform package declares its matching npm
@@ -81,15 +84,15 @@ workflow filename: release.yml
 ```
 
 The filename is exactly `release.yml`, not `.github/workflows/release.yml`.
-This reuses the existing tag-triggered workflow and its release job's
-`id-token: write` permission; if npm publishing is split into another job,
-that job must also explicitly grant `id-token: write` and run on a
-GitHub-hosted runner. The npm job also needs `contents: read`,
-`registry-url: https://registry.npmjs.org`, Node >=22.14.0, and npm >=11.5.1.
+The accepted workflow's separate npm publishing job explicitly grants
+`id-token: write` and runs on a GitHub-hosted runner. The npm job also has
+`contents: read`, `registry-url: https://registry.npmjs.org`, Node >=22.14.0,
+and npm >=11.5.1.
 Do not provide an `NPM_TOKEN` for normal releases. Trusted publishing uses a
 short-lived OIDC credential; npm automatically generates provenance for a
-public package published from this public repository, so `--provenance` is
-not needed in the trusted-publisher path. Keep package `repository.url`
+public package published from this public repository. The implementation also
+passes `npm publish --provenance` and verifies the resulting attestation with
+`npm audit signatures --include-attestations`. Keep package `repository.url`
 exactly equal (including case) to the GitHub repository URL.
 
 Stable `v0.1.2` is an OIDC release: all five packages must be published by
@@ -109,34 +112,42 @@ provenance for every package.
 
 ## Publication order and partial failure
 
-After all existing release gates pass, the release job should run the pinned
+After all existing release gates pass, the `release` job runs the pinned
 GoReleaser release once. GoReleaser creates the GitHub Release draft and
 updates Homebrew; the draft must remain unpublished while every subsequent
-gate runs. The exact order is:
+gate runs. The accepted workflow stages and packs npm inputs in that same job,
+then the separate `npm-publish` job consumes the uploaded audited artifact.
+The exact order is:
 
 1. Sign `dist/checksums.txt`, verify the signature, and upload the verified
    `checksums.txt.sigstore.json` bundle to the still-draft GitHub Release.
 2. Stage and validate all five npm package directories from the same
    canonical `dist/` output and tag-derived version. Run `npm pack --dry-run`,
-   create the package tarballs, and verify their contents, sizes, and hashes
-   before any npm publish.
+   create the package tarballs, verify their contents, sizes, SHA-256 and
+   integrity receipts, and upload the audited tarballs before any npm publish.
 3. Publish the four native packages, in a fixed documented order, with
    `npm publish --access public --tag latest` through their Trusted Publishers
-   and OIDC. Query the registry after each publish and require the exact
-   version, dist-tag, and provenance record before continuing.
+   and OIDC. The order is `darwin-arm64`, `darwin-x64`, `linux-arm64`, then
+   `linux-x64`. Query the registry after each publish and require the exact
+   name/version, `latest` dist-tag, tarball integrity, repository/platform
+   metadata, and provenance record before continuing.
 4. Publish `harness-lint` last with the same OIDC command. Query the registry
-   and require the exact root version, `latest` tag, and provenance record.
+   and require the exact root version, `latest` tag, integrity, exact native
+   optional dependencies, and provenance record.
 5. Only after every preceding step succeeds, publish the stable GitHub
    Release draft. No step may set `draft=false` earlier.
 
-There is no transaction spanning five npm packages and GitHub. A successful
-`name@version` is immutable and cannot be replaced, even after unpublish;
-dist-tags are mutable pointers and are not a transaction either. If a
-publish call returns a definite pre-acceptance error, verify its registry
+There is no transaction spanning five npm packages, GitHub, and Homebrew. A
+successful `name@version` is immutable and cannot be replaced, even after
+unpublish; dist-tags are mutable pointers and are not a transaction either.
+If a publish call returns a definite pre-acceptance error, verify its registry
 record is still absent before an operational retry of only that package. If
-the result is ambiguous, query the registry before retrying. Never republish
-an accepted package/version, delete it to make a retry possible, or rerun a
-release tag as a general repair.
+the result is ambiguous, query the registry before retrying. If an immutable
+version already exists, the publisher verifies it rather than republishing.
+Never republish an accepted package/version, delete it to make a retry
+possible, or retry when the registry's immutable package, metadata, integrity,
+or provenance does not match the audited input. A mismatch is unsafe and
+requires fix-forward.
 
 Several partial states are unavoidable: GoReleaser may have committed a
 Homebrew cask that references the still-draft GitHub Release; a native npm
@@ -144,11 +155,32 @@ failure may leave some platform `latest` tags updated while the root
 `latest` remains on the previous complete release; and a root npm success
 may leave all npm packages live while the GitHub Release is still a draft if
 the final GitHub publication fails. These states are detectable by checking
-the tap commit, draft release, npm registry versions/tags, and provenance.
-They are not permission to replace content: after diagnosis, fix forward
-with a new coordinated commit, GitHub tag, and npm version. Never delete,
-move, or recreate the affected GitHub release/tag or accepted npm
-`name@version`.
+the tap commit, draft release, npm registry versions/tags, tarball integrity,
+and provenance. They are not permission to replace content: after diagnosis,
+use only the bounded failed-job continuation described below while the run is
+still unpublished and all verification matches; otherwise fix forward with a
+new coordinated commit, GitHub tag, and npm version. Never delete, move, or
+recreate the affected GitHub release/tag or accepted npm `name@version`.
+
+### Recovery and fix-forward
+
+The split workflow permits a bounded GitHub Actions **Re-run failed jobs**
+continuation when the same tagged run is still unpublished and the audited npm
+tarballs were already uploaded. This is allowed only for a failed
+`npm-publish` job after the canonical `release` job completed, or for the
+failed final GitHub publication job after npm completed. The npm publisher is
+resumable: it verifies every already-accepted immutable package against the
+exact registry name/version, `latest` tag, metadata, tarball integrity, and
+provenance, skips only a matching package, and continues in native order with
+the root last using the already-uploaded tarballs. It never reruns GoReleaser
+or stages a replacement artifact.
+
+Do not re-run the full `release`/GoReleaser job, regenerate or replace audited
+artifacts, generally reuse a tag, or retry a package when any registry
+integrity, metadata, or provenance check fails. If the release is already
+public, the audited inputs are unavailable, the draft/run state is no longer
+coherent, or any verification mismatch is found, stop and fix forward with a
+new coordinated commit, tag, and version.
 
 ### Staged publishing option
 
@@ -213,6 +245,29 @@ provenance-bearing OIDC publication. Do not commit or configure an
 officially supported bootstrap path, it must preserve the non-latest tag and
 must not weaken the no-token stable-release contract.
 
+## Validation and implementation evidence
+
+The accepted implementation adds deterministic local gates for release policy,
+staging, packing, publisher security, and the npm consumer path:
+
+```sh
+./scripts/release-workflow-test.sh
+./scripts/stage-npm-packages-test.sh
+./scripts/pack-npm-packages-test.sh
+./scripts/publish-npm-packages-test.sh
+./scripts/npm-package-e2e-test.sh
+```
+
+On a GoReleaser snapshot with `dist/` available, run
+`./scripts/npm-package-e2e.sh --dist dist`; it audits all five tarballs and
+executes only the host-native package. The tag workflow runs this consumer
+E2E on Linux and macOS before publication. After a real publish, the publisher
+checks each public registry record and requires
+`npm audit signatures --include-attestations` to show the matching provenance
+attestation; the published-release consumer workflow separately validates the
+public GitHub Release, installer, and Homebrew cask. These checks are evidence
+requirements, not a claim that npm publication has already succeeded.
+
 ## External prerequisites and blockers
 
 - An npm account that controls the `kespineira` scope and can publish all
@@ -230,9 +285,10 @@ must not weaken the no-token stable-release contract.
   after bootstrap, every stable publish uses Trusted Publishing/OIDC.
 - A hard gate forbidding creation or push of `v0.1.2` until all five package
   names exist and all five trusted-publisher configurations are saved.
-- Future workflow/package implementation is still required. This ADR is
-  intentionally read-only with respect to `.github/workflows/`,
-  `.goreleaser.yml`, and package manifests.
+- The accepted implementation is in `.github/workflows/release.yml`,
+  `npm/metadata.json`, the npm templates, and the staging/packing/publishing
+  and E2E scripts; those files are the operational source of truth for this
+  ADR.
 
 ## Evidence and official references
 

@@ -2,7 +2,8 @@
 
 The stable release workflow runs from a pushed annotated tag. It creates a
 draft GitHub Release, publishes the Homebrew cask, signs and verifies the
-checksum manifest, attaches the Cosign bundle, and only then publishes the
+checksum manifest, stages and audits five npm packages, publishes those
+packages through Trusted Publishing/OIDC, and only then publishes the GitHub
 release. The release contract is intentionally fix-forward: a tag and its
 published artifacts are never reused or replaced.
 
@@ -21,16 +22,67 @@ Before creating a release, confirm all of the following:
 - The workflow has the required `contents: write` and `id-token: write`
   permissions. The release job uses the repository `GITHUB_TOKEN` for the
   GitHub Release and its OIDC identity for keyless signing.
+- All five npm package names and their per-package Trusted Publisher settings
+  exist before the `v0.1.2` tag is created. Each setting is `GitHub Actions`,
+  organization/user `kespineira`, repository `harness-lint`, and workflow
+  filename exactly `release.yml` (not `.github/workflows/release.yml`). The
+  npm publisher job has `contents: read` and `id-token: write` and uses the
+  public registry at `https://registry.npmjs.org`.
+- The one-time bootstrap has been completed by an authenticated human npm
+  maintainer with 2FA, using a non-latest `bootstrap` dist-tag. Normal
+  releases do not use `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
 
-GoReleaser is pinned to **v2.17.1** and Cosign is pinned to **v3.1.3** in the
-workflow. Do not silently upgrade either tool as part of a release; review a
-version change as a release-automation change.
+GoReleaser is pinned to **v2.17.1**, Cosign is pinned to **v3.1.3**, Node.js is
+pinned to **22.14.0**, and npm is pinned to **11.5.1** in the workflow. Do not
+silently upgrade any of these tools as part of a release; review a version
+change as a release-automation change.
 
 The current GoReleaser/Homebrew Cask integration cannot carry a Cask
 `license` stanza in this setup, even though the GoReleaser configuration
 identifies Apache-2.0. This is a limitation of generated Homebrew packaging
 metadata, not a missing project license: `LICENSE` remains canonical and is
 included in release archives and Linux packages.
+
+## npm package architecture and versioning
+
+The npm distribution is five packages: the root launcher
+`harness-lint`, plus `@kespineira/harness-lint-darwin-arm64`,
+`@kespineira/harness-lint-darwin-x64`,
+`@kespineira/harness-lint-linux-arm64`, and
+`@kespineira/harness-lint-linux-x64`. The native packages are selected by npm
+platform metadata; the root package's optional dependencies are exact matches
+for the same release. The root launcher only delegates to the already
+installed native executable and has no lifecycle hook or runtime download.
+
+The stable tag is the only version source. Tag `v0.1.2` derives npm version
+`0.1.2` by stripping exactly the leading `v`; all five manifests, tarball
+filenames, native dependencies, and registry records must use that exact
+version. The `v` is never published. The native publish order is fixed and the
+root is last:
+
+1. `@kespineira/harness-lint-darwin-arm64`
+2. `@kespineira/harness-lint-darwin-x64`
+3. `@kespineira/harness-lint-linux-arm64`
+4. `@kespineira/harness-lint-linux-x64`
+5. `harness-lint`
+
+GoReleaser remains the canonical binary builder. The stable release job runs
+the pinned GoReleaser release once, uses its `dist/` archives to stage the
+four native npm packages, packs and audits all five tarballs, and uploads the
+audited tarballs to the OIDC npm job. That job checks out the exact tagged
+commit and downloads those inputs; it does not rebuild or restage a different
+binary.
+
+Configure Trusted Publishing separately on each package with provider
+`GitHub Actions`, organization/user `kespineira`, repository `harness-lint`,
+and workflow filename `release.yml`. npm's Trusted Publishing uses the
+short-lived GitHub OIDC credential and automatically creates provenance for a
+public package; the implementation also passes `--provenance` and verifies
+the resulting attestation. After every publish, the workflow requires the
+exact public registry version, `latest` tag, tarball integrity, repository and
+platform metadata, and a successful `npm audit signatures
+--include-attestations` provenance check before continuing. No normal release
+uses a long-lived npm token.
 
 ## Tag validation jobs
 
@@ -41,9 +93,10 @@ stable release job can publish anything:
   artifact on that runner, and inspects every other archive's structure and
   architecture without executing a non-native binary. It also validates Linux
   package metadata and payloads where the runner has the relevant package
-  inspection tools.
+  inspection tools, then runs the real npm package consumer E2E.
 - `release-e2e-macos` performs the equivalent native execution and
-  non-native archive inspection on macOS.
+  non-native archive inspection on macOS, then runs the real npm package
+  consumer E2E.
 - `release-homebrew-e2e` generates the cask on macOS, then runs Homebrew
   style, audit, and load checks in a temporary hosted-runner tap. The tap is
   removed on exit and is never pushed or applied to a local user's Homebrew
@@ -71,7 +124,8 @@ The workflow intentionally fails before publishing when any gate fails:
    reachable from `origin/main`.
 4. The GitHub API must establish that no Release already exists for the tag:
    HTTP 404 passes; HTTP 200 or any other response fails closed.
-5. The job installs Go 1.24.x, Cosign v3.1.3, and GoReleaser v2.17.1.
+5. The job installs Go 1.24.x, Node.js 22.14.0, npm 11.5.1, Cosign v3.1.3,
+   and GoReleaser v2.17.1.
 6. Source and release-policy checks must pass: `git diff --check`,
    `./scripts/release-workflow-test.sh`, `gofmt -l .` must be empty,
    `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
@@ -79,6 +133,9 @@ The workflow intentionally fails before publishing when any gate fails:
 7. `./scripts/install_test.sh` and
    `./scripts/isolated-smoke.sh <built-binary>` must pass.
 8. `goreleaser check` must validate `.goreleaser.yml`.
+9. The release job must stage and pack all five npm packages from the
+   validated `dist/` output, and the npm publisher must consume those audited
+   tarballs with OIDC before the GitHub draft can be published.
 
 These gates run on the tag commit, not on an untagged local checkout. Run the
 same commands locally before tagging so a failed workflow is exceptional.
@@ -107,10 +164,15 @@ release_binary="$release_tmp/harness-lint"
 go build -trimpath -o "$release_binary" ./cmd/harness-lint
 ./scripts/install_test.sh
 ./scripts/release-workflow-test.sh
+./scripts/stage-npm-packages-test.sh
+./scripts/pack-npm-packages-test.sh
+./scripts/publish-npm-packages-test.sh
+./scripts/npm-package-e2e-test.sh
 ./scripts/isolated-smoke.sh "$release_binary"
 goreleaser check
 goreleaser release --snapshot --clean
 ./scripts/release-e2e.sh
+./scripts/npm-package-e2e.sh --dist dist
 find dist -maxdepth 1 -type f -print | sort
 for archive in dist/*.tar.gz; do
   [ -f "$archive" ] || continue
@@ -128,6 +190,16 @@ cask with `ruby -c`. `./scripts/release-e2e.sh` performs the deterministic check
 archive, package, cask, and matching-native installer checks, so the commands
 above make the artifact inspection explicit without pretending to execute
 non-native artifacts or modify a user's Homebrew installation.
+
+After a release is genuinely published, run the public-consumer validation
+workflow (`published-release-smoke.yml`) or its local policy check,
+`./scripts/published-release-smoke-workflow-test.sh`. It validates the public
+GitHub release/tag, downloads the selected `install.sh`, and exercises the
+published Linux installer and Homebrew cask in isolated environments. For
+npm, validate each public record at the exact derived version with `npm view`
+and require `npm audit signatures --include-attestations` to report the
+matching provenance attestation. These are post-publication checks; a local
+snapshot or an HTTP 404 probe is not evidence that npm publication succeeded.
 
 ## Draft, tap, sign, verify, publish
 
@@ -163,23 +235,87 @@ After all gates pass, the workflow performs this exact sequence:
 
 4. The verified `checksums.txt.sigstore.json` is uploaded to the draft
    release.
-5. The draft is changed to published/latest. A failed signing, verification,
-   upload, or publish step leaves the release unpublished for investigation;
-   do not rerun by reusing the tag. Fix forward with a new version.
+5. The workflow derives npm version `X.Y.Z` from tag `vX.Y.Z`, stages the four
+   native packages from the same GoReleaser `dist/` archives, packs and audits
+   all five tarballs, and uploads those audited inputs to the npm publisher
+   job. This is reuse of the canonical GoReleaser output, not a second binary
+   build.
+6. The npm publisher checks out the exact tagged commit, downloads the audited
+   inputs, and publishes the native packages in the documented order, followed
+   by `harness-lint` last, with Trusted Publishing/OIDC. npm automatically
+   creates provenance for each public package; the publisher also requests
+   `--provenance` and verifies each exact registry record with
+   `npm audit signatures --include-attestations` before continuing.
+7. Only after all five npm versions, `latest` tags, integrity records, and
+   provenance attestations pass is the GitHub draft changed to
+   published/latest. A failed `npm-publish` job may be continued with
+   GitHub Actions **Re-run failed jobs** for the same unpublished tagged run,
+   using the already-uploaded audited tarballs; the resumable publisher must
+   verify matching immutable packages and continue native order/root-last
+   without rerunning GoReleaser. If npm completed and only the final GitHub
+   publication job failed, re-running that failed final job is permitted.
+   Failures in the canonical `release`/GoReleaser job, missing audited inputs,
+   or any registry integrity, metadata, or provenance mismatch are not safe to
+   retry and require fix-forward.
 
-Because GoReleaser updates the tap in step 1, a later signing or verification
-failure can leave a Homebrew cask commit that references the still-draft
-release while the GitHub Release remains unpublished. This partial outcome is
-detectable by inspecting the tap commit and draft release; it is not an
-all-or-nothing guarantee. Investigate and fix forward with a new version
-instead of reusing the tag.
+The sequence is not transactional. Because GoReleaser updates the tap in step
+1, a later failure can leave a Homebrew cask commit that references the
+still-draft GitHub Release. A native npm failure can leave earlier native
+`latest` tags updated, and a root npm success can leave all five packages live
+while the GitHub Release remains a draft. These partial outcomes are
+detectable by inspecting the tap commit, draft release, npm registry records,
+integrity, and provenance. Never delete, replace, or republish an accepted
+package/version, rerun the full release/GoReleaser job, or generally reuse a
+tag. A bounded failed-job continuation is safe only while this tagged run is
+still unpublished, the audited tarballs remain available, and every registry
+verification matches; once the release is public or continuation is unsafe,
+fix forward with a new coordinated version.
 
 The installer verifies the selected archive against its unique SHA-256 line
 in `checksums.txt`. When Cosign is installed, it also requires and verifies
 the bundle with the identity above; a missing bundle or failed verification
 prevents installation. Without Cosign, only the SHA-256 check is available.
 
-## First release: `v0.1.0`
+## One-time npm bootstrap before `v0.1.2`
+
+npm Trusted Publishing requires an existing package, so it cannot create the
+first registry record. Before creating or pushing `v0.1.2`, an authenticated
+human maintainer with npm 2FA must perform this one-time bootstrap:
+
+1. Build a canonical GoReleaser snapshot and stage all four native packages.
+   Give all five temporary manifests the same clearly non-release version,
+   such as `0.0.0-bootstrap.1`, and run the package content, pack, and hash
+   checks. Do not create or push `v0.1.2` yet.
+2. Publish the four native packages, then the root package, directly with npm
+   and 2FA using `--access public --tag bootstrap`. Do not use `latest`, and
+   do not describe this human bootstrap as a provenance-bearing stable
+   release.
+3. Verify all five package records and bootstrap versions, confirm that no
+   `latest` tag was created, and confirm that the native tarballs contain the
+   intended GoReleaser snapshot binaries.
+4. Configure and save one Trusted Publisher for each package with provider
+   `GitHub Actions`, organization/user `kespineira`, repository `harness-lint`,
+   and workflow filename exactly `release.yml`. Confirm package existence,
+   scope/name ownership, and publishability before creating and pushing the
+   annotated `v0.1.2` tag.
+
+The stable `v0.1.2` workflow then publishes all five packages through OIDC
+Trusted Publishing with npm automatic provenance. It does not use an
+`NPM_TOKEN` or any other long-lived npm token. An unauthenticated registry
+HTTP 404 only means that no public metadata was returned for that request; it
+does not prove a name is available, unclaimed, publishable by this account,
+or successfully published. No successful public npm registry publication is
+claimed here; record the actual bootstrap and stable results from the registry
+checks rather than inferring them.
+
+## Release history and first-release record
+
+`v0.1.0` and `v0.1.1` are existing Go releases and remain part of the
+release history. Preserve the annotated `v0.1.1` tag and its published
+artifacts; the npm workflow starts with the separate `v0.1.2` version. Never
+delete, move, recreate, or retrofit npm publication onto `v0.1.1`.
+
+### Historical first release: `v0.1.0`
 
 1. Merge the release-ready commit to `main`, confirm the CI workflow is green,
    and run the exact gates locally.
@@ -202,5 +338,6 @@ prevents installation. Without Cosign, only the SHA-256 check is available.
 5. Test one pinned archive install and, where available, one Cosign-verified
    install. Record the published release URL in the release notes.
 
-If any step fails, diagnose it and make a new commit/tag (for example,
-`v0.1.1`). Never delete, move, or recreate `v0.1.0`.
+For this historical release, a failed step was fixed in a new commit/tag (for
+example, `v0.1.1`); preserve both tags and their artifacts. Never delete,
+move, or recreate `v0.1.0` or `v0.1.1`.

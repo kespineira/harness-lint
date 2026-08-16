@@ -42,7 +42,35 @@ The current GoReleaser/Homebrew Cask output also cannot carry a Cask
 metadata. The project license is not absent: it is Apache-2.0, remains in
 the repository, and is included in release archives and Linux packages.
 
-### curl installer (macOS/Linux)
+### npm (global)
+
+The npm distribution starts with `v0.1.2` and provides the same CLI through
+one cross-platform launcher and a platform-specific native package. Node.js
+is required only when using npm or npx; Homebrew, `install.sh`, Go, and GitHub
+Release installs run the native binary directly and do not require Node.js.
+
+With Node.js 18 or newer installed, install the latest npm release globally:
+
+```sh
+npm install --global harness-lint@latest
+```
+
+The package installs the `harness-lint` command and resolves the matching
+macOS or Linux amd64/arm64 native package through npm's normal dependency
+resolution. It does not download a binary or run an install hook at runtime.
+
+### npx
+
+To run the latest npm release without a global install (Node.js 18 or newer):
+
+```sh
+npx --yes harness-lint@latest --help
+```
+
+Pin a version when reproducibility matters, for example
+`npx --yes harness-lint@0.1.2 --version`.
+
+### install.sh (macOS/Linux)
 
 The convenient latest-release form is:
 
