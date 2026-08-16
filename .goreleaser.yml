@@ -52,19 +52,8 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
-# Keyless Cosign v3 bundle signing is enabled in release environments that
-# provide an OIDC identity; local snapshots require --skip=sign when cosign is
-# not installed.
-signs:
-  - id: checksum
-    cmd: cosign
-    signature: "${artifact}.sigstore.json"
-    args:
-      - sign-blob
-      - "--bundle=${signature}"
-      - "${artifact}"
-      - --yes
-    artifacts: checksum
+# The release workflow keylessly signs dist/checksums.txt with Cosign v3 and
+# uploads checksums.txt.sigstore.json before publishing the draft release.
 
 nfpms:
   - id: linux-packages
