@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 
@@ -42,8 +44,34 @@ def fixture(root: Path) -> Path:
             "cpu": [arch],
         }
         write_package(package, manifest, {"bin/harness-lint": b"native\n"})
-    packages = [{"name": "harness-lint", "path": "harness-lint"}]
-    packages.extend({"name": name, "path": name} for name, _, _ in NATIVES)
+    packages = []
+    for name, _, _ in [("harness-lint", "", "")] + NATIVES:
+        package = staging / name
+        files = []
+        paths = (
+            ["package.json", "bin/harness-lint.js", "README.md", "LICENSE"]
+            if name == "harness-lint"
+            else ["LICENSE", "README.md", "bin/harness-lint", "package.json"]
+        )
+        for path in paths:
+            file = package / path
+            files.append(
+                {
+                    "path": path,
+                    "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                    "mode": format(stat.S_IMODE(file.stat().st_mode), "04o"),
+                }
+            )
+        item = {"name": name, "path": name, "files": files}
+        if name != "harness-lint":
+            binary = package / "bin/harness-lint"
+            item["source"] = {
+                "binary": {
+                    "path": str(binary),
+                    "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                }
+            }
+        packages.append(item)
     (staging / "staging-receipt.json").write_text(
         json.dumps(
             {
@@ -92,6 +120,9 @@ def test_pack_and_root_last(root: Path) -> None:
     expected_order = [name for name, _, _ in NATIVES] + ["harness-lint"]
     assert receipt["packOrder"] == expected_order
     assert [item["name"] for item in receipt["packages"]] == expected_order
+    assert receipt["stagingReceiptSha256"] == hashlib.sha256(
+        (staging / "staging-receipt.json").read_bytes()
+    ).hexdigest()
     assert len(list(output.glob("*.tgz"))) == 5
     assert before == {path: path.read_bytes() for path in staging.rglob("*") if path.is_file()}
     assert not (staging / "harness-lint" / "harness-lint-1.2.3.tgz").exists()
@@ -102,7 +133,21 @@ def test_dry_run_rejects_missing_and_extra_content(root: Path) -> None:
     staging = fixture(root / "missing")
     (staging / "harness-lint" / "LICENSE").unlink()
     result = run(staging, root / "missing-out")
-    assert result.returncode != 0 and "allowlist" in result.stderr
+    assert result.returncode != 0
+
+
+def test_receipt_detects_staged_mutations(root: Path) -> None:
+    staging = fixture(root / "native")
+    native = staging / NATIVES[0][0] / "bin/harness-lint"
+    native.write_bytes(b"mutated native\n")
+    result = run(staging, root / "native-out")
+    assert result.returncode != 0
+
+    staging = fixture(root / "other")
+    readme = staging / "harness-lint" / "README.md"
+    readme.write_text("mutated readme\n", encoding="utf-8")
+    result = run(staging, root / "other-out")
+    assert result.returncode != 0 and "staging receipt" in result.stderr
 
     staging = fixture(root / "extra")
     manifest_path = staging / "harness-lint" / "package.json"
@@ -111,7 +156,7 @@ def test_dry_run_rejects_missing_and_extra_content(root: Path) -> None:
     (staging / "harness-lint" / "extra.txt").write_text("unexpected")
     manifest_path.write_text(json.dumps(manifest))
     result = run(staging, root / "extra-out")
-    assert result.returncode != 0 and "allowlist" in result.stderr
+    assert result.returncode != 0 and "staging receipt" in result.stderr
 
 
 def test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root: Path) -> None:
@@ -143,7 +188,7 @@ def test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root: Path) 
     manifest["bin"] = {"harness-lint": "bin/harness-lint"}
     manifest_path.write_text(json.dumps(manifest))
     result = run(staging, root / "bin-out")
-    assert result.returncode != 0 and "bin field" in result.stderr
+    assert result.returncode != 0
 
     staging = fixture(root / "optional")
     manifest_path = staging / "harness-lint" / "package.json"
@@ -158,6 +203,7 @@ def main() -> int:
         root = Path(directory)
         test_pack_and_root_last(root / "success")
         test_dry_run_rejects_missing_and_extra_content(root / "contents")
+        test_receipt_detects_staged_mutations(root / "mutations")
         test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root / "contracts")
     print("pack npm packages tests passed")
     return 0

@@ -41,7 +41,7 @@ def fixture(root: Path) -> Path:
     dist.mkdir(parents=True)
     binary = b"""#!/bin/sh
 case "$1" in
-  version) printf 'harness-lint version=1.2.3 commit=test build_date=test\\n' ;;
+  version) printf 'harness-lint version=1.2.3 commit=test build-date=test\\n' ;;
   --help) printf 'Usage: harness-lint [command]\\n' ;;
   hooks) printf '{\"status\":\"ok\"}\\n' ;;
 esac
@@ -88,10 +88,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="harness-lint-npm-e2e-tests-") as directory:
         root = Path(directory)
         dist = fixture(root)
-        global_root = subprocess.run(
-            ["npm", "root", "-g"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        before = Path(global_root) / "harness-lint"
         result = subprocess.run(
             [str(SCRIPT), "--dist", str(dist)],
             cwd=ROOT,
@@ -102,7 +98,6 @@ def main() -> int:
         )
         assert result.returncode == 0, result.stderr
         assert "audited five packages" in result.stdout
-        assert not before.exists(), "E2E unexpectedly changed the global npm prefix"
     print("npm package E2E tests passed")
     return 0
 

@@ -21,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 from typing import Any
+import re
 
 
 class PackError(Exception):
@@ -49,6 +50,7 @@ LIFECYCLE_SCRIPTS = {
     "prepack",
     "postpack",
 }
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def fail(message: str) -> None:
@@ -123,6 +125,62 @@ def validate_receipt(staging: Path) -> dict[str, Any]:
         if not package.is_dir() or package.is_symlink():
             fail(f"staged package directory is missing: {package}")
         regular(package / "package.json", f"{name} manifest")
+        expected_paths = ROOT_FILES if name == "harness-lint" else NATIVE_FILES
+        files = item.get("files")
+        if not isinstance(files, list) or len(files) != len(expected_paths):
+            fail(f"staging receipt files for {name} do not describe the exact package files")
+        receipt_files: dict[str, dict[str, str]] = {}
+        for file in files:
+            if not isinstance(file, dict):
+                fail(f"staging receipt file entry for {name} is not an object")
+            file_path = file.get("path")
+            file_hash = file.get("sha256")
+            file_mode = file.get("mode")
+            if (
+                not isinstance(file_path, str)
+                or file_path not in expected_paths
+                or file_path in receipt_files
+                or not isinstance(file_hash, str)
+                or not SHA256_RE.fullmatch(file_hash)
+                or not isinstance(file_mode, str)
+                or not re.fullmatch(r"[0-7]{4}", file_mode)
+            ):
+                fail(f"staging receipt file entry for {name} is invalid")
+            path = package / file_path
+            regular(path, f"staged file {name}/{file_path}")
+            actual_hash = sha256(path)
+            actual_mode = format(stat.S_IMODE(path.stat().st_mode), "04o")
+            if file_hash != actual_hash:
+                fail(f"staged file hash differs from staging receipt: {name}/{file_path}")
+            if file_mode != actual_mode:
+                fail(f"staged file mode differs from staging receipt: {name}/{file_path}")
+            receipt_files[file_path] = {"sha256": file_hash, "mode": file_mode}
+        if set(receipt_files) != expected_paths:
+            fail(f"staging receipt files for {name} differ from the exact package allowlist")
+        actual_paths: set[str] = set()
+        for path in package.rglob("*"):
+            if path.is_symlink():
+                fail(f"staged package contains a symlink: {path}")
+            if path.is_file():
+                actual_paths.add(path.relative_to(package).as_posix())
+        if actual_paths != expected_paths:
+            fail(f"staged package {name} contents differ from staging receipt files")
+        if name != "harness-lint":
+            source = item.get("source")
+            if not isinstance(source, dict) or not isinstance(source.get("binary"), dict):
+                fail(f"staging receipt source binary is missing for {name}")
+            binary_receipt = receipt_files["bin/harness-lint"]["sha256"]
+            source_binary = source["binary"]
+            if source_binary.get("sha256") != binary_receipt:
+                fail(f"staging receipt canonical binary hash differs for {name}")
+            source_path = source_binary.get("path")
+            if not isinstance(source_path, str):
+                fail(f"staging receipt canonical binary path is missing for {name}")
+            source_file = Path(source_path)
+            regular(source_file, f"canonical binary for {name}")
+            if sha256(source_file) != binary_receipt:
+                fail(f"canonical binary differs from staging receipt for {name}")
+        item["fileReceipts"] = receipt_files
     # The receipt itself is the only non-package entry allowed in staging.
     allowed = {"staging-receipt.json", "harness-lint", "@kespineira"}
     actual = {path.name for path in staging.iterdir()}
@@ -171,17 +229,7 @@ def audit_manifest(name: str, package: Path, version: str) -> dict[str, Any]:
     return manifest
 
 
-def npm_json(command: list[str], package: Path) -> dict[str, Any]:
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "npm_config_audit": "false",
-            "npm_config_fund": "false",
-            "npm_config_ignore_scripts": "true",
-            "npm_config_offline": "true",
-            "npm_config_update_notifier": "false",
-        }
-    )
+def npm_json(command: list[str], package: Path, environment: dict[str, str]) -> dict[str, Any]:
     try:
         result = subprocess.run(
             command,
@@ -220,7 +268,7 @@ def dry_files(record: dict[str, Any], name: str) -> set[str]:
     return result
 
 
-def audit_tarball(path: Path, name: str, expected: set[str]) -> list[dict[str, Any]]:
+def audit_tarball(path: Path, name: str, expected: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
     regular(path, f"packed tarball for {name}")
     found: list[dict[str, Any]] = []
     names: set[str] = set()
@@ -254,11 +302,24 @@ def audit_tarball(path: Path, name: str, expected: set[str]) -> list[dict[str, A
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     fail(f"cannot read tarball {name} member {relative!r}")
-                found.append({"path": relative, "sha256": hashlib.sha256(extracted.read()).hexdigest()})
+                found.append(
+                    {
+                        "path": relative,
+                        "sha256": hashlib.sha256(extracted.read()).hexdigest(),
+                        "mode": format(member.mode & 0o7777, "04o"),
+                    }
+                )
     except (OSError, tarfile.TarError) as error:
         fail(f"cannot inspect npm tarball {path}: {error}")
-    if names != expected:
+    if names != set(expected):
         fail(f"tarball {name} contents differ from exact allowlist: {sorted(names)}")
+    found_by_path = {item["path"]: item for item in found}
+    for relative, expected_file in expected.items():
+        actual_file = found_by_path[relative]
+        if actual_file["sha256"] != expected_file["sha256"]:
+            fail(f"tarball {name} member hash differs from staging receipt: {relative}")
+        if actual_file["mode"] != expected_file["mode"]:
+            fail(f"tarball {name} member mode differs from staging receipt: {relative}")
     return sorted(found, key=lambda item: item["path"])
 
 
@@ -285,14 +346,46 @@ def pack(args: argparse.Namespace) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
+        npm_sandbox = temporary / "npm-sandbox"
+        npm_home = npm_sandbox / "home"
+        npm_cache = npm_sandbox / "cache"
+        npm_config = npm_sandbox / "npmrc"
+        npm_global_config = npm_sandbox / "global-npmrc"
+        npm_prefix = npm_sandbox / "prefix"
+        for directory in (npm_home, npm_cache, npm_prefix):
+            directory.mkdir(parents=True)
+        npm_config.write_text("", encoding="utf-8")
+        npm_global_config.write_text("", encoding="utf-8")
+        npm_environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.lower().startswith("npm_config_")
+        }
+        npm_environment.update(
+            {
+                "HOME": str(npm_home),
+                "XDG_CONFIG_HOME": str(npm_sandbox / "xdg-config"),
+                "XDG_DATA_HOME": str(npm_sandbox / "xdg-data"),
+                "NPM_CONFIG_CACHE": str(npm_cache),
+                "NPM_CONFIG_USERCONFIG": str(npm_config),
+                "NPM_CONFIG_GLOBALCONFIG": str(npm_global_config),
+                "NPM_CONFIG_PREFIX": str(npm_prefix),
+                "NPM_CONFIG_AUDIT": "false",
+                "NPM_CONFIG_FUND": "false",
+                "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+                "NPM_CONFIG_OFFLINE": "true",
+                "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            }
+        )
         audited: list[tuple[str, Path, set[str], dict[str, Any]]] = []
         for name in PACKAGE_ORDER:
             package = package_path(staging, name)
             manifest = audit_manifest(name, package, version)
             expected_files = ROOT_FILES if name == "harness-lint" else NATIVE_FILES
             dry = npm_json(
-                ["npm", "pack", "--dry-run", "--json", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
+                ["npm", "pack", "--dry-run", "--json", "--ignore-scripts", "--offline", "--no-audit", "--no-fund", "--no-update-notifier", "--cache", str(npm_cache), "--userconfig", str(npm_config), "--globalconfig", str(npm_global_config)],
                 package,
+                npm_environment,
             )
             dry_paths = dry_files(dry, name)
             if dry_paths != expected_files:
@@ -310,16 +403,25 @@ def pack(args: argparse.Namespace) -> Path:
                     "--offline",
                     "--no-audit",
                     "--no-fund",
+                    "--no-update-notifier",
+                    "--cache",
+                    str(npm_cache),
+                    "--userconfig",
+                    str(npm_config),
+                    "--globalconfig",
+                    str(npm_global_config),
                     "--pack-destination",
                     str(temporary),
                 ],
                 package,
+                npm_environment,
             )
             filename = actual.get("filename")
             if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".tgz"):
                 fail(f"npm pack returned an invalid tarball filename for {name}")
             tarball = temporary / filename
-            tar_files = audit_tarball(tarball, name, expected_files)
+            file_receipts = package_entries[name]["fileReceipts"]
+            tar_files = audit_tarball(tarball, name, file_receipts)
             if {item["path"] for item in tar_files} != dry_paths:
                 fail(f"actual tarball contents for {name} differ from npm dry-run contents")
             records.append(
@@ -341,6 +443,7 @@ def pack(args: argparse.Namespace) -> Path:
             "schemaVersion": 1,
             "version": version,
             "stagingReceipt": str(staging / "staging-receipt.json"),
+            "stagingReceiptSha256": sha256(staging / "staging-receipt.json"),
             "packOrder": PACKAGE_ORDER,
             "packages": records,
         }

@@ -99,17 +99,47 @@ native_path=$tarballs/$host_package
 prefix=$work_dir/prefix
 cache=$work_dir/cache
 user_config=$work_dir/npmrc
-mkdir -p "$prefix" "$cache"
+global_config=$work_dir/global-npmrc
+consumer_home=$work_dir/home
+xdg_config=$work_dir/xdg-config
+xdg_data=$work_dir/xdg-data
+sqlite_path=$work_dir/state/harness-lint.db
+global_sentinel=$work_dir/global-prefix
+mkdir -p "$prefix" "$cache" "$consumer_home" "$xdg_config" "$xdg_data" "$(dirname "$sqlite_path")" "$global_sentinel"
 printf '' > "$user_config"
+printf '' > "$global_config"
+printf 'sentinel\n' > "$global_sentinel/DO_NOT_TOUCH"
+global_before=$(find "$global_sentinel" -mindepth 1 -print | LC_ALL=C sort)
+global_guard_before=$(cksum "$global_sentinel/DO_NOT_TOUCH")
+export HOME="$consumer_home"
+export XDG_CONFIG_HOME="$xdg_config"
+export XDG_DATA_HOME="$xdg_data"
+export XDG_CACHE_HOME="$cache/xdg"
+export NPM_CONFIG_CACHE="$cache"
+export NPM_CONFIG_USERCONFIG="$user_config"
+export NPM_CONFIG_GLOBALCONFIG="$global_config"
+export NPM_CONFIG_PREFIX="$global_sentinel"
+export npm_config_cache="$cache"
+export npm_config_userconfig="$user_config"
+export npm_config_globalconfig="$global_config"
+export npm_config_prefix="$global_sentinel"
 npm install \
     --prefix "$prefix" \
     --cache "$cache" \
     --userconfig "$user_config" \
+    --globalconfig "$global_config" \
     --offline \
     --ignore-scripts \
     --no-audit \
     --no-fund \
+    --no-update-notifier \
+    --omit=optional \
     "$root_path" "$native_path" >/dev/null || fail "isolated offline npm install failed"
+
+global_after=$(find "$global_sentinel" -mindepth 1 -print | LC_ALL=C sort)
+global_guard_after=$(cksum "$global_sentinel/DO_NOT_TOUCH")
+[ "$global_before" = "$global_after" ] || fail "npm install modified the redirected global prefix"
+[ "$global_guard_before" = "$global_guard_after" ] || fail "npm install modified the global-prefix sentinel"
 
 node - "$prefix" "$version" <<'NODE'
 const fs = require('node:fs');
@@ -130,8 +160,21 @@ if (JSON.parse(fs.readFileSync(path.join(prefix, 'node_modules', 'harness-lint',
 NODE
 
 launcher=$prefix/node_modules/.bin/harness-lint
-"$launcher" version >/dev/null || fail "installed harness-lint version command failed"
+native_dir=$prefix/node_modules/@kespineira/harness-lint-$(node -p 'process.platform + "-" + (process.arch === "x64" ? "x64" : process.arch)')
+native_version=$("$native_dir/bin/harness-lint" version) || fail "installed native version command failed"
+launcher_version=$("$launcher" version) || fail "installed harness-lint version command failed"
+[ "$launcher_version" = "$native_version" ] || fail "launcher version output differs from native version output"
+case "$launcher_version" in
+    "harness-lint version=$version commit="*" build-date="*) ;;
+    *) fail "installed harness-lint version output is malformed: $launcher_version" ;;
+esac
 "$launcher" --help | grep -Fi 'usage:' >/dev/null || fail "installed harness-lint --help output is incomplete"
 "$launcher" hooks status >/dev/null || fail "installed harness-lint hooks status command failed"
-npm exec --prefix "$prefix" --userconfig "$user_config" --offline --ignore-scripts --no-audit --no-fund -- harness-lint version >/dev/null || fail "npm exec could not run the local harness-lint command"
+"$launcher" usage --db "$sqlite_path" >/dev/null || fail "installed harness-lint usage command failed"
+npm_exec_version=$(npm exec --prefix "$prefix" --cache "$cache" --userconfig "$user_config" --globalconfig "$global_config" --offline --ignore-scripts --no-audit --no-fund --no-update-notifier -- harness-lint version) || fail "npm exec could not run the local harness-lint command"
+[ "$npm_exec_version" = "$launcher_version" ] || fail "npm exec version output differs from launcher version output"
+global_final=$(find "$global_sentinel" -mindepth 1 -print | LC_ALL=C sort)
+global_guard_final=$(cksum "$global_sentinel/DO_NOT_TOUCH")
+[ "$global_before" = "$global_final" ] || fail "an installed command modified the redirected global prefix"
+[ "$global_guard_before" = "$global_guard_final" ] || fail "an installed command modified the global-prefix sentinel"
 echo "npm package E2E passed: audited five packages and executed $version on $(node -p 'process.platform + "/" + process.arch')"
