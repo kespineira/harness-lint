@@ -13,10 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.24.x'
           cache: true
@@ -50,3 +52,6 @@ jobs:
 
       - name: Run isolated CLI smoke
         run: ./scripts/isolated-smoke.sh "$RUNNER_TEMP/harness-lint"
+
+      - name: Run installer tests
+        run: ./scripts/install_test.sh

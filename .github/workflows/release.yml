@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release stable tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Homebrew tap credential
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo '::error::HOMEBREW_TAP_TOKEN is not configured'
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate stable annotated tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          tag=${GITHUB_REF_NAME:?missing tag name}
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::release tag must begin with v"; exit 1 ;;
+          esac
+          if ! printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::release tag must be a stable vX.Y.Z version"
+            exit 1
+          fi
+
+          if [ "$(git cat-file -t "$tag")" != tag ]; then
+            echo '::error::release tag must be an annotated tag'
+            exit 1
+          fi
+          tag_commit=$(git rev-parse "$tag^{}")
+          if [ "$(git rev-parse HEAD)" != "$tag_commit" ]; then
+            echo '::error::checked out commit does not match the release tag'
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo '::error::release tag commit is not reachable from origin/main'
+            exit 1
+          fi
+
+          release_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag")
+          case "$release_status" in
+            404) ;;
+            200) echo '::error::a GitHub Release already exists for this tag'; exit 1 ;;
+            *) echo "::error::unable to establish GitHub Release absence (HTTP $release_status)"; exit 1 ;;
+          esac
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+
+      - name: Check diff
+        run: git diff --check
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run tests
+        run: go test -count=1 ./...
+
+      - name: Run race tests
+        run: go test -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -trimpath -o "$RUNNER_TEMP/harness-lint" ./cmd/harness-lint
+
+      - name: Run installer tests
+        run: ./scripts/install_test.sh
+
+      - name: Run isolated CLI smoke
+        run: ./scripts/isolated-smoke.sh "$RUNNER_TEMP/harness-lint"
+
+      - name: Check GoReleaser configuration
+        run: goreleaser check
+
+      - name: Create draft release and publish Homebrew tap
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Sign checksums
+        run: |
+          cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt
+
+      - name: Verify checksum signature
+        run: |
+          cosign verify-blob dist/checksums.txt \
+            --bundle dist/checksums.txt.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$GITHUB_REF_NAME" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+
+      - name: Upload checksum signature bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/checksums.txt.sigstore.json --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish release draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
