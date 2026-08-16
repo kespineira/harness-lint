@@ -2,6 +2,10 @@
 
 Local context hygiene and usage analyzer for coding agent harnesses.
 
+[![CI](https://github.com/kespineira/harness-lint/actions/workflows/ci.yml/badge.svg)](https://github.com/kespineira/harness-lint/actions/workflows/ci.yml)
+[![Release](https://github.com/kespineira/harness-lint/actions/workflows/release.yml/badge.svg)](https://github.com/kespineira/harness-lint/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/kespineira/harness-lint?sort=semver)](https://github.com/kespineira/harness-lint/releases/latest)
+
 `harness-lint` inventories the local capabilities that a coding-agent
 harness can see, records metadata-only usage observations, and produces
 deterministic reports about exposure, activity, stale definitions, and
@@ -17,32 +21,111 @@ a daemon, run a server, send data to a cloud service, or perform destructive
 actions. A scan writes only its own local SQLite state, while hook install and
 uninstall make narrowly scoped, safe configuration edits described below.
 
-## Install and build
+## Install
 
-Requirements:
+Supported release targets are macOS and Linux on amd64 and arm64. The
+commands below install the latest release unless a version is pinned.
 
-- Go 1.24 or newer (the module declares `go 1.24.0`).
-- A filesystem on which the local user can read the configured harness
-  sources and create the local state directory.
-- No external SQLite service: the build uses the embedded Go SQLite driver.
-
-Build from a checkout:
+### Homebrew cask (macOS)
 
 ```sh
-go build ./cmd/harness-lint
-./harness-lint --help
+brew install --cask kespineira/tap/harness-lint
 ```
 
-The resulting `harness-lint` binary is created in the repository root by
-that exact build command. To place it on `PATH`, copy it to a user-owned bin
-directory, for example:
+The cask currently has no Apple signing or notarization. Its post-install
+hook removes the `com.apple.quarantine` attribute from the staged binary so
+that it can run conveniently; that is not a signature and reduces one
+Gatekeeper protection. If your policy requires quarantine or notarized
+software, use a reviewed release archive and keep the attribute instead.
+
+The current GoReleaser/Homebrew Cask output also cannot carry a Cask
+`license` stanza in this setup, so the generated cask may omit that packaging
+metadata. The project license is not absent: it is Apache-2.0, remains in
+the repository, and is included in release archives and Linux packages.
+
+### curl installer (macOS/Linux)
+
+The convenient latest-release form is:
 
 ```sh
-install -m 0755 ./harness-lint "$HOME/.local/bin/harness-lint"
+curl -fsSL https://raw.githubusercontent.com/kespineira/harness-lint/main/scripts/install.sh | sh
 ```
 
-`go run ./cmd/harness-lint --help` is also sufficient for trying the CLI
-without installing a binary.
+Download the installer, review it, and run it as your user:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kespineira/harness-lint/main/scripts/install.sh \
+  -o /tmp/harness-lint-install.sh
+less /tmp/harness-lint-install.sh
+sh /tmp/harness-lint-install.sh
+```
+
+The installer selects the latest GitHub release, verifies the selected
+archive against its unique SHA-256 entry in `checksums.txt`, and installs to
+`$HOME/.local/bin` by default. Pin a release and choose a custom directory
+with environment variables:
+
+```sh
+HARNESS_LINT_VERSION=v0.1.0 \
+HARNESS_LINT_INSTALL_DIR="$HOME/.local/bin" \
+  sh /tmp/harness-lint-install.sh
+```
+
+If `cosign` is installed, the installer also downloads the current Cosign v3
+bundle (`checksums.txt.sigstore.json`) and verifies it. In that mode, a
+missing bundle or failed verification stops installation (fail closed). If
+Cosign is not installed, the installer still requires the SHA-256 check but
+warns that checksum authenticity was not verified. The exact identity and
+issuer are documented in [Release and publishing](docs/releasing.md).
+
+### `go install`
+
+For a source build managed by Go, install the latest module version with:
+
+```sh
+go install github.com/kespineira/harness-lint/cmd/harness-lint@latest
+```
+
+For a reproducible install, pin the module version explicitly:
+
+```sh
+go install github.com/kespineira/harness-lint/cmd/harness-lint@v0.1.0
+```
+
+This requires Go 1.24 or newer and puts the binary in Go's usual bin
+directory. `go install` is not the signed GitHub release archive path; use
+the curl installer or a release artifact when you need the release checksum
+and Cosign verification flow.
+
+### GitHub releases and Linux packages
+
+Download archives and `checksums.txt` from the
+[latest GitHub release](https://github.com/kespineira/harness-lint/releases/latest).
+Archives are available for macOS/Linux amd64/arm64. Linux releases also
+include `.deb`, `.rpm`, and `.apk` packages; package managers, upgrade
+policies, and service integration are intentionally not configured by this
+project. Packages install the executable as `/usr/bin/harness-lint` and do
+not install or enable a daemon.
+
+## First run
+
+Hook management is opt-in. Install and test hooks only for the runtime you
+use, then scan and read the local report:
+
+```sh
+harness-lint hooks install claude   # or: codex
+harness-lint hooks test claude
+harness-lint scan --project "$PWD"
+harness-lint report
+```
+
+`hooks install` makes a narrowly scoped edit to the selected runtime's local
+configuration. `scan`, `report`, and hook tests read local files and write
+only the local SQLite database or terminal output. The CLI is metadata-only:
+it does not retain prompts, responses, tool arguments, tool results, MCP
+payloads, or source text, and it does not send telemetry or contact a remote
+service. The curl installer necessarily contacts GitHub to obtain the
+requested release, checksums, and (when applicable) signature bundle.
 
 ## First scan
 
@@ -602,9 +685,8 @@ Codex hooks/files/transcripts ───────┘                         �
   retention deletion.
 
 The project is macOS-first and Linux-compatible. It uses Go filesystem paths,
-the host `os.UserConfigDir`, and local runtime conventions; other operating
-systems may require path/layout validation. The current MVP intentionally
-supports only Claude Code and Codex adapters.
+the host `os.UserConfigDir`, and local runtime conventions. The current MVP
+intentionally supports only Claude Code and Codex adapters.
 
 ## Known limitations
 
