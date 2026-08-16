@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/goreleaser/goreleaser/v2.17.1/www/docs/static/schema.json
+
+version: 2
+
+project_name: harness-lint
+
+builds:
+  - id: harness-lint
+    main: ./cmd/harness-lint
+    binary: harness-lint
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/kespineira/harness-lint/internal/version.Version={{ .Version }}
+        -X github.com/kespineira/harness-lint/internal/version.Commit={{ .Commit }}
+        -X github.com/kespineira/harness-lint/internal/version.BuildDate={{ .Date }}
+
+archives:
+  - id: default
+    ids:
+      - harness-lint
+    formats:
+      - tar.gz
+    name_template: "harness-lint_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    builds_info:
+      owner: root
+      group: root
+      mode: 0755
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# Keyless Cosign v3 bundle signing is enabled in release environments that
+# provide an OIDC identity; local snapshots require --skip=sign when cosign is
+# not installed.
+signs:
+  - id: checksum
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+
+nfpms:
+  - id: linux-packages
+    ids:
+      - harness-lint
+    package_name: harness-lint
+    vendor: Kespineira
+    homepage: https://github.com/kespineira/harness-lint
+    maintainer: "Kevin Espiñeira <kevin.espineira@gmail.com>"
+    description: Local context hygiene and usage analyzer for coding agent harnesses.
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/harness-lint/LICENSE
+        file_info:
+          mode: 0644
+          mtime: "{{ .CommitDate }}"
+
+homebrew_casks:
+  - name: harness-lint
+    ids:
+      - default
+    repository:
+      owner: kespineira
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    description: Local context hygiene and usage analyzer for coding agent harnesses.
+    homepage: https://github.com/kespineira/harness-lint
+    license: Apache-2.0
+    binaries:
+      - harness-lint
+    # Limitation: Apple signing/notarization credentials are not available.
+    # This documented staged-binary hook only clears quarantine; it is not
+    # native code signing or notarization.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/harness-lint"]
+          end
+
+changelog:
+  use: git
+  sort: asc
+  abbrev: -1
+  groups:
+    - title: Features
+      regexp: '^.*?feat(?:\([[:word:]]+\))?!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?(?:fix|bug)(?:\([[:word:]]+\))?!?:.+$'
+      order: 1
+    - title: Documentation
+      regexp: '^.*?docs?(?:\([[:word:]]+\))?!?:.+$'
+      order: 2
+    - title: Maintenance
+      regexp: '^.*?(?:build|chore|ci|perf|refactor|test)(?:\([[:word:]]+\))?!?:.+$'
+      order: 3
+    - title: Other changes
+      order: 999
+
+  # v0.1.0 is the first public release; later versions keep the same
+  # deterministic changelog structure without repeating this header.
+  # The body is intentionally conditional so snapshots and future releases
+  # do not claim to be the first public release.
+  # (The release header is configured below because GoReleaser keeps it
+  # separate from changelog groups.)
+
+release:
+  github:
+    owner: kespineira
+    name: harness-lint
+  draft: true
+  replace_existing_draft: false
+  use_existing_draft: false
+  replace_existing_artifacts: false
+  mode: keep-existing
+  header: |
+    {{- if eq .Version "0.1.0" }}
+    ## First public release
+
+    This is the first public release of harness-lint.
+    {{- end }}
