@@ -26,6 +26,9 @@ jobs:
       - name: Check diff
         run: git diff --check
 
+      - name: Run release workflow policy test
+        run: ./scripts/release-workflow-test.sh
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 

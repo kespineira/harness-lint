@@ -210,6 +210,9 @@ jobs:
       - name: Check diff
         run: git diff --check
 
+      - name: Run stable release quality gate
+        run: ./scripts/release-workflow-test.sh
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 

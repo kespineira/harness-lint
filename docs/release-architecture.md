@@ -39,6 +39,26 @@ Release builds set these linker values:
 GoReleaser retains `CGO_ENABLED=0`; the embedded pure-Go SQLite driver needs
 no C toolchain. The release archive includes `LICENSE` and `README.md`.
 
+## Tag validation levels
+
+Before the stable release job can publish, three tag-triggered E2E jobs build
+and inspect a GoReleaser snapshot:
+
+- The Linux job executes the artifact matching its Linux runner and inspects
+  non-native archives for structure and architecture only. It also checks
+  Linux package metadata and payloads.
+- The macOS job executes the artifact matching its macOS runner and inspects
+  non-native archives for structure and architecture only.
+- The Homebrew job checks generated cask Ruby plus Homebrew style, audit, and
+  load in an isolated hosted-runner tap. Cleanup removes that temporary tap;
+  no local user's Homebrew installation is changed and no tap commit is
+  pushed.
+
+The E2E jobs have `contents: read` only. The stable release job's tap-token
+preflight occurs before its checkout and publication steps; this ordering does
+not imply that the E2E jobs skip checkout, since they need the source to build
+their validation snapshots.
+
 ## Checksum authenticity
 
 The release workflow signs `dist/checksums.txt` with Cosign v3.1.3 and

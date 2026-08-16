@@ -18,6 +18,12 @@ fail() {
 [ -r "$ci_workflow" ] || fail 'CI workflow is missing'
 [ -r "$goreleaser_config" ] || fail 'GoReleaser configuration is missing'
 
+# Keep this policy test itself as an explicit gate in both normal CI and the
+# stable release job. This prevents a future workflow edit from silently
+# dropping the deterministic checks while leaving the script unused.
+grep -Fq 'run: ./scripts/release-workflow-test.sh' "$ci_workflow" ||
+    fail 'normal CI has no release workflow policy gate'
+
 # Release publication is tag-only and must not be manually dispatched.
 grep -Eq '^  push:$' "$release_workflow" || fail 'release workflow is not push-triggered'
 grep -Eq '^    tags:$' "$release_workflow" || fail 'release workflow has no tag filter'
@@ -60,6 +66,10 @@ if printf '%s\n' "$homebrew_block" | grep -Fq -- '--online'; then
     fail 'Homebrew E2E performs network-dependent audit against snapshot URLs'
 fi
 release_block=$(job_block release)
+printf '%s\n' "$release_block" | grep -Fq 'name: Run stable release quality gate' ||
+    fail 'stable release job has no named quality gate'
+printf '%s\n' "$release_block" | grep -Fq 'run: ./scripts/release-workflow-test.sh' ||
+    fail 'stable release job does not run the release workflow policy gate'
 printf '%s\n' "$release_block" | grep -Eq '^    permissions:$' ||
     fail 'release job does not declare publish permissions'
 printf '%s\n' "$release_block" | grep -Eq '^      contents: write$' ||

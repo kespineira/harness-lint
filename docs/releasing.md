@@ -32,13 +32,38 @@ identifies Apache-2.0. This is a limitation of generated Homebrew packaging
 metadata, not a missing project license: `LICENSE` remains canonical and is
 included in release archives and Linux packages.
 
+## Tag validation jobs
+
+The tag-triggered workflow runs three artifact-validation jobs before the
+stable release job can publish anything:
+
+- `release-e2e-linux` builds a snapshot on Linux, executes the matching Linux
+  artifact on that runner, and inspects every other archive's structure and
+  architecture without executing a non-native binary. It also validates Linux
+  package metadata and payloads where the runner has the relevant package
+  inspection tools.
+- `release-e2e-macos` performs the equivalent native execution and
+  non-native archive inspection on macOS.
+- `release-homebrew-e2e` generates the cask on macOS, then runs Homebrew
+  style, audit, and load checks in a temporary hosted-runner tap. The tap is
+  removed on exit and is never pushed or applied to a local user's Homebrew
+  installation.
+
+These are validation levels, not claims that every cross-platform binary was
+executed: only the artifact matching the current runner's OS and architecture
+is run. The stable release job depends on all three jobs, then performs its
+own source and policy quality gates before the first publication step.
+
 ## Exact pre-publication gates
 
 The workflow intentionally fails before publishing when any gate fails:
 
-1. `HOMEBREW_TAP_TOKEN` must be non-empty. This is checked before checkout;
-   a missing secret stops the job with an error and creates no release or
-   Homebrew commit.
+1. In the stable `release` job, `HOMEBREW_TAP_TOKEN` must be non-empty. The
+   token preflight runs before that job checks out the source or reaches any
+   publication step; a missing secret stops the job with an error and creates
+   no release or Homebrew commit. The three E2E jobs intentionally check out
+   first with only `contents: read`, and never receive the tap token, because
+   they must build and inspect artifacts.
 2. The pushed ref must match `vX.Y.Z`, where each component is a non-negative
    decimal integer without leading zeroes (except zero itself).
 3. The ref must name an annotated tag (`git cat-file -t` must be `tag`), its
@@ -47,7 +72,8 @@ The workflow intentionally fails before publishing when any gate fails:
 4. The GitHub API must establish that no Release already exists for the tag:
    HTTP 404 passes; HTTP 200 or any other response fails closed.
 5. The job installs Go 1.24.x, Cosign v3.1.3, and GoReleaser v2.17.1.
-6. Source checks must pass: `git diff --check`, `gofmt -l .` must be empty,
+6. Source and release-policy checks must pass: `git diff --check`,
+   `./scripts/release-workflow-test.sh`, `gofmt -l .` must be empty,
    `go test -count=1 ./...`, `go test -race -count=1 ./...`, `go vet ./...`,
    and `go build -trimpath -o <temporary-path> ./cmd/harness-lint`.
 7. `./scripts/install_test.sh` and
@@ -56,6 +82,42 @@ The workflow intentionally fails before publishing when any gate fails:
 
 These gates run on the tag commit, not on an untagged local checkout. Run the
 same commands locally before tagging so a failed workflow is exceptional.
+
+## Exact local pre-tag commands
+
+From a clean checkout of the release commit, run these commands in order. The
+workflow policy test is deliberately cheap and deterministic: it parses only
+the checked-in workflow and GoReleaser policy text and does not invoke
+Homebrew or a network-facing command.
+
+```sh
+git status --short
+git diff --check
+test -z "$(gofmt -l .)"
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+release_binary="$(mktemp "${TMPDIR:-/tmp}/harness-lint.XXXXXX")"
+go build -trimpath -o "$release_binary" ./cmd/harness-lint
+./scripts/install_test.sh
+./scripts/release-workflow-test.sh
+./scripts/isolated-smoke.sh "$release_binary"
+goreleaser check
+goreleaser release --snapshot --clean
+./scripts/release-e2e.sh
+find dist -maxdepth 1 -type f -print | sort
+tar -tzf dist/harness-lint_*_darwin_*.tar.gz
+tar -tzf dist/harness-lint_*_linux_*.tar.gz
+```
+
+The final inspection should confirm the four archives, six Linux packages,
+`checksums.txt`, and the generated cask. Inspect Linux package metadata and
+payloads with `dpkg-deb --info/--contents`, `rpm -qp/--qf`, and
+`apk manifest`/payload listing when those tools are available; inspect the
+cask with `ruby -c`. `./scripts/release-e2e.sh` performs the deterministic checksum,
+archive, package, cask, and matching-native installer checks, so the commands
+above make the artifact inspection explicit without pretending to execute
+non-native artifacts or modify a user's Homebrew installation.
 
 ## Draft, tap, sign, verify, publish
 
