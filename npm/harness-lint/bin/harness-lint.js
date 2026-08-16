@@ -39,46 +39,35 @@ function packageRoot(packageName, fromDirectory) {
     });
     return path.dirname(manifest);
   } catch {
-    // A package may restrict package.json through its exports map. Resolve its
-    // main entry in that case, then walk back to its package root.
-    let entry;
-    try {
-      entry = require.resolve(packageName, { paths: [fromDirectory] });
-    } catch {
-      throw new LauncherError(
-        `optional dependency ${packageName} is not installed. ` +
-          'Reinstall harness-lint on a supported platform.',
-        'MISSING_DEPENDENCY',
-      );
-    }
-
-    let directory = path.dirname(entry);
-    while (true) {
-      if (fs.existsSync(path.join(directory, 'package.json'))) {
-        return directory;
-      }
-      const parent = path.dirname(directory);
-      if (parent === directory) break;
-      directory = parent;
-    }
-
     throw new LauncherError(
-      `optional dependency ${packageName} is not installed. ` +
-        'Reinstall harness-lint on a supported platform.',
+      `optional dependency ${packageName} is not installed.`,
       'MISSING_DEPENDENCY',
     );
   }
 }
 
-function resolveNativeBinary(packageName, fromDirectory = __dirname) {
+function installHint(platform, arch) {
+  return (
+    `Reinstall without disabling optional dependencies using npm install -g harness-lint ` +
+    `(target ${platform}/${arch}), or download a release from ` +
+    'https://github.com/kespineira/harness-lint/releases/latest.'
+  );
+}
+
+function resolveNativeBinary(
+  packageName,
+  fromDirectory = __dirname,
+  platform = process.platform,
+  arch = process.arch,
+) {
   let root;
   try {
     root = packageRoot(packageName, fromDirectory);
   } catch (error) {
-    if (error instanceof LauncherError) throw error;
+    if (error instanceof LauncherError && error.code !== 'MISSING_DEPENDENCY') throw error;
     throw new LauncherError(
-      `optional dependency ${packageName} is not installed. ` +
-        'Reinstall harness-lint on a supported platform.',
+      `optional dependency ${packageName} is not installed for ${platform}/${arch}. ` +
+        installHint(platform, arch),
       'MISSING_DEPENDENCY',
     );
   }
@@ -90,8 +79,8 @@ function resolveNativeBinary(packageName, fromDirectory = __dirname) {
     fs.accessSync(binary, fs.constants.X_OK);
   } catch {
     throw new LauncherError(
-      `executable ${path.join(packageName, 'bin', 'harness-lint')} is missing or not executable. ` +
-        `Reinstall ${packageName}.`,
+      `executable ${path.join(packageName, 'bin', 'harness-lint')} is missing or not executable for ` +
+        `${platform}/${arch}. ${installHint(platform, arch)}`,
       'MISSING_BINARY',
     );
   }
@@ -111,7 +100,7 @@ function run(argv, options = {}) {
   let binary;
   try {
     const packageName = packageFor(platform, arch);
-    binary = resolveNativeBinary(packageName, fromDirectory);
+    binary = resolveNativeBinary(packageName, fromDirectory, platform, arch);
   } catch (error) {
     writeError(error.message, stderr);
     return Promise.resolve(1);
@@ -135,8 +124,8 @@ function run(argv, options = {}) {
       removeSignalHandlers();
       if (error.code === 'ENOENT') {
         writeError(
-          `executable ${path.basename(path.dirname(binary))}/harness-lint could not be started. ` +
-            'Reinstall the selected native package.',
+          `executable ${path.basename(path.dirname(binary))}/harness-lint could not be started for ` +
+            `${platform}/${arch}. ${installHint(platform, arch)}`,
           stderr,
         );
       } else {

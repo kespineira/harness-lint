@@ -47,23 +47,72 @@ test('reports missing optional dependency and missing executable', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'harness-lint-launcher-test-'));
   try {
     assert.throws(
-      () => launcher.resolveNativeBinary('@kespineira/missing-native', root),
-      (error) => error.code === 'MISSING_DEPENDENCY' && error.message.includes('Reinstall harness-lint'),
+      () => launcher.resolveNativeBinary('@kespineira/missing-native', root, 'linux', 'x64'),
+      (error) =>
+        error.code === 'MISSING_DEPENDENCY' &&
+        error.message.includes('optional dependency @kespineira/missing-native is not installed for linux/x64') &&
+        error.message.includes('npm install -g harness-lint') &&
+        error.message.includes('https://github.com/kespineira/harness-lint/releases/latest'),
     );
 
     const packageRoot = path.join(root, 'node_modules', '@kespineira', 'harness-lint-linux-x64');
     mkdirSync(packageRoot, { recursive: true });
     writeFileSync(path.join(packageRoot, 'package.json'), '{"name":"@kespineira/harness-lint-linux-x64"}\n');
     assert.throws(
-      () => launcher.resolveNativeBinary('@kespineira/harness-lint-linux-x64', root),
-      (error) => error.code === 'MISSING_BINARY' && error.message.includes('Reinstall @kespineira/harness-lint-linux-x64'),
+      () => launcher.resolveNativeBinary('@kespineira/harness-lint-linux-x64', root, 'linux', 'x64'),
+      (error) =>
+        error.code === 'MISSING_BINARY' &&
+        error.message.includes('@kespineira/harness-lint-linux-x64/bin/harness-lint') &&
+        error.message.includes('linux/x64') &&
+        error.message.includes('npm install -g harness-lint') &&
+        error.message.includes('https://github.com/kespineira/harness-lint/releases/latest'),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-function makeFixture() {
+test('prints actionable missing dependency diagnostics at the CLI', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'harness-lint-launcher-missing-dependency-'));
+  const launcherBin = path.join(root, 'bin');
+  mkdirSync(launcherBin, { recursive: true });
+  const executable = path.join(launcherBin, 'harness-lint.js');
+  copyFileSync(launcherPath, executable);
+  const packageName = launcher.packageFor(process.platform, process.arch);
+  const target = `${process.platform}/${process.arch}`;
+  try {
+    const result = await runFixture({ root, launcher: executable }, []);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, '');
+    assert.ok(result.stderr.includes(`optional dependency ${packageName} is not installed for ${target}`));
+    assert.ok(result.stderr.includes('npm install -g harness-lint'));
+    assert.ok(result.stderr.includes('https://github.com/kespineira/harness-lint/releases/latest'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('prints actionable missing executable diagnostics at the CLI', async () => {
+  const fixture = makeFixture({ withExecutable: false });
+  const packageName = launcher.packageFor(process.platform, process.arch);
+  const target = `${process.platform}/${process.arch}`;
+  try {
+    const result = await runFixture(fixture, []);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, '');
+    assert.ok(
+      result.stderr.includes(
+        `executable ${packageName}/bin/harness-lint is missing or not executable for ${target}`,
+      ),
+    );
+    assert.ok(result.stderr.includes('npm install -g harness-lint'));
+    assert.ok(result.stderr.includes('https://github.com/kespineira/harness-lint/releases/latest'));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+function makeFixture({ withExecutable = true } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'harness-lint-launcher-integration-'));
   const launcherBin = path.join(root, 'bin');
   const packageName = launcher.packageFor(process.platform, process.arch);
@@ -72,10 +121,11 @@ function makeFixture() {
   mkdirSync(path.join(nativeRoot, 'bin'), { recursive: true });
   copyFileSync(launcherPath, path.join(launcherBin, 'harness-lint.js'));
   writeFileSync(path.join(nativeRoot, 'package.json'), `{"name":"${packageName}"}\n`);
-  const native = path.join(nativeRoot, 'bin', 'harness-lint');
-  writeFileSync(
-    native,
-    `#!/usr/bin/env node
+  if (withExecutable) {
+    const native = path.join(nativeRoot, 'bin', 'harness-lint');
+    writeFileSync(
+      native,
+      `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 process.stdout.write('stdout:' + args.join('|') + '\\n');
@@ -84,8 +134,9 @@ if (args[0] === '--stdin') process.stdout.write('input:' + fs.readFileSync(0, 'u
 if (args[0] === '--exit') process.exit(Number(args[1]));
 if (args[0] === '--signal') setTimeout(() => process.kill(process.pid, 'SIGTERM'), 30);
 `,
-  );
-  chmodSync(native, 0o755);
+    );
+    chmodSync(native, 0o755);
+  }
   return { root, launcher: path.join(launcherBin, 'harness-lint.js') };
 }
 
