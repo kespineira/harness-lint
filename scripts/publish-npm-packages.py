@@ -183,10 +183,7 @@ def verify_audit_signatures(name: str, version: str, registry: str) -> None:
         missing = report.get("missing")
         if not isinstance(invalid, list) or not isinstance(missing, list):
             fail(f"npm audit signatures omitted invalid/missing results for {name}")
-        if any(
-            isinstance(item, dict) and item.get("name") == name and item.get("version") == version
-            for item in [*invalid, *missing]
-        ):
+        if invalid or missing:
             fail(f"npm audit signatures reported an invalid or missing record for {name}@{version}")
         verified = report.get("verified")
         match = next(

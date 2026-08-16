@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -11,6 +12,8 @@ import os
 import subprocess
 import tarfile
 import tempfile
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,22 +37,27 @@ def test_security_helpers() -> None:
         else:
             raise AssertionError(f"accepted invalid stable tag {bad}")
     with tempfile.TemporaryDirectory(prefix="harness-lint-publish-env-") as directory:
-        old_token = os.environ.get("NPM_TOKEN")
-        old_oidc = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
-        os.environ["NPM_TOKEN"] = "must-not-leak"
-        os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] = "https://actions.example/oidc"
+        injected = {
+            "NPM_TOKEN": "must-not-leak",
+            "node_auth_token": "must-not-leak",
+            "nPm_CoNfIg_UserConfig": "must-not-leak",
+            "NPM_CONFIG_CACHE": "must-not-leak",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://actions.example/oidc",
+        }
+        old_values = {key: os.environ.get(key) for key in injected}
+        os.environ.update(injected)
         try:
             environment = module.clean_npm_environment(Path(directory))
         finally:
-            if old_token is None:
-                os.environ.pop("NPM_TOKEN", None)
-            else:
-                os.environ["NPM_TOKEN"] = old_token
-            if old_oidc is None:
-                os.environ.pop("ACTIONS_ID_TOKEN_REQUEST_URL", None)
-            else:
-                os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] = old_oidc
+            for key, old_value in old_values.items():
+                if old_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old_value
         assert "NPM_TOKEN" not in environment
+        assert "node_auth_token" not in environment
+        assert "nPm_CoNfIg_UserConfig" not in environment
+        assert "NPM_CONFIG_CACHE" not in environment or environment["NPM_CONFIG_CACHE"].endswith("cache")
         assert environment["ACTIONS_ID_TOKEN_REQUEST_URL"] == "https://actions.example/oidc"
         assert environment["NPM_CONFIG_USERCONFIG"].endswith("npmrc")
 
@@ -97,9 +105,181 @@ def test_tarball_manifest_and_receipt_filename() -> None:
         assert result.returncode != 0 and "filename is not exact" in result.stderr
 
 
+def write_tarball(root: Path, name: str, version: str = "1.2.3") -> tuple[Path, dict]:
+    native = name != "harness-lint"
+    manifest = {
+        "name": name,
+        "version": version,
+        "repository": {"type": "git", "url": "git+https://github.com/kespineira/harness-lint.git"},
+    }
+    if native:
+        expected = next(item for item in module.NATIVE_ORDER if item[0] == name)
+        manifest.update({"os": [expected[1]], "cpu": [expected[2]]})
+    else:
+        manifest["optionalDependencies"] = {item[0]: version for item in module.NATIVE_ORDER}
+    filename = f"{name.replace('@', '').replace('/', '-')}-{version}.tgz"
+    path = root / filename
+    files = {"package/package.json": json.dumps(manifest).encode(), "package/README.md": b"readme\n", "package/LICENSE": b"license\n"}
+    files["package/bin/harness-lint" if native else "package/bin/harness-lint.js"] = b"#!/bin/sh\n"
+    with tarfile.open(path, "w:gz") as archive:
+        for member_name, payload in files.items():
+            info = tarfile.TarInfo(member_name)
+            info.size = len(payload)
+            info.mode = 0o755 if "/bin/" in member_name else 0o644
+            archive.addfile(info, io.BytesIO(payload))
+    return path, manifest
+
+
+def package_fixture(root: Path) -> tuple[dict, dict[str, dict]]:
+    records = []
+    manifests = {}
+    for name in module.PACKAGE_ORDER:
+        path, manifest = write_tarball(root, name)
+        manifests[name] = manifest
+        records.append(
+            {
+                "name": name,
+                "filename": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "integrity": module.sha512_integrity(path),
+            }
+        )
+    receipt = {"schemaVersion": 1, "version": "1.2.3", "releaseVersion": "1.2.3", "stable": True, "packages": records}
+    (root / "package-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    return receipt, manifests
+
+
+def packument(name: str, record: dict, manifest: dict) -> dict:
+    metadata = {
+        "name": name,
+        "dist-tags": {"latest": "1.2.3"},
+        "versions": {
+            "1.2.3": {
+                **manifest,
+                "dist": {"integrity": record["integrity"]},
+            }
+        },
+    }
+    return metadata
+
+
+def publish_args(root: Path) -> SimpleNamespace:
+    return SimpleNamespace(packages=str(root), tag="v1.2.3", version=None, registry="https://registry.npmjs.org")
+
+
+def test_native_order_resume_and_root_gate() -> None:
+    with tempfile.TemporaryDirectory(prefix="harness-lint-publish-order-") as directory:
+        root = Path(directory)
+        receipt, manifests = package_fixture(root)
+        records = {item["name"]: item for item in receipt["packages"]}
+        state = {
+            module.NATIVE_ORDER[0][0]: packument(module.NATIVE_ORDER[0][0], records[module.NATIVE_ORDER[0][0]], manifests[module.NATIVE_ORDER[0][0]])
+        }
+        events: list[tuple[str, str]] = []
+
+        def fake_fetch(_registry: str, name: str):
+            return state.get(name)
+
+        def fake_audit(name: str, _version: str, _registry: str):
+            events.append(("verify", name))
+
+        def fake_run(command, **_kwargs):
+            if command[1] == "publish":
+                tarball = Path(command[2])
+                name = next(item for item in module.PACKAGE_ORDER if item.replace("@", "").replace("/", "-") in tarball.name)
+                state[name] = packument(name, records[name], manifests[name])
+                events.append(("publish", name))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(module, "fetch_packument", fake_fetch), mock.patch.object(module, "verify_audit_signatures", fake_audit), mock.patch.object(module.subprocess, "run", fake_run):
+            module.publish(publish_args(root))
+        assert [name for action, name in events if action == "publish"] == module.PACKAGE_ORDER[1:]
+        root_publish = events.index(("publish", "harness-lint"))
+        assert all(events.index(("verify", name)) < root_publish for name, _, _ in module.NATIVE_ORDER)
+        assert events[0] == ("verify", module.NATIVE_ORDER[0][0])
+
+
+def test_existing_mismatch_fails_closed_and_receipts_are_bound() -> None:
+    for field, expected_message in (("sha256", "SHA-256"), ("integrity", "integrity")):
+        with tempfile.TemporaryDirectory(prefix="harness-lint-publish-receipt-") as directory:
+            root = Path(directory)
+            receipt, _ = package_fixture(root)
+            receipt["packages"][0][field] = "0" * (64 if field == "sha256" else 10)
+            (root / "package-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+            with mock.patch.object(module, "fetch_packument", lambda *_args: None):
+                try:
+                    module.publish(publish_args(root))
+                except module.PublishError as error:
+                    assert expected_message in str(error)
+                else:
+                    raise AssertionError(f"accepted bad {field} receipt")
+    with tempfile.TemporaryDirectory(prefix="harness-lint-publish-mismatch-") as directory:
+        root = Path(directory)
+        receipt, manifests = package_fixture(root)
+        name = module.NATIVE_ORDER[0][0]
+        bad = packument(name, receipt["packages"][0], manifests[name])
+        bad["versions"]["1.2.3"]["dist"]["integrity"] = "sha512-wrong"
+        with mock.patch.object(module, "fetch_packument", lambda _registry, _name: bad), mock.patch.object(module, "verify_audit_signatures"):
+            try:
+                module.publish(publish_args(root))
+            except module.PublishError as error:
+                assert "integrity" in str(error)
+            else:
+                raise AssertionError("accepted mismatched existing registry state")
+    with tempfile.TemporaryDirectory(prefix="harness-lint-publish-manifest-") as directory:
+        root = Path(directory)
+        receipt, _ = package_fixture(root)
+        target = root / receipt["packages"][0]["filename"]
+        rewritten = root / "rewritten.tgz"
+        with tarfile.open(target, "r:gz") as source, tarfile.open(rewritten, "w:gz") as destination:
+            for member in source.getmembers():
+                payload = source.extractfile(member).read() if member.isreg() else None
+                if member.name == "package/package.json":
+                    changed = json.loads(payload.decode())
+                    changed["version"] = "9.9.9"
+                    payload = json.dumps(changed).encode()
+                    member.size = len(payload)
+                destination.addfile(member, io.BytesIO(payload) if payload is not None else None)
+        rewritten.replace(target)
+        receipt["packages"][0]["sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
+        receipt["packages"][0]["integrity"] = module.sha512_integrity(target)
+        (root / "package-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+        with mock.patch.object(module, "fetch_packument", lambda *_args: None):
+            try:
+                module.publish(publish_args(root))
+            except module.PublishError as error:
+                assert "manifest mismatch" in str(error)
+            else:
+                raise AssertionError("accepted a tarball with a mismatched manifest")
+
+
+def test_audit_rejects_missing_invalid_and_unattested() -> None:
+    target = {"name": "pkg", "version": "1.0.0"}
+    reports = [
+        {"verified": [], "missing": [target], "invalid": []},
+        {"verified": [], "missing": [], "invalid": [target]},
+        {"verified": [{"name": "pkg", "version": "1.0.0", "attestations": {}}], "missing": [], "invalid": []},
+    ]
+    for report in reports:
+        def fake_run(command, **_kwargs):
+            output = json.dumps(report) if command[1] == "audit" else ""
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with mock.patch.object(module.subprocess, "run", fake_run):
+            try:
+                module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+            except module.PublishError:
+                pass
+            else:
+                raise AssertionError(f"accepted bad npm audit report: {report}")
+
+
 def main() -> int:
     test_security_helpers()
     test_tarball_manifest_and_receipt_filename()
+    test_native_order_resume_and_root_gate()
+    test_existing_mismatch_fails_closed_and_receipts_are_bound()
+    test_audit_rejects_missing_invalid_and_unattested()
     print("publish npm packages tests passed")
     return 0
 

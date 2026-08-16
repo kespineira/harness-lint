@@ -170,6 +170,8 @@ printf '%s\n' "$release_block" | grep -Fq 'Pack and audit all five npm tarballs'
     fail 'canonical release job does not pack/audit npm packages'
 printf '%s\n' "$release_block" | grep -Fq 'Upload audited npm publication inputs' ||
     fail 'canonical release job does not upload audited npm inputs'
+printf '%s\n' "$release_block" | grep -Fq 'path: dist/npm-packages' ||
+    fail 'canonical release job does not upload the expected npm package directory'
 npm_block=$(job_block npm-publish)
 printf '%s\n' "$npm_block" | grep -Eq '^    needs: release$' ||
     fail 'npm publish job is not gated on canonical release job'
@@ -177,8 +179,25 @@ printf '%s\n' "$npm_block" | grep -Eq '^      id-token: write$' ||
     fail 'npm publish job cannot use OIDC'
 printf '%s\n' "$npm_block" | grep -Fq 'Download audited npm publication inputs' ||
     fail 'npm publish job does not download audited inputs'
+printf '%s\n' "$npm_block" | grep -Fq 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' ||
+    fail 'npm publish job does not checkout with the reviewed action'
+printf '%s\n' "$npm_block" | grep -Fq 'ref: ${{ github.sha }}' ||
+    fail 'npm publish job does not checkout the exact tagged commit'
+printf '%s\n' "$npm_block" | grep -Fq 'persist-credentials: false' ||
+    fail 'npm publish checkout retains credentials'
+printf '%s\n' "$npm_block" | grep -Fq 'path: dist/npm-packages' ||
+    fail 'npm artifact is not extracted into dist/npm-packages'
+printf '%s\n' "$npm_block" | grep -Fq -- '--packages dist/npm-packages' ||
+    fail 'npm publisher input does not match artifact extraction path'
 printf '%s\n' "$npm_block" | grep -Fq 'publish-npm-packages.sh' ||
     fail 'npm publish job does not invoke the resumable publisher'
+npm_checkout_line=$(printf '%s\n' "$npm_block" | grep -n 'uses: actions/checkout@' | cut -d: -f1)
+npm_download_line=$(printf '%s\n' "$npm_block" | grep -n 'uses: actions/download-artifact@' | cut -d: -f1)
+npm_publish_line=$(printf '%s\n' "$npm_block" | grep -n 'publish-npm-packages.sh' | cut -d: -f1)
+[ -n "$npm_checkout_line" ] && [ -n "$npm_download_line" ] && [ -n "$npm_publish_line" ] ||
+    fail 'npm publish checkout/download/publish steps are incomplete'
+[ "$npm_checkout_line" -lt "$npm_download_line" ] && [ "$npm_download_line" -lt "$npm_publish_line" ] ||
+    fail 'npm publish does not checkout before download and repository script execution'
 final_block=$(job_block publish-github-release)
 printf '%s\n' "$final_block" | grep -Eq '^    needs: npm-publish$' ||
     fail 'GitHub stable publication is not gated on npm publication'
