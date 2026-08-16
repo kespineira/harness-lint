@@ -14,6 +14,73 @@ trap 'cleanup; exit 1' 1 2 3 15
 fail() { echo "release E2E: $*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
 count_is() { [ "$1" -eq "$2" ] || fail "$3: found $1, want $2"; }
+file_description_matches() {
+    file_os=$1
+    file_arch=$2
+    file_description=$3
+    case "$file_os/$file_arch" in
+        darwin/amd64)
+            case "$file_description" in
+                'Mach-O 64-bit executable x86_64'|\
+                'Mach-O 64-bit executable x86_64, flags:'*|\
+                'Mach-O 64-bit x86_64 executable, flags:'*) return 0 ;;
+            esac
+            ;;
+        darwin/arm64)
+            case "$file_description" in
+                'Mach-O 64-bit executable arm64'|\
+                'Mach-O 64-bit executable arm64, flags:'*|\
+                'Mach-O 64-bit arm64 executable, flags:'*) return 0 ;;
+            esac
+            ;;
+        linux/amd64)
+            case "$file_description" in
+                'ELF 64-bit LSB executable, x86-64,'*) return 0 ;;
+            esac
+            ;;
+        linux/arm64)
+            case "$file_description" in
+                'ELF 64-bit LSB executable, ARM aarch64,'*) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+run_file_description_tests() {
+    file_description_matches darwin amd64 \
+        'Mach-O 64-bit executable x86_64' || fail 'macOS amd64 file description was rejected'
+    file_description_matches darwin arm64 \
+        'Mach-O 64-bit executable arm64' || fail 'macOS arm64 file description was rejected'
+    file_description_matches darwin amd64 \
+        'Mach-O 64-bit x86_64 executable, flags:<|DYLDLINK|PIE>' ||
+        fail 'Ubuntu amd64 file description was rejected'
+    file_description_matches darwin arm64 \
+        'Mach-O 64-bit arm64 executable, flags:<|DYLDLINK|PIE>' ||
+        fail 'Ubuntu arm64 file description was rejected'
+    file_description_matches linux amd64 \
+        'ELF 64-bit LSB executable, x86-64, version 1 (SYSV)' ||
+        fail 'Linux amd64 file description was rejected'
+    file_description_matches linux arm64 \
+        'ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV)' ||
+        fail 'Linux arm64 file description was rejected'
+    if file_description_matches darwin amd64 \
+        'ELF 64-bit LSB executable, x86-64, version 1 (SYSV)'; then
+        fail 'Darwin amd64 matcher accepted a Linux binary'
+    fi
+    if file_description_matches darwin amd64 \
+        'Mach-O 64-bit arm64 executable, flags:<|DYLDLINK|PIE>'; then
+        fail 'Darwin amd64 matcher accepted an arm64 binary'
+    fi
+    if file_description_matches linux amd64 \
+        'ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV)'; then
+        fail 'Linux amd64 matcher accepted an arm64 binary'
+    fi
+    echo 'release E2E file description tests passed'
+}
+if [ "${1:-}" = --test-file-descriptions ]; then
+    run_file_description_tests
+    exit 0
+fi
 require goreleaser
 require tar
 require file
@@ -102,12 +169,8 @@ for os in darwin linux; do
         [ ! -x "$extract/LICENSE" ] && [ ! -x "$extract/README.md" ] ||
             fail "archive documentation has executable mode"
         description=$(file -b "$extract/harness-lint")
-        case "$os/$arch" in
-            darwin/amd64) case "$description" in *'Mach-O 64-bit executable x86_64'*) ;; *) fail "wrong darwin/amd64 architecture: $description" ;; esac ;;
-            darwin/arm64) case "$description" in *'Mach-O 64-bit executable arm64'*) ;; *) fail "wrong darwin/arm64 architecture: $description" ;; esac ;;
-            linux/amd64) case "$description" in *'ELF 64-bit LSB executable, x86-64,'*) ;; *) fail "wrong linux/amd64 architecture: $description" ;; esac ;;
-            linux/arm64) case "$description" in *'ELF 64-bit LSB executable, ARM aarch64,'*) ;; *) fail "wrong linux/arm64 architecture: $description" ;; esac ;;
-        esac
+        file_description_matches "$os" "$arch" "$description" ||
+            fail "wrong $os/$arch architecture: $description"
         echo "validated archive $(basename "$archive"): $description (not executed)"
     done
 done
