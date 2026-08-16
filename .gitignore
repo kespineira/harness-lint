@@ -34,6 +34,9 @@ go.work.sum
 # Local build output from: go build ./cmd/harness-lint
 /harness-lint
 
+# GoReleaser snapshot output
+/dist/
+
 # Local SQLite state and SQLite sidecars
 *.db
 *.db-shm

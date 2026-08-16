@@ -5,18 +5,132 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  release-e2e-linux:
+    name: Release artifact E2E (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+
+      - name: Validate release artifacts and installer
+        run: ./scripts/release-e2e.sh
+
+  release-e2e-macos:
+    name: Release artifact E2E (macOS)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+
+      - name: Validate release artifacts and installer
+        run: ./scripts/release-e2e.sh
+
+  release-homebrew-e2e:
+    name: Homebrew Cask E2E (isolated macOS tap)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.1
+          install-only: true
+
+      - name: Generate snapshot and validate Cask Ruby syntax
+        run: ./scripts/release-e2e.sh
+
+      - name: Run Homebrew style, audit, and load in temporary tap
+        env:
+          RELEASE_E2E_TAP: harness-lint/e2e-${{ github.run_id }}
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          set -eu
+          tap_name="$RELEASE_E2E_TAP"
+          tap_dir="$(brew --repository)/Library/Taps/${tap_name%/*}/homebrew-${tap_name#*/}"
+          cleanup() {
+            brew untap --force "$tap_name" >/dev/null 2>&1 || true
+            if [ -d "$tap_dir" ]; then rm -rf "$tap_dir"; fi
+          }
+          trap cleanup EXIT INT TERM
+
+          # This tap exists only on the hosted runner and is never pushed.
+          brew tap-new --no-git "$tap_name"
+          mkdir -p "$tap_dir/Casks"
+          cp dist/homebrew/Casks/harness-lint.rb "$tap_dir/Casks/harness-lint.rb"
+          brew style --cask "$tap_dir/Casks/harness-lint.rb"
+          # Snapshot URLs do not exist before publication; keep audit local so
+          # it remains a deterministic style/metadata check.
+          brew audit --cask --strict "$tap_name/harness-lint"
+          brew cat --cask "$tap_name/harness-lint" >/dev/null
+
   release:
     name: Release stable tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    needs:
+      - release-e2e-linux
+      - release-e2e-macos
+      - release-homebrew-e2e
     steps:
       - name: Check Homebrew tap credential
         env:
