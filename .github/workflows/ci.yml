@@ -29,6 +29,9 @@ jobs:
       - name: Run release workflow policy test
         run: ./scripts/release-workflow-test.sh
 
+      - name: Run published release smoke workflow policy test
+        run: ./scripts/published-release-smoke-workflow-test.sh
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 

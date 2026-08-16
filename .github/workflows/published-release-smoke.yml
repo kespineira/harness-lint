@@ -1,0 +1,164 @@
+name: Published release consumer smoke
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published vX.Y.Z tag to replay
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: published-release-smoke-${{ github.event_name }}-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate-published-release:
+    name: Validate published release and tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+    steps:
+      - name: Validate release and tag exist
+        id: validate
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          case "$REQUESTED_TAG" in
+            v*) ;;
+            *) echo '::error::tag must begin with v'; exit 1 ;;
+          esac
+          if ! printf '%s\n' "$REQUESTED_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo '::error::tag must be a stable vX.Y.Z version'
+            exit 1
+          fi
+
+          api_root="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          release_json="$RUNNER_TEMP/published-release.json"
+          ref_json="$RUNNER_TEMP/published-tag.json"
+          curl --fail --location --silent --show-error --retry 3 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_root/releases/tags/$REQUESTED_TAG" >"$release_json"
+          curl --fail --location --silent --show-error --retry 3 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_root/git/ref/tags/$REQUESTED_TAG" >"$ref_json"
+
+          jq -e --arg tag "$REQUESTED_TAG" '
+            .tag_name == $tag and
+            .draft == false and
+            (.published_at | type == "string") and
+            (.assets | any(.[]; .name == "checksums.txt"))
+          ' "$release_json" >/dev/null
+          jq -e --arg ref "refs/tags/$REQUESTED_TAG" '
+            .ref == $ref and (.object.type == "tag" or .object.type == "commit")
+          ' "$ref_json" >/dev/null
+
+          printf 'release_tag=%s\n' "$REQUESTED_TAG" >>"$GITHUB_OUTPUT"
+
+  linux-published-consumer:
+    name: Published installer consumer (Linux)
+    needs: validate-published-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate-published-release.outputs.release_tag }}
+    steps:
+      - name: Install and exercise the published archive
+        run: |
+          set -euo pipefail
+
+          smoke_root=$(mktemp -d "$RUNNER_TEMP/harness-lint-published-linux.XXXXXX")
+          cleanup() { rm -rf "$smoke_root"; }
+          trap cleanup EXIT INT TERM
+          smoke_home="$smoke_root/home"
+          install_dir="$smoke_home/.local/bin"
+          mkdir -p "$install_dir" "$smoke_root/xdg-config" "$smoke_root/xdg-data" "$smoke_root/xdg-cache"
+
+          export HOME="$smoke_home"
+          export XDG_CONFIG_HOME="$smoke_root/xdg-config"
+          export XDG_DATA_HOME="$smoke_root/xdg-data"
+          export XDG_CACHE_HOME="$smoke_root/xdg-cache"
+          export HARNESS_LINT_VERSION="$RELEASE_TAG"
+          export HARNESS_LINT_INSTALL_DIR="$install_dir"
+          export PATH="$install_dir:$PATH"
+
+          installer="$smoke_root/install.sh"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$RELEASE_TAG/scripts/install.sh" \
+            -o "$installer"
+          sh "$installer"
+
+          expected_version=${RELEASE_TAG#v}
+          version_output=$(harness-lint version)
+          printf '%s\n' "$version_output" | grep -Eq \
+            "^harness-lint version=${expected_version} commit=[^ ]+ build-date=.+$"
+          help_output=$(harness-lint --help)
+          printf '%s\n' "$help_output" | grep -Fq 'usage: harness-lint'
+          hooks_output=$(harness-lint hooks status \
+            --home "$smoke_home" \
+            --codex-home "$smoke_home/.codex" \
+            --claude-config "$smoke_home/.claude" \
+            --now 2026-08-16T00:00:00Z)
+          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=claude-code'
+          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=codex'
+
+  macos-published-consumer:
+    name: Published Homebrew cask consumer (macOS)
+    needs: validate-published-release
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.validate-published-release.outputs.release_tag }}
+      HOMEBREW_NO_ANALYTICS: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Install and exercise the published cask
+        run: |
+          set -euo pipefail
+
+          smoke_root=$(mktemp -d "$RUNNER_TEMP/harness-lint-published-macos.XXXXXX")
+          cleanup() {
+            set +e
+            brew uninstall --cask --force harness-lint >/dev/null 2>&1
+            brew untap --force kespineira/tap >/dev/null 2>&1
+            rm -rf "$smoke_root"
+          }
+          trap cleanup EXIT INT TERM
+          mkdir -p "$smoke_root/home" "$smoke_root/cache" "$smoke_root/logs" "$smoke_root/tmp"
+          export HOME="$smoke_root/home"
+          export HOMEBREW_CACHE="$smoke_root/cache"
+          export HOMEBREW_LOGS="$smoke_root/logs"
+          export HOMEBREW_TEMP="$smoke_root/tmp"
+          export HOMEBREW_CASK_OPTS="--appdir=$smoke_root/home/Applications"
+          brew install --cask kespineira/tap/harness-lint
+
+          brew_prefix=$(brew --prefix)
+          export PATH="$brew_prefix/bin:$PATH"
+          expected_version=${RELEASE_TAG#v}
+          version_output=$(harness-lint version)
+          printf '%s\n' "$version_output" | grep -Eq \
+            "^harness-lint version=${expected_version} commit=[^ ]+ build-date=.+$"
+          help_output=$(harness-lint --help)
+          printf '%s\n' "$help_output" | grep -Fq 'usage: harness-lint'
+          hooks_output=$(harness-lint hooks status \
+            --home "$HOME" \
+            --codex-home "$HOME/.codex" \
+            --claude-config "$HOME/.claude" \
+            --now 2026-08-16T00:00:00Z)
+          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=claude-code'
+          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=codex'
