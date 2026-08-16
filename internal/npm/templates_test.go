@@ -148,6 +148,17 @@ func assertNoInstallHooks(t *testing.T, raw []byte, got manifest) {
 	}
 }
 
+func assertNoBinField(t *testing.T, raw []byte) {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("parse manifest fields: %v", err)
+	}
+	if _, ok := fields["bin"]; ok {
+		t.Error("manifest declares forbidden bin field")
+	}
+}
+
 func assertAllowlist(t *testing.T, got manifest, want []string) {
 	t.Helper()
 	if !reflect.DeepEqual(got.Files, want) {
@@ -247,9 +258,7 @@ func TestNativeManifestTemplate(t *testing.T) {
 			if !reflect.DeepEqual(got.Keywords, []string{"claude-code", "codex", "coding-agents", "mcp", "skills", "developer-tools", "cli", "context"}) {
 				t.Errorf("keywords = %#v", got.Keywords)
 			}
-			if !reflect.DeepEqual(got.Bin, map[string]string{"harness-lint": "bin/harness-lint"}) {
-				t.Errorf("bin = %#v", got.Bin)
-			}
+			assertNoBinField(t, raw)
 			assertAllowlist(t, got, []string{"bin/harness-lint", "README.md", "LICENSE"})
 			if got.PublishConfig.Access != "public" {
 				t.Errorf("publish access = %q, want public", got.PublishConfig.Access)
