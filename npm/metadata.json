@@ -1,0 +1,40 @@
+{
+  "versionPlaceholder": "__VERSION__",
+  "templates": {
+    "root": "templates/root/package.json.tmpl",
+    "native": "templates/native/package.json.tmpl"
+  },
+  "assets": {
+    "readme": "README.md",
+    "license": "LICENSE"
+  },
+  "root": {
+    "name": "harness-lint"
+  },
+  "native": [
+    {
+      "name": "@kespineira/harness-lint-darwin-arm64",
+      "os": "darwin",
+      "cpu": "arm64",
+      "archive": "harness-lint_${VERSION}_darwin_arm64.tar.gz"
+    },
+    {
+      "name": "@kespineira/harness-lint-darwin-x64",
+      "os": "darwin",
+      "cpu": "x64",
+      "archive": "harness-lint_${VERSION}_darwin_amd64.tar.gz"
+    },
+    {
+      "name": "@kespineira/harness-lint-linux-arm64",
+      "os": "linux",
+      "cpu": "arm64",
+      "archive": "harness-lint_${VERSION}_linux_arm64.tar.gz"
+    },
+    {
+      "name": "@kespineira/harness-lint-linux-x64",
+      "os": "linux",
+      "cpu": "x64",
+      "archive": "harness-lint_${VERSION}_linux_amd64.tar.gz"
+    }
+  ]
+}

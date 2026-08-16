@@ -1,0 +1,44 @@
+{
+  "name": "harness-lint",
+  "version": "__VERSION__",
+  "description": "Local context hygiene and usage analyzer for coding agent harnesses.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kespineira/harness-lint"
+  },
+  "homepage": "https://github.com/kespineira/harness-lint#readme",
+  "bugs": {
+    "url": "https://github.com/kespineira/harness-lint/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "coding-agents",
+    "mcp",
+    "skills",
+    "developer-tools",
+    "cli",
+    "context"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "harness-lint": "bin/harness-lint.js"
+  },
+  "files": [
+    "bin/harness-lint.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "@kespineira/harness-lint-darwin-arm64": "__VERSION__",
+    "@kespineira/harness-lint-darwin-x64": "__VERSION__",
+    "@kespineira/harness-lint-linux-arm64": "__VERSION__",
+    "@kespineira/harness-lint-linux-x64": "__VERSION__"
+  }
+}
