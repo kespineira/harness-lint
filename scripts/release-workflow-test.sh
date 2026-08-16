@@ -17,6 +17,8 @@ fail() {
 [ -r "$release_workflow" ] || fail 'release workflow is missing'
 [ -r "$ci_workflow" ] || fail 'CI workflow is missing'
 [ -r "$goreleaser_config" ] || fail 'GoReleaser configuration is missing'
+publish_script=$project_root/scripts/publish-npm-packages.py
+[ -r "$publish_script" ] || fail 'npm publish script is missing'
 
 # Keep this policy test itself as an explicit gate in both normal CI and the
 # stable release job. This prevents a future workflow edit from silently
@@ -50,6 +52,15 @@ for e2e_job in release-e2e-linux release-e2e-macos release-homebrew-e2e; do
         fail "$e2e_job does not declare job permissions"
     printf '%s\n' "$e2e_block" | grep -Eq '^      contents: read$' ||
         fail "$e2e_job is not limited to contents: read"
+done
+for e2e_job in release-e2e-linux release-e2e-macos; do
+    e2e_block=$(job_block "$e2e_job")
+    printf '%s\n' "$e2e_block" | grep -Fq "node-version: '22.14.0'" ||
+        fail "$e2e_job does not pin the reviewed Node.js version"
+    printf '%s\n' "$e2e_block" | grep -Fq 'npm install --global npm@11.5.1' ||
+        fail "$e2e_job does not install the reviewed npm version"
+    printf '%s\n' "$e2e_block" | grep -Fq './scripts/npm-package-e2e.sh --dist dist' ||
+        fail "$e2e_job does not run the real npm package E2E"
 done
 homebrew_block=$(job_block release-homebrew-e2e)
 printf '%s\n' "$homebrew_block" | grep -Fq "RELEASE_E2E_TAP: harness-lint/e2e-" ||
@@ -93,8 +104,44 @@ assert_action_pin() {
 }
 assert_action_pin actions/checkout 3d3c42e5aac5ba805825da76410c181273ba90b1
 assert_action_pin actions/setup-go b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+assert_action_pin actions/setup-node 48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
 assert_action_pin goreleaser/goreleaser-action f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
 assert_action_pin sigstore/cosign-installer 6f9f17788090df1f26f669e9d70d6ae9567deba6
+assert_action_pin actions/upload-artifact ea165f8d65b6e75b540449e92b4886f43607fa02
+assert_action_pin actions/download-artifact d3f86a106a0bac45b974a628896c90dbdf5c8093
+
+# Normal CI uses exact reviewed Node/npm versions and runs every deterministic
+# local package gate; no registry credential may enter either workflow.
+grep -Fq "node-version: '22.14.0'" "$ci_workflow" || fail 'CI Node.js version is not exact'
+grep -Fq 'npm install --global npm@11.5.1' "$ci_workflow" || fail 'CI npm version is not exact'
+for gate in './scripts/isolated-smoke.sh' './scripts/stage-npm-packages-test.sh' \
+    './scripts/pack-npm-packages-test.sh' './scripts/publish-npm-packages-test.sh' \
+    './scripts/npm-package-e2e-test.sh'; do
+    grep -Fq "$gate" "$ci_workflow" || fail "CI is missing deterministic gate $gate"
+done
+if grep -Eq 'NPM_TOKEN|NODE_AUTH_TOKEN' "$release_workflow" "$ci_workflow"; then
+    fail 'release/CI workflow contains a long-lived npm token'
+fi
+
+# npm publish is OIDC-only, resumable, and verifies every immutable package
+# before continuing. The explicit order is part of the release contract.
+grep -Fq 'MAX_ATTEMPTS = 6' "$publish_script" || fail 'npm publish retry bound is missing'
+grep -Fq '"--provenance"' "$publish_script" || fail 'npm publish lacks explicit provenance mode'
+grep -Fq '"--ignore-scripts"' "$publish_script" || fail 'npm publish lacks script suppression'
+grep -Fq '"--tag",' "$publish_script" || fail 'npm publish lacks explicit latest dist-tag'
+grep -Fq '"--access",' "$publish_script" || fail 'npm publish lacks explicit public access'
+grep -Fq 'npm audit' "$publish_script" || fail 'npm publish lacks npm CLI provenance audit'
+grep -Fq '"--include-attestations"' "$publish_script" || fail 'npm provenance audit omits attestations'
+grep -Fq 'NPM_CONFIG_USERCONFIG' "$publish_script" || fail 'npm publish does not isolate user config'
+grep -Fq 'ACTIONS_ID_TOKEN_REQUEST_' "$publish_script" ||
+    fail 'npm publish does not document preserving GitHub OIDC variables'
+for native in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+    grep -Fq "harness-lint-$native" "$publish_script" || fail "native publish order omits $native"
+done
+grep -Fq 'PACKAGE_ORDER' "$publish_script" || fail 'npm publish package order is not explicit'
+grep -Fq 'repository_identity' "$publish_script" || fail 'repository identity normalization is missing'
+grep -Fq 'tarball SHA-256 receipt mismatch' "$publish_script" || fail 'tarball SHA-256 receipt gate is missing'
+grep -Fq 'tarball integrity receipt mismatch' "$publish_script" || fail 'tarball SRI receipt gate is missing'
 
 # GoReleaser must never replace an existing draft or artifact.  Keep these
 # explicit false settings, and reject similarly named clobber/replacement knobs.
@@ -114,5 +161,28 @@ for e2e_job in release-e2e-linux release-e2e-macos release-homebrew-e2e; do
     printf '%s\n' "$release_block" | grep -Eq "^      - $e2e_job$" ||
         fail "release job does not depend on $e2e_job"
 done
+
+# The canonical job stages/packs before upload; a separate OIDC job can be
+# rerun against the immutable audited tarballs without rebuilding Go artifacts.
+printf '%s\n' "$release_block" | grep -Fq 'Stage npm packages from the validated tag version' ||
+    fail 'canonical release job does not stage npm packages'
+printf '%s\n' "$release_block" | grep -Fq 'Pack and audit all five npm tarballs' ||
+    fail 'canonical release job does not pack/audit npm packages'
+printf '%s\n' "$release_block" | grep -Fq 'Upload audited npm publication inputs' ||
+    fail 'canonical release job does not upload audited npm inputs'
+npm_block=$(job_block npm-publish)
+printf '%s\n' "$npm_block" | grep -Eq '^    needs: release$' ||
+    fail 'npm publish job is not gated on canonical release job'
+printf '%s\n' "$npm_block" | grep -Eq '^      id-token: write$' ||
+    fail 'npm publish job cannot use OIDC'
+printf '%s\n' "$npm_block" | grep -Fq 'Download audited npm publication inputs' ||
+    fail 'npm publish job does not download audited inputs'
+printf '%s\n' "$npm_block" | grep -Fq 'publish-npm-packages.sh' ||
+    fail 'npm publish job does not invoke the resumable publisher'
+final_block=$(job_block publish-github-release)
+printf '%s\n' "$final_block" | grep -Eq '^    needs: npm-publish$' ||
+    fail 'GitHub stable publication is not gated on npm publication'
+printf '%s\n' "$final_block" | grep -Fq -- '--draft=false --latest' ||
+    fail 'GitHub stable publication command is missing'
 
 echo 'release workflow policy checks passed'
