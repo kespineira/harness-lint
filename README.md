@@ -32,11 +32,10 @@ commands below install the latest release unless a version is pinned.
 brew install --cask kespineira/tap/harness-lint
 ```
 
-The cask currently has no Apple signing or notarization. Its post-install
-hook removes the `com.apple.quarantine` attribute from the staged binary so
-that it can run conveniently; that is not a signature and reduces one
-Gatekeeper protection. If your policy requires quarantine or notarized
-software, use a reviewed release archive and keep the attribute instead.
+The cask currently has no Apple signing or notarization and does not remove
+the `com.apple.quarantine` attribute. If your policy permits it, review the
+release archive and clear that attribute manually before running the binary;
+otherwise retain quarantine and use a notarized distribution.
 
 The current GoReleaser/Homebrew Cask output also cannot carry a Cask
 `license` stanza in this setup, so the generated cask may omit that packaging

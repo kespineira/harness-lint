@@ -90,20 +90,12 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: kespineira@users.noreply.github.com
-    description: Local context hygiene and usage analyzer for coding agent harnesses.
+    description: Local context hygiene and usage analyzer for coding agent harnesses
     homepage: https://github.com/kespineira/harness-lint
     license: Apache-2.0
     binaries:
       - harness-lint
-    # Limitation: Apple signing/notarization credentials are not available.
-    # This documented staged-binary hook only clears quarantine; it is not
-    # native code signing or notarization.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/harness-lint"], sudo: false
-          end
+    caveats: This cask is not signed or notarized; review the release before running it.
 
 changelog:
   use: git
