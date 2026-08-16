@@ -6,10 +6,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/compatibility"
+	buildversion "github.com/kespineira/harness-lint/internal/version"
 )
 
 // Options injects process-dependent values for deterministic tests. Non-empty
@@ -47,6 +49,13 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	if isGlobalVersionRequest(args) {
+		if len(args) != 1 {
+			return errors.New("--version does not accept arguments")
+		}
+		buildversion.Print(stdout, "harness-lint")
+		return nil
+	}
 	if !hasCommandToken(args) && hasHelpFlag(args) {
 		writeUsage(stdout)
 		return nil
@@ -76,6 +85,13 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	parsed.hooksAction = nested.hooksAction
 	parsed.hooksRuntime = nested.hooksRuntime
 	parsed.dbAction = nested.dbAction
+	if command == "version" {
+		if err := validateCommandFlags(command, parsed); err != nil {
+			return err
+		}
+		buildversion.Print(stdout, "harness-lint")
+		return nil
+	}
 	if err := validateCommandFlags(command, parsed); err != nil {
 		return err
 	}

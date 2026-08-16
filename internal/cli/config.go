@@ -29,6 +29,7 @@ var supportedCommands = map[string]struct{}{
 	"stale":   {},
 	"doctor":  {},
 	"db":      {},
+	"version": {},
 }
 
 type stringListFlag []string
@@ -234,6 +235,10 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 
 func validateCommandFlags(command string, flags parsedFlags) error {
 	switch command {
+	case "version":
+		if flags.dbSet || flags.homeSet || flags.projectSet || flags.configDirSet || flags.codexSet || flags.claudeSet || flags.nowSet || flags.sinceSet || flags.daysSet || flags.hooksSet || flags.runtimeSet || flags.eventSet || flags.managedSet || flags.typeSet || flags.dryRunSet || flags.jsonSet || flags.outputSet || flags.monthlySet {
+			return errors.New("version does not accept options")
+		}
 	case "ingest":
 		if flags.homeSet {
 			return errors.New("ingest does not accept --home")
@@ -909,7 +914,7 @@ func splitCommand(args []string) (string, []string, error) {
 		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			return "", nil, unknownCommandError(args[0])
 		}
-		return "", nil, errors.New("a command is required: scan, usage, report, context, stale, doctor, ingest, hooks, or db")
+		return "", nil, errors.New("a command is required: scan, usage, report, context, stale, doctor, ingest, hooks, db, or version")
 	}
 	command := args[commandIndex]
 	commandArgs := append([]string(nil), args[:commandIndex]...)
@@ -918,7 +923,7 @@ func splitCommand(args []string) (string, []string, error) {
 }
 
 func unknownCommandError(command string) error {
-	return fmt.Errorf("unknown command %q (want scan, usage, report, context, stale, doctor, ingest, hooks, or db)", command)
+	return fmt.Errorf("unknown command %q (want scan, usage, report, context, stale, doctor, ingest, hooks, db, or version)", command)
 }
 
 func consumesValueFlag(arg string) bool {
@@ -931,12 +936,17 @@ func consumesValueFlag(arg string) bool {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks|db> [options]")
-	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks, db")
+	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks|db|version> [options]")
+	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks, db, version")
 	fmt.Fprintln(w, "use harness-lint <command> --help for command options")
 }
 
 func writeCommandUsage(w io.Writer, command string) {
+	if command == "version" {
+		fmt.Fprintln(w, "usage: harness-lint version")
+		fmt.Fprintln(w, "prints the semantic version, commit, and build date")
+		return
+	}
 	if command == "ingest" {
 		fmt.Fprintln(w, "usage: harness-lint ingest [options]")
 		fmt.Fprintln(w, "options:")
@@ -1038,6 +1048,10 @@ func hasCommandToken(args []string) bool {
 		}
 	}
 	return false
+}
+
+func isGlobalVersionRequest(args []string) bool {
+	return len(args) > 0 && (args[0] == "--version" || args[0] == "-v")
 }
 
 func hasHelpFlag(args []string) bool {
