@@ -97,7 +97,13 @@ test -z "$(gofmt -l .)"
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
-release_binary="$(mktemp "${TMPDIR:-/tmp}/harness-lint.XXXXXX")"
+release_tmp="$(mktemp -d "${TMPDIR:-/tmp}/harness-lint.XXXXXX")"
+cleanup() {
+  rm -rf "$release_tmp"
+}
+trap cleanup EXIT
+trap 'cleanup; exit 1' HUP INT TERM
+release_binary="$release_tmp/harness-lint"
 go build -trimpath -o "$release_binary" ./cmd/harness-lint
 ./scripts/install_test.sh
 ./scripts/release-workflow-test.sh
@@ -106,8 +112,12 @@ goreleaser check
 goreleaser release --snapshot --clean
 ./scripts/release-e2e.sh
 find dist -maxdepth 1 -type f -print | sort
-tar -tzf dist/harness-lint_*_darwin_*.tar.gz
-tar -tzf dist/harness-lint_*_linux_*.tar.gz
+for archive in dist/*.tar.gz; do
+  [ -f "$archive" ] || continue
+  tar -tzf "$archive"
+done
+test -f dist/homebrew/Casks/harness-lint.rb
+ls -l dist/homebrew/Casks/harness-lint.rb
 ```
 
 The final inspection should confirm the four archives, six Linux packages,
