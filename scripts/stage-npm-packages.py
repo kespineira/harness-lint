@@ -122,6 +122,14 @@ def validate_version(version: str) -> None:
         )
 
 
+def validate_release_version(version: Any) -> str:
+    if not isinstance(version, str) or not version:
+        fail("GoReleaser metadata version must be a non-empty string")
+    if version.startswith("v") or not VERSION_RE.fullmatch(version):
+        fail(f"invalid GoReleaser release version {version!r}")
+    return version
+
+
 def require_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value:
         fail(f"artifact metadata field {name} must be a non-empty string")
@@ -311,6 +319,22 @@ def stage(args: argparse.Namespace) -> Path:
     entries = read_json(artifacts_path)
     if not isinstance(entries, list):
         fail("GoReleaser artifacts.json must contain an array")
+    release_metadata_path = dist / "metadata.json"
+    ensure_regular(release_metadata_path, "GoReleaser metadata.json")
+    release_metadata = read_json(release_metadata_path)
+    if not isinstance(release_metadata, dict):
+        fail("GoReleaser metadata.json must contain an object")
+    release_version = validate_release_version(release_metadata.get("version"))
+    version_matches_release = args.version == release_version
+    if not version_matches_release:
+        if not args.allow_version_mismatch:
+            fail(
+                "requested npm version does not match GoReleaser release version "
+                f"({args.version!r} != {release_version!r}); "
+                "pass --allow-version-mismatch only for non-stable snapshot/bootstrap staging"
+            )
+        if "-" not in args.version or "-" not in release_version:
+            fail("--allow-version-mismatch is only permitted for non-stable snapshot/bootstrap versions")
     metadata = read_json(npm_root / "metadata.json")
     native_specs = validate_metadata(metadata)
     templates = metadata["templates"]
@@ -422,6 +446,8 @@ def stage(args: argparse.Namespace) -> Path:
         receipt = {
             "schemaVersion": 1,
             "version": args.version,
+            "releaseVersion": release_version,
+            "versionMatchesRelease": version_matches_release,
             "dist": str(dist),
             "assets": asset_sources,
             "packages": packages,
@@ -429,10 +455,32 @@ def stage(args: argparse.Namespace) -> Path:
         receipt_text = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
         if PLACEHOLDER_RE.search(receipt_text):
             fail("unresolved placeholder in staging receipt")
+        receipt_path = temporary / "staging-receipt.json"
+        try:
+            with receipt_path.open("w", encoding="utf-8") as stream:
+                stream.write(receipt_text)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError as error:
+            fail(f"cannot write staging receipt {receipt_path}: {error}")
+        try:
+            directory_fd = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            fail(f"cannot fsync staging directory {temporary}: {error}")
         os.replace(temporary, output)
-        receipt_path = output / "staging-receipt.json"
-        receipt_path.write_text(receipt_text, encoding="utf-8")
-        return receipt_path
+        try:
+            directory_fd = os.open(output.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as error:
+            fail(f"cannot fsync staging parent directory {output.parent}: {error}")
+        return output / "staging-receipt.json"
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -446,6 +494,14 @@ def parser() -> argparse.ArgumentParser:
         "--output",
         default="dist/npm-staging",
         help="new staging directory (default: dist/npm-staging)",
+    )
+    result.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help=(
+            "allow a non-stable snapshot/bootstrap npm version to differ from "
+            "GoReleaser metadata (documented bootstrap path only)"
+        ),
     )
     return result
 

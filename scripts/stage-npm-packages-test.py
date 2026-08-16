@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,10 +14,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "stage-npm-packages.sh"
+SCRIPT_PY = ROOT / "scripts" / "stage-npm-packages.py"
+MODULE_SPEC = importlib.util.spec_from_file_location("stage_npm_packages", SCRIPT_PY)
+assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
+STAGE_MODULE = importlib.util.module_from_spec(MODULE_SPEC)
+MODULE_SPEC.loader.exec_module(STAGE_MODULE)
 TARGETS = [
     ("darwin", "arm64", "x64-do-not-use"),
     ("darwin", "amd64", "darwin-amd64"),
@@ -42,7 +50,7 @@ def write_tar(path: Path, binary: bytes, extra_name: str | None = None) -> None:
             archive.addfile(info, __import__("io").BytesIO(b"x"))
 
 
-def fixture(root: Path) -> tuple[Path, list[dict]]:
+def fixture(root: Path, release_version: str = "1.2.3") -> tuple[Path, list[dict]]:
     root.mkdir(parents=True, exist_ok=True)
     dist = root / "dist"
     dist.mkdir()
@@ -81,12 +89,31 @@ def fixture(root: Path) -> tuple[Path, list[dict]]:
             ]
         )
     (dist / "artifacts.json").write_text(json.dumps(entries), encoding="utf-8")
+    (dist / "metadata.json").write_text(
+        json.dumps({"version": release_version}), encoding="utf-8"
+    )
     return dist, entries
 
 
-def run(version: str, dist: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    version: str,
+    dist: Path,
+    output: Path,
+    allow_version_mismatch: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(SCRIPT),
+        "--version",
+        version,
+        "--dist",
+        str(dist),
+        "--output",
+        str(output),
+    ]
+    if allow_version_mismatch:
+        command.append("--allow-version-mismatch")
     return subprocess.run(
-        [str(SCRIPT), "--version", version, "--dist", str(dist), "--output", str(output)],
+        command,
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -108,6 +135,8 @@ def test_success_and_contract(root: Path) -> None:
     dist, _ = fixture(root)
     output = root / "stage-stable"
     receipt = assert_success("1.2.3", dist, output)
+    assert receipt["releaseVersion"] == "1.2.3"
+    assert receipt["versionMatchesRelease"] is True
     assert set(receipt["assets"]) == {"launcher", "readme", "license"}
     assert all(Path(item["path"]).is_file() for item in receipt["assets"].values())
     package_dirs = [output / "harness-lint"] + sorted((output / "@kespineira").glob("*"))
@@ -135,7 +164,7 @@ def test_success_and_contract(root: Path) -> None:
 
 
 def test_prerelease_and_version_validation(root: Path) -> None:
-    dist, _ = fixture(root)
+    dist, _ = fixture(root, "1.2.3-rc.1")
     assert_success("1.2.3-rc.1", dist, root / "stage-prerelease")
     for version in ("v1.2.3", "1.2", "01.2.3", "1.2.3-01", "0.1.2+", ""):
         result = run(version, dist, root / f"invalid-{len(version)}")
@@ -171,6 +200,59 @@ def test_unsafe_archive(root: Path) -> None:
     assert result.returncode != 0 and "unsafe" in result.stderr
 
 
+def test_release_metadata_version_gate(root: Path) -> None:
+    dist, _ = fixture(root, "0.1.1-SNAPSHOT-abc123")
+    stable_mismatch = run("1.2.3", dist, root / "stable-mismatch")
+    assert stable_mismatch.returncode != 0
+    assert not (root / "stable-mismatch").exists()
+    assert "does not match GoReleaser release version" in stable_mismatch.stderr
+
+    bootstrap = run(
+        "0.0.0-bootstrap.1",
+        dist,
+        root / "bootstrap",
+        allow_version_mismatch=True,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stderr
+    receipt = json.loads(
+        (root / "bootstrap/staging-receipt.json").read_text(encoding="utf-8")
+    )
+    assert receipt["releaseVersion"] == "0.1.1-SNAPSHOT-abc123"
+    assert receipt["versionMatchesRelease"] is False
+
+    stable_escape = run(
+        "1.2.4", dist, root / "stable-escape", allow_version_mismatch=True
+    )
+    assert stable_escape.returncode != 0
+    assert not (root / "stable-escape").exists()
+
+    for invalid, name in (({}, "missing"), ({"version": ""}, "empty"), ({"version": "not-semver"}, "invalid")):
+        invalid_dist, _ = fixture(root / name)
+        (invalid_dist / "metadata.json").write_text(json.dumps(invalid), encoding="utf-8")
+        result = run("1.2.3", invalid_dist, root / f"metadata-{name}")
+        assert result.returncode != 0
+        assert not (root / f"metadata-{name}").exists()
+
+
+def test_receipt_write_failure_is_atomic(root: Path) -> None:
+    dist, _ = fixture(root)
+    output = root / "receipt-failure"
+    arguments = argparse.Namespace(
+        version="1.2.3",
+        dist=str(dist),
+        output=str(output),
+        allow_version_mismatch=False,
+    )
+    with mock.patch.object(STAGE_MODULE.os, "fsync", side_effect=OSError("injected")):
+        try:
+            STAGE_MODULE.stage(arguments)
+        except STAGE_MODULE.StageError as error:
+            assert "staging receipt" in str(error)
+        else:
+            raise AssertionError("receipt fsync failure unexpectedly succeeded")
+    assert not output.exists()
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="harness-lint-stage-tests-") as temporary:
         root = Path(temporary)
@@ -178,6 +260,8 @@ def main() -> int:
         test_prerelease_and_version_validation(root / "versions")
         test_missing_duplicate_and_wrong_artifacts(root / "artifacts")
         test_unsafe_archive(root / "unsafe")
+        test_release_metadata_version_gate(root / "metadata")
+        test_receipt_write_failure_is_atomic(root / "atomic")
     print("stage npm packages tests passed")
     return 0
 
