@@ -226,6 +226,16 @@ def test_release_metadata_version_gate(root: Path) -> None:
     assert stable_escape.returncode != 0
     assert not (root / "stable-escape").exists()
 
+    build_metadata_dist, _ = fixture(root / "build-metadata", "0.1.1+release-build")
+    build_metadata_only = run(
+        "0.0.0+bootstrap-build",
+        build_metadata_dist,
+        root / "build-metadata-only",
+        allow_version_mismatch=True,
+    )
+    assert build_metadata_only.returncode != 0
+    assert not (root / "build-metadata-only").exists()
+
     for invalid, name in (({}, "missing"), ({"version": ""}, "empty"), ({"version": "not-semver"}, "invalid")):
         invalid_dist, _ = fixture(root / name)
         (invalid_dist / "metadata.json").write_text(json.dumps(invalid), encoding="utf-8")

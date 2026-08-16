@@ -51,6 +51,17 @@ LIFECYCLE_SCRIPTS = {
     "postpack",
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SEMVER_IDENTIFIER = r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+VERSION_RE = re.compile(
+    rf"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    rf"(?:-(?:{SEMVER_IDENTIFIER})(?:\.(?:{SEMVER_IDENTIFIER}))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+def has_prerelease(version: str) -> bool:
+    core = version.split("+", 1)[0]
+    return "-" in core and bool(core.split("-", 1)[1])
 
 
 def fail(message: str) -> None:
@@ -91,7 +102,9 @@ def package_path(staging: Path, name: str) -> Path:
     return staging / name
 
 
-def validate_receipt(staging: Path) -> dict[str, Any]:
+def validate_receipt(
+    staging: Path, allow_prerelease_version_mismatch: bool = False
+) -> dict[str, Any]:
     receipt_path = staging / "staging-receipt.json"
     regular(receipt_path, "staging receipt")
     receipt = read_json(receipt_path)
@@ -101,8 +114,35 @@ def validate_receipt(staging: Path) -> dict[str, Any]:
     release_version = receipt.get("releaseVersion")
     if not isinstance(version, str) or not version:
         fail("staging receipt version must be a non-empty string")
-    if version != release_version or receipt.get("versionMatchesRelease") is not True:
-        fail("staging receipt is not a stable release (versionMatchesRelease must be true)")
+    if not isinstance(release_version, str) or not release_version:
+        fail("staging receipt releaseVersion must be a non-empty string")
+    version_matches_release = receipt.get("versionMatchesRelease")
+    if not isinstance(version_matches_release, bool):
+        fail("staging receipt versionMatchesRelease must be a boolean")
+    versions_are_valid = VERSION_RE.fullmatch(version) and VERSION_RE.fullmatch(release_version)
+    if allow_prerelease_version_mismatch:
+        if (
+            not versions_are_valid
+            or version == release_version
+            or version_matches_release is not False
+            or not has_prerelease(version)
+            or not has_prerelease(release_version)
+        ):
+            fail(
+                "--allow-prerelease-version-mismatch requires two different valid "
+                "semvers with prerelease components and versionMatchesRelease=false"
+            )
+        bootstrap_mode = "prerelease-version-mismatch"
+    else:
+        if version != release_version or version_matches_release is not True:
+            fail("staging receipt is not a stable release (versionMatchesRelease must be true)")
+        bootstrap_mode = "none"
+    stable = (
+        version == release_version
+        and version_matches_release is True
+        and not has_prerelease(version)
+        and not has_prerelease(release_version)
+    )
     packages = receipt.get("packages")
     if not isinstance(packages, list) or len(packages) != len(PACKAGE_ORDER):
         fail("staging receipt must describe exactly five packages")
@@ -191,7 +231,13 @@ def validate_receipt(staging: Path) -> dict[str, Any]:
         name.split("/", 1)[1] for name, _, _ in NATIVE_ORDER
     }:
         fail("staging scope contains unexpected native packages")
-    return {"receipt": receipt, "packages": by_name}
+    return {
+        "receipt": receipt,
+        "packages": by_name,
+        "stable": stable,
+        "versionMatchesRelease": version_matches_release,
+        "bootstrapMode": bootstrap_mode,
+    }
 
 
 def audit_manifest(name: str, package: Path, version: str) -> dict[str, Any]:
@@ -331,6 +377,10 @@ def tree_hashes(root: Path) -> dict[str, str]:
     return result
 
 
+def package_filename(name: str, version: str) -> str:
+    return f"{name.replace('@', '').replace('/', '-')}-{version}.tgz"
+
+
 def pack(args: argparse.Namespace) -> Path:
     staging = Path(args.staging).expanduser().resolve()
     if not staging.is_dir():
@@ -338,15 +388,21 @@ def pack(args: argparse.Namespace) -> Path:
     output = Path(args.output).expanduser().resolve()
     if output.exists():
         fail(f"package output already exists: {output}")
-    validated = validate_receipt(staging)
+    validated = validate_receipt(
+        staging, getattr(args, "allow_prerelease_version_mismatch", False)
+    )
     receipt = validated["receipt"]
     package_entries = validated["packages"]
     version = receipt["version"]
     before = tree_hashes(staging)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    npm_sandbox: Path | None = None
     try:
-        npm_sandbox = temporary / "npm-sandbox"
+        # Keep npm's mutable state outside the output tree. The output tree
+        # is atomically renamed into place only after it contains the exact
+        # audited result, so it must never also contain npm's cache/config.
+        npm_sandbox = Path(tempfile.mkdtemp(prefix=f".{output.name}.npm-", dir=output.parent))
         npm_home = npm_sandbox / "home"
         npm_cache = npm_sandbox / "cache"
         npm_config = npm_sandbox / "npmrc"
@@ -442,6 +498,10 @@ def pack(args: argparse.Namespace) -> Path:
         package_receipt = {
             "schemaVersion": 1,
             "version": version,
+            "releaseVersion": receipt["releaseVersion"],
+            "stable": validated["stable"],
+            "versionMatchesRelease": validated["versionMatchesRelease"],
+            "bootstrapMode": validated["bootstrapMode"],
             "stagingReceipt": str(staging / "staging-receipt.json"),
             "stagingReceiptSha256": sha256(staging / "staging-receipt.json"),
             "packOrder": PACKAGE_ORDER,
@@ -449,17 +509,35 @@ def pack(args: argparse.Namespace) -> Path:
         }
         receipt_path = temporary / "package-receipt.json"
         receipt_path.write_text(json.dumps(package_receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        expected_entries = {
+            "package-receipt.json",
+            *(package_filename(name, version) for name in PACKAGE_ORDER),
+        }
+        actual_entries = {path.name for path in temporary.iterdir()}
+        if actual_entries != expected_entries or any(not path.is_file() for path in temporary.iterdir()):
+            fail(
+                "temporary package output must contain exactly the five expected tgz files "
+                "and package-receipt.json"
+            )
         os.replace(temporary, output)
         return output / "package-receipt.json"
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+    finally:
+        if npm_sandbox is not None:
+            shutil.rmtree(npm_sandbox, ignore_errors=True)
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--staging", required=True, help="existing staged npm package directory")
     result.add_argument("--output", required=True, help="new directory for audited npm tarballs")
+    result.add_argument(
+        "--allow-prerelease-version-mismatch",
+        action="store_true",
+        help="allow only the documented bootstrap with two different prerelease semvers",
+    )
     return result
 
 

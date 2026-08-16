@@ -22,23 +22,32 @@ NATIVES = [
 VERSION = "1.2.3"
 
 
-def fixture(root: Path) -> Path:
+def fixture(
+    root: Path,
+    version: str = VERSION,
+    release_version: str | None = None,
+    version_matches_release: bool | None = None,
+) -> Path:
+    if release_version is None:
+        release_version = version
+    if version_matches_release is None:
+        version_matches_release = version == release_version
     staging = root / "staging"
     staging.mkdir(parents=True)
     native_names = {name for name, _, _ in NATIVES}
     root_manifest = {
         "name": "harness-lint",
-        "version": VERSION,
+        "version": version,
         "bin": {"harness-lint": "bin/harness-lint.js"},
         "files": ["bin/harness-lint.js", "README.md", "LICENSE"],
-        "optionalDependencies": {name: VERSION for name in native_names},
+        "optionalDependencies": {name: version for name in native_names},
     }
     write_package(staging / "harness-lint", root_manifest, {"bin/harness-lint.js": b"#!/usr/bin/env node\n"})
     for name, platform, arch in NATIVES:
         package = staging / name
         manifest = {
             "name": name,
-            "version": VERSION,
+            "version": version,
             "files": ["bin/harness-lint", "README.md", "LICENSE"],
             "os": [platform],
             "cpu": [arch],
@@ -72,13 +81,17 @@ def fixture(root: Path) -> Path:
                 }
             }
         packages.append(item)
+    # Receipt file arrays are sets of path/hash/mode records, not an ordered
+    # serialization contract.
+    for item in packages:
+        item["files"].reverse()
     (staging / "staging-receipt.json").write_text(
         json.dumps(
             {
                 "schemaVersion": 1,
-                "version": VERSION,
-                "releaseVersion": VERSION,
-                "versionMatchesRelease": True,
+                "version": version,
+                "releaseVersion": release_version,
+                "versionMatchesRelease": version_matches_release,
                 "packages": packages,
             }
         ),
@@ -99,9 +112,16 @@ def write_package(package: Path, manifest: dict, files: dict[str, bytes]) -> Non
         path.chmod(0o755)
 
 
-def run(staging: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    staging: Path,
+    output: Path,
+    allow_prerelease_version_mismatch: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    command = [str(SCRIPT), "--staging", str(staging), "--output", str(output)]
+    if allow_prerelease_version_mismatch:
+        command.append("--allow-prerelease-version-mismatch")
     return subprocess.run(
-        [str(SCRIPT), "--staging", str(staging), "--output", str(output)],
+        command,
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -124,6 +144,13 @@ def test_pack_and_root_last(root: Path) -> None:
         (staging / "staging-receipt.json").read_bytes()
     ).hexdigest()
     assert len(list(output.glob("*.tgz"))) == 5
+    expected_entries = {
+        "package-receipt.json",
+        *(name.replace("@", "").replace("/", "-") + "-1.2.3.tgz" for name in expected_order),
+    }
+    assert {path.name for path in output.iterdir()} == expected_entries
+    assert not any(path.is_dir() for path in output.iterdir())
+    assert not list(root.glob(".packed.*"))
     assert before == {path: path.read_bytes() for path in staging.rglob("*") if path.is_file()}
     assert not (staging / "harness-lint" / "harness-lint-1.2.3.tgz").exists()
     assert run(staging, output).returncode != 0
@@ -136,18 +163,18 @@ def test_dry_run_rejects_missing_and_extra_content(root: Path) -> None:
     assert result.returncode != 0
 
 
-def test_receipt_detects_staged_mutations(root: Path) -> None:
+def test_receipt_detects_unsealed_staged_mutations(root: Path) -> None:
     staging = fixture(root / "native")
     native = staging / NATIVES[0][0] / "bin/harness-lint"
     native.write_bytes(b"mutated native\n")
     result = run(staging, root / "native-out")
-    assert result.returncode != 0
+    assert result.returncode != 0 and "staged file hash differs from staging receipt" in result.stderr
 
     staging = fixture(root / "other")
     readme = staging / "harness-lint" / "README.md"
     readme.write_text("mutated readme\n", encoding="utf-8")
     result = run(staging, root / "other-out")
-    assert result.returncode != 0 and "staging receipt" in result.stderr
+    assert result.returncode != 0 and "staged file hash differs from staging receipt" in result.stderr
 
     staging = fixture(root / "extra")
     manifest_path = staging / "harness-lint" / "package.json"
@@ -156,17 +183,61 @@ def test_receipt_detects_staged_mutations(root: Path) -> None:
     (staging / "harness-lint" / "extra.txt").write_text("unexpected")
     manifest_path.write_text(json.dumps(manifest))
     result = run(staging, root / "extra-out")
-    assert result.returncode != 0 and "staging receipt" in result.stderr
+    assert result.returncode != 0 and "staged file hash differs from staging receipt" in result.stderr
 
 
-def test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root: Path) -> None:
+def reseal_manifest(staging: Path, package_name: str) -> None:
+    receipt_path = staging / "staging-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    package = staging / package_name
+    manifest = package / "package.json"
+    item = next(item for item in receipt["packages"] if item["name"] == package_name)
+    file_entry = next(file for file in item["files"] if file["path"] == "package.json")
+    file_entry["sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    file_entry["mode"] = format(stat.S_IMODE(manifest.stat().st_mode), "04o")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_manifest_policy_diagnostics(root: Path) -> None:
     staging = fixture(root / "version")
     manifest_path = staging / "harness-lint" / "package.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["version"] = "1.2.4"
     manifest_path.write_text(json.dumps(manifest))
-    assert run(staging, root / "version-out").returncode != 0
+    reseal_manifest(staging, "harness-lint")
+    result = run(staging, root / "version-out")
+    assert result.returncode != 0 and "harness-lint manifest has the wrong name or version" in result.stderr
+    assert not list(root.glob(".version-out.*"))
 
+    staging = fixture(root / "lifecycle")
+    manifest_path = staging / "harness-lint" / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scripts"] = {"install": "echo bad"}
+    manifest_path.write_text(json.dumps(manifest))
+    reseal_manifest(staging, "harness-lint")
+    result = run(staging, root / "lifecycle-out")
+    assert result.returncode != 0 and "harness-lint manifest contains lifecycle scripts" in result.stderr
+
+    staging = fixture(root / "bin")
+    manifest_path = staging / NATIVES[0][0] / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["bin"] = {"harness-lint": "bin/harness-lint"}
+    manifest_path.write_text(json.dumps(manifest))
+    reseal_manifest(staging, NATIVES[0][0])
+    result = run(staging, root / "bin-out")
+    assert result.returncode != 0 and "native manifest must not define a bin field" in result.stderr
+
+    staging = fixture(root / "optional")
+    manifest_path = staging / "harness-lint" / "package.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["optionalDependencies"][NATIVES[0][0]] = "^" + VERSION
+    manifest_path.write_text(json.dumps(manifest))
+    reseal_manifest(staging, "harness-lint")
+    result = run(staging, root / "optional-out")
+    assert result.returncode != 0 and "root optionalDependencies must contain exact versions" in result.stderr
+
+
+def test_rejects_version_receipt_and_bootstrap_contracts(root: Path) -> None:
     staging = fixture(root / "receipt")
     receipt_path = staging / "staging-receipt.json"
     receipt = json.loads(receipt_path.read_text())
@@ -175,27 +246,67 @@ def test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root: Path) 
     result = run(staging, root / "receipt-out")
     assert result.returncode != 0 and "versionMatchesRelease" in result.stderr
 
-    staging = fixture(root / "lifecycle")
-    manifest_path = staging / "harness-lint" / "package.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["scripts"] = {"install": "echo bad"}
-    manifest_path.write_text(json.dumps(manifest))
-    assert run(staging, root / "lifecycle-out").returncode != 0
+    staging = fixture(
+        root / "bootstrap",
+        version="0.0.0-bootstrap.1",
+        release_version="0.1.1-SNAPSHOT-abc123",
+        version_matches_release=False,
+    )
+    result = run(
+        staging,
+        root / "bootstrap-out",
+        allow_prerelease_version_mismatch=True,
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((root / "bootstrap-out/package-receipt.json").read_text())
+    assert receipt["stable"] is False
+    assert receipt["versionMatchesRelease"] is False
+    assert receipt["bootstrapMode"] == "prerelease-version-mismatch"
 
-    staging = fixture(root / "bin")
-    manifest_path = staging / NATIVES[0][0] / "package.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["bin"] = {"harness-lint": "bin/harness-lint"}
-    manifest_path.write_text(json.dumps(manifest))
-    result = run(staging, root / "bin-out")
-    assert result.returncode != 0
+    result = run(
+        fixture(
+            root / "stable",
+            version="1.2.4",
+            release_version=VERSION,
+            version_matches_release=False,
+        ),
+        root / "stable-out",
+        allow_prerelease_version_mismatch=True,
+    )
+    assert result.returncode != 0 and not (root / "stable-out").exists()
 
-    staging = fixture(root / "optional")
-    manifest_path = staging / "harness-lint" / "package.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["optionalDependencies"][NATIVES[0][0]] = "^" + VERSION
-    manifest_path.write_text(json.dumps(manifest))
-    assert run(staging, root / "optional-out").returncode != 0
+    result = run(
+        fixture(
+            root / "build-metadata",
+            version="0.0.0+bootstrap-build",
+            release_version="0.1.1+release-build",
+            version_matches_release=False,
+        ),
+        root / "build-metadata-out",
+        allow_prerelease_version_mismatch=True,
+    )
+    assert result.returncode != 0 and not (root / "build-metadata-out").exists()
+
+    result = run(
+        fixture(
+            root / "equal",
+            version="1.2.3-rc.1",
+            release_version="1.2.3-rc.1",
+            version_matches_release=True,
+        ),
+        root / "equal-out",
+        allow_prerelease_version_mismatch=True,
+    )
+    assert result.returncode != 0 and not (root / "equal-out").exists()
+
+    invalid = fixture(
+        root / "invalid",
+        version="not-semver",
+        release_version="1.2.3-rc.1",
+        version_matches_release=False,
+    )
+    result = run(invalid, root / "invalid-out", allow_prerelease_version_mismatch=True)
+    assert result.returncode != 0 and not (root / "invalid-out").exists()
 
 
 def main() -> int:
@@ -203,8 +314,9 @@ def main() -> int:
         root = Path(directory)
         test_pack_and_root_last(root / "success")
         test_dry_run_rejects_missing_and_extra_content(root / "contents")
-        test_receipt_detects_staged_mutations(root / "mutations")
-        test_rejects_version_lifecycle_native_bin_and_optional_mismatch(root / "contracts")
+        test_receipt_detects_unsealed_staged_mutations(root / "mutations")
+        test_manifest_policy_diagnostics(root / "manifest-policy")
+        test_rejects_version_receipt_and_bootstrap_contracts(root / "contracts")
     print("pack npm packages tests passed")
     return 0
 

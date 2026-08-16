@@ -41,6 +41,11 @@ ROOT_FILES = {"package.json", "bin/harness-lint.js", "README.md", "LICENSE"}
 NATIVE_FILES = {"package.json", "bin/harness-lint", "README.md", "LICENSE"}
 
 
+def has_prerelease(version: str) -> bool:
+    core = version.split("+", 1)[0]
+    return "-" in core and bool(core.split("-", 1)[1])
+
+
 class StageError(Exception):
     pass
 
@@ -333,7 +338,7 @@ def stage(args: argparse.Namespace) -> Path:
                 f"({args.version!r} != {release_version!r}); "
                 "pass --allow-version-mismatch only for non-stable snapshot/bootstrap staging"
             )
-        if "-" not in args.version or "-" not in release_version:
+        if not has_prerelease(args.version) or not has_prerelease(release_version):
             fail("--allow-version-mismatch is only permitted for non-stable snapshot/bootstrap versions")
     metadata = read_json(npm_root / "metadata.json")
     native_specs = validate_metadata(metadata)
