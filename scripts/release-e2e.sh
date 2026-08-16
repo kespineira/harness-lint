@@ -119,11 +119,14 @@ if command -v dpkg-deb >/dev/null 2>&1; then
         [ "$(dpkg-deb --field "$package" Package)" = harness-lint ] || fail 'Debian package name mismatch'
         [ "$(dpkg-deb --field "$package" Version)" = "$deb_version" ] || fail 'Debian package version mismatch'
         [ "$(dpkg-deb --field "$package" Architecture)" = "$arch" ] || fail 'Debian package architecture mismatch'
+        [ "$(dpkg-deb --field "$package" Homepage)" = https://github.com/kespineira/harness-lint ] || fail 'Debian package Homepage mismatch'
         dpkg-deb --contents "$package" | awk '$NF == "./usr/bin/harness-lint" { found=1 } END { exit !found }' || fail 'Debian package misses /usr/bin/harness-lint'
+        dpkg-deb --contents "$package" | awk '$NF == "./usr/share/doc/harness-lint/LICENSE" { found=1 } END { exit !found }' || fail 'Debian package misses LICENSE payload'
         extract=$work_dir/deb-$arch
         mkdir -p "$extract"
         dpkg-deb --extract "$package" "$extract" >/dev/null
         [ -x "$extract/usr/bin/harness-lint" ] || fail 'Debian payload is not executable'
+        cmp -s LICENSE "$extract/usr/share/doc/harness-lint/LICENSE" || fail 'Debian LICENSE payload differs from repository LICENSE'
         echo "validated Debian metadata and payload $(basename "$package") (not executed)"
     done
 else
@@ -135,9 +138,10 @@ if command -v rpm >/dev/null 2>&1; then
     rpm_release=1
     case "$version" in
         *-*)
-            rpm_version=${version%%-*}
-            rpm_release=${version#*-}
-            rpm_release=$(printf '%s' "$rpm_release" | tr '-' '.')
+            # nFPM maps the first prerelease separator to '~' and subsequent
+            # separators to '_'; RPM release remains the package release 1.
+            rpm_version=${version%%-*}~${version#*-}
+            rpm_version=$(printf '%s' "$rpm_version" | tr '-' '_')
             ;;
     esac
     for arch in amd64 arm64; do
@@ -145,6 +149,7 @@ if command -v rpm >/dev/null 2>&1; then
         [ "$(rpm -qp --qf '%{NAME}' "$package")" = harness-lint ] || fail 'RPM package name mismatch'
         [ "$(rpm -qp --qf '%{VERSION}' "$package")" = "$rpm_version" ] || fail 'RPM package version mismatch'
         [ "$(rpm -qp --qf '%{RELEASE}' "$package")" = "$rpm_release" ] || fail 'RPM package release mismatch'
+        [ "$(rpm -qp --qf '%{LICENSE}' "$package")" = Apache-2.0 ] || fail 'RPM license metadata mismatch'
         rpm_arch=$(rpm -qp --qf '%{ARCH}' "$package")
         case "$arch/$rpm_arch" in amd64/x86_64|arm64/aarch64|arm64/arm64) ;; *) fail 'RPM architecture mismatch' ;; esac
         rpm -qpl "$package" | grep -Fx '/usr/bin/harness-lint' >/dev/null || fail 'RPM misses /usr/bin/harness-lint'
@@ -169,6 +174,7 @@ for arch in amd64 arm64; do
     gzip -dc "$package" | tar -xOf - .PKGINFO > "$work_dir/apk-$arch.pkginfo" || fail 'APK has no .PKGINFO'
     grep -Fx 'pkgname = harness-lint' "$work_dir/apk-$arch.pkginfo" >/dev/null || fail 'APK package name mismatch'
     grep -Fx "pkgver = $apk_version" "$work_dir/apk-$arch.pkginfo" >/dev/null || fail 'APK package version mismatch'
+    grep -Fx 'license = Apache-2.0' "$work_dir/apk-$arch.pkginfo" >/dev/null || fail 'APK license metadata mismatch'
     case "$arch" in amd64) apk_arch=x86_64 ;; arm64) apk_arch=aarch64 ;; esac
     grep -Fx "arch = $apk_arch" "$work_dir/apk-$arch.pkginfo" >/dev/null || fail 'APK architecture mismatch'
     extract=$work_dir/apk-$arch

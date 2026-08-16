@@ -67,20 +67,24 @@ printf '%s\n' "$release_block" | grep -Eq '^      contents: write$' ||
 printf '%s\n' "$release_block" | grep -Eq '^      id-token: write$' ||
     fail 'release job cannot obtain an OIDC identity token'
 
-# Every referenced action is pinned to a full immutable commit.  Checkout is
-# additionally locked to the reviewed commit, including CI and all release jobs.
+# Every referenced action is pinned to a full immutable commit, and each
+# release action is locked to the reviewed commit, including CI and all
+# release jobs.
 bad_pins=$(grep -hE '^[[:space:]]*uses:' "$release_workflow" "$ci_workflow" |
     grep -Ev '@[0-9a-f]{40}([[:space:]]|#|$)' || true)
 [ -z "$bad_pins" ] || fail "an action is not pinned to a full commit: $bad_pins"
-checkout_hashes=$(grep -hE '^[[:space:]]*uses:[[:space:]]*actions/checkout@' "$release_workflow" "$ci_workflow" |
-    sed -E 's/.*@([0-9a-f]{40}).*/\1/')
-[ -n "$checkout_hashes" ] || fail 'no checkout action was found'
-while IFS= read -r checkout_hash; do
-    [ "$checkout_hash" = 3d3c42e5aac5ba805825da76410c181273ba90b1 ] ||
-        fail "checkout action is not pinned to the reviewed commit: $checkout_hash"
-done <<EOF_CHECKOUT
-$checkout_hashes
-EOF_CHECKOUT
+assert_action_pin() {
+    action=$1
+    expected=$2
+    refs=$(grep -hE "^[[:space:]]*uses:[[:space:]]*${action}@" "$release_workflow" "$ci_workflow" || true)
+    [ -n "$refs" ] || fail "no $action action was found"
+    wrong_refs=$(printf '%s\n' "$refs" | grep -Ev "@${expected}([[:space:]]|#|$)" || true)
+    [ -z "$wrong_refs" ] || fail "$action action is not pinned to the reviewed commit: $wrong_refs"
+}
+assert_action_pin actions/checkout 3d3c42e5aac5ba805825da76410c181273ba90b1
+assert_action_pin actions/setup-go b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+assert_action_pin goreleaser/goreleaser-action f06c13b6b1a9625abc9e6e439d9c05a8f2190e94
+assert_action_pin sigstore/cosign-installer 6f9f17788090df1f26f669e9d70d6ae9567deba6
 
 # GoReleaser must never replace an existing draft or artifact.  Keep these
 # explicit false settings, and reject similarly named clobber/replacement knobs.
