@@ -265,13 +265,66 @@ def test_audit_rejects_missing_invalid_and_unattested() -> None:
             output = json.dumps(report) if command[1] == "audit" else ""
             return subprocess.CompletedProcess(command, 0, output, "")
 
-        with mock.patch.object(module.subprocess, "run", fake_run):
+        with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
             try:
                 module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
             except module.PublishError:
-                pass
+                assert not sleep.called
             else:
                 raise AssertionError(f"accepted bad npm audit report: {report}")
+
+
+def test_audit_retries_propagation_then_succeeds() -> None:
+    target = {"name": "pkg", "version": "1.0.0"}
+    verified = {
+        **target,
+        "attestations": {
+            "provenance": {"predicateType": "https://slsa.dev/provenance/v1"}
+        },
+    }
+    audit_calls = 0
+    install_calls = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal audit_calls, install_calls
+        if command[1] == "install":
+            install_calls += 1
+            if install_calls == 1:
+                return subprocess.CompletedProcess(command, 1, "", "package is not resolved yet")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        audit_calls += 1
+        if audit_calls == 1:
+            return subprocess.CompletedProcess(command, 1, "", "attestation endpoint not found yet")
+        report = {"verified": [] if audit_calls == 2 else [verified], "missing": [], "invalid": []}
+        return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+
+    with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
+        module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+    assert install_calls == 4
+    assert audit_calls == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [2, 4, 8]
+
+
+def test_audit_propagation_retry_is_bounded() -> None:
+    report = {"verified": [], "missing": [], "invalid": []}
+    calls = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal calls
+        if command[1] == "audit":
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
+        try:
+            module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+        except module.PublishError as error:
+            assert "after bounded retry" in str(error)
+        else:
+            raise AssertionError("accepted an unattested package after bounded retry")
+    assert calls == module.MAX_ATTEMPTS
+    assert [call.args[0] for call in sleep.call_args_list] == list(module.RETRY_DELAYS)
 
 
 def main() -> int:
@@ -280,6 +333,8 @@ def main() -> int:
     test_native_order_resume_and_root_gate()
     test_existing_mismatch_fails_closed_and_receipts_are_bound()
     test_audit_rejects_missing_invalid_and_unattested()
+    test_audit_retries_propagation_then_succeeds()
+    test_audit_propagation_retry_is_bounded()
     print("publish npm packages tests passed")
     return 0
 

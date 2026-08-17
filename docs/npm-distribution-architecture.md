@@ -9,19 +9,27 @@
 **Scope:** npm distribution of the existing Go CLI, including the accepted
 tag-triggered release workflow and npm package manifests.
 
-This ADR records the accepted workflow contract, not a publication result; no
-successful npm registry publication is asserted here.
+This ADR records the accepted workflow contract and the current immutable
+fix-forward state; it does not treat a partial npm publication as a complete
+release.
 
 ## Current fix-forward status
 
-The `v0.1.2` tag's release run `32030039779` created canonical GitHub draft
-assets and Homebrew cask state but failed in `npm-publish` before invoking npm.
-The prior `actions/setup-node` configuration used `registry-url` and exported
-a placeholder `NODE_AUTH_TOKEN=XXXXX...`; the publisher correctly rejected
-that token-auth environment. All five public `0.1.2` npm endpoints remain
-unpublished (HTTP 404), so `v0.1.2` and its draft are immutable history, not a
-release to retry or edit. `v0.1.3` is the first intended stable npm/npx
-release and must use a new fix-forward tag.
+The annotated `v0.1.3` publication is partial and immutable:
+`@kespineira/harness-lint-darwin-arm64@0.1.3` is public, while the other four
+stable npm package versions were not published. npm 11.5.1 reached
+`npm audit signatures --json --include-attestations`, but warned that the
+attestation option was unknown and did not report the required verified
+provenance; the GitHub `v0.1.3` Release remains a draft. Never retry or reuse
+`v0.1.3`; `v0.1.4` is the fix-forward candidate.
+
+The earlier `v0.1.2` tag's release run `32030039779` created canonical GitHub
+draft assets and Homebrew cask state but failed in `npm-publish` before
+invoking npm. Its prior `actions/setup-node` configuration used `registry-url`
+and exported a placeholder `NODE_AUTH_TOKEN=XXXXX...`; the publisher correctly
+rejected that token-auth environment. All five public `0.1.2` npm endpoints
+remain unpublished (HTTP 404), so `v0.1.2` and its draft are immutable history,
+not releases to retry or edit.
 
 The accepted contract remains bootstrap-aware, exact-tag-derived, immutable,
 native-first/root-last, Trusted Publishing/OIDC with provenance, and strictly
@@ -60,10 +68,10 @@ in `node_modules`.
 ## Version and artifact contract
 
 The existing release workflow is `.github/workflows/release.yml`; its
-annotated stable tag contract is `vX.Y.Z`. For the intended first stable npm
-release tag `v0.1.3`, every one of the five package manifests has npm version
-`0.1.3` (strip exactly the leading `v`; never publish `v0.1.3`). The root
-package's optional dependency ranges are exact `0.1.3`, not a caret or a
+annotated stable tag contract is `vX.Y.Z`. For the fix-forward candidate
+release tag `v0.1.4`, every one of the five package manifests has npm version
+`0.1.4` (strip exactly the leading `v`; never publish `v0.1.4`). The root
+package's optional dependency ranges are exact `0.1.4`, not a caret or a
 dist-tag. A release is not ready until
 all five package directories contain the same derived version.
 
@@ -103,7 +111,12 @@ workflow filename: release.yml
 The filename is exactly `release.yml`, not `.github/workflows/release.yml`.
 The accepted workflow's separate npm publishing job explicitly grants
 `id-token: write` and runs on a GitHub-hosted runner. The npm job also has
-`contents: read`, Node >=22.14.0, and npm >=11.5.1. The publisher passes
+`contents: read`, Node >=22.14.0, and npm 11.12.1. npm 11.12.1 is the reviewed
+CLI because coordinator verification against the public
+`@kespineira/harness-lint-darwin-arm64@0.1.3` record returned a verified
+provenance attestation with predicate type
+`https://slsa.dev/provenance/v1`; npm 11.5.1 does not support the required
+attestation-audit option. The publisher passes
 `--registry https://registry.npmjs.org` explicitly and isolates npm
 configuration; the workflow must not configure `registry-url`, `NPM_TOKEN`, or
 `NODE_AUTH_TOKEN`.
@@ -114,11 +127,12 @@ passes `npm publish --provenance` and verifies the resulting attestation with
 `npm audit signatures --include-attestations`. Keep package `repository.url`
 exactly equal (including case) to the GitHub repository URL.
 
-Stable `v0.1.3` is the first intended OIDC npm release: all five packages must be published by
-the configured Trusted Publishers, with npm's automatic provenance enabled.
-Do not create or push the `v0.1.3` tag until all five names have been created
-by bootstrap and all five trusted-publisher configurations have been saved
-and checked. Normal release jobs must not define, read, or rely on an
+Stable `v0.1.4` is the fix-forward OIDC npm release: all five packages must be
+published by the configured Trusted Publishers, with npm's automatic
+provenance enabled. Do not create or push the `v0.1.4` tag until all five names
+exist and all five trusted-publisher configurations have been saved and
+checked. The existing immutable `v0.1.3` publication must not be reused.
+Normal release jobs must not define, read, or rely on an
 `NPM_TOKEN` or any other long-lived npm publish token.
 
 The account should restrict traditional token publishing after trust is
@@ -149,7 +163,11 @@ The exact order is:
    and OIDC. The order is `darwin-arm64`, `darwin-x64`, `linux-arm64`, then
    `linux-x64`. Query the registry after each publish and require the exact
    name/version, `latest` dist-tag, tarball integrity, repository/platform
-   metadata, and provenance record before continuing.
+   metadata, and provenance record before continuing. The publisher retries
+   only bounded propagation states while this record becomes visible: an
+   unresolved consumer install, a temporarily unavailable attestation
+   endpoint, or valid JSON with no verified match. Invalid/missing signature
+   records and metadata or integrity mismatches fail closed.
 4. Publish `harness-lint` last with the same OIDC command. Query the registry
    and require the exact root version, `latest` tag, integrity, exact native
    optional dependencies, and provenance record.
@@ -224,8 +242,9 @@ assurance alternative, but it does not solve first-package bootstrap.
 ## Historical pre-`v0.1.2` bootstrap
 
 This section preserves the one-time bootstrap history. It must not be used to
-recreate or retry `v0.1.2`; the first intended stable npm/npx release is
-`v0.1.3`, using a new immutable tag and the same bootstrap prerequisites.
+recreate or retry `v0.1.2`; the next complete stable npm/npx release is the
+`v0.1.4` fix-forward candidate, using a new immutable tag and the same
+bootstrap prerequisites.
 
 The registry check on 2026-08-16T13:13Z used unauthenticated GET requests to
 `https://registry.npmjs.org/<encoded-name>` and returned HTTP 404 for all five
@@ -238,7 +257,7 @@ and publication succeed.
 npm's Trusted Publishing and staged publishing flows require an existing
 package, so they cannot create the first registry record. Before the
 historical `v0.1.2` tag, this one-time bootstrap procedure was required; the
-next stable tag must be `v0.1.3`:
+next complete stable tag must be `v0.1.4`:
 
 1. Prepare the release-ready commit without creating or pushing `v0.1.2`.
    Build one coherent GoReleaser snapshot with
@@ -266,7 +285,7 @@ next stable tag must be `v0.1.3`:
    proceeding.
 4. Only after package existence, scope/name ownership, and all five trusted
    publishers are configured may the release-ready commit receive and push
-   the annotated `v0.1.3` tag. The stable workflow then publishes all five
+   the annotated `v0.1.4` tag. The stable workflow then publishes all five
    packages through Trusted Publishing/OIDC with npm automatic provenance;
    it does not use `NPM_TOKEN` or any other long-lived npm token.
 
@@ -275,11 +294,11 @@ provenance release: npm provenance requires a supported cloud-hosted CI/CD
 publisher and OIDC build identity. A canonical GoReleaser snapshot makes the
 bootstrap native binaries reproducible and aligned with the project release,
 but it does not create npm provenance attestations for those human-published
-bootstrap package versions. The first intended stable `v0.1.3` packages are
-the provenance-bearing OIDC publication. After that release, every package
+bootstrap package versions. The `v0.1.4` packages are the provenance-bearing
+OIDC fix-forward publication. After that release, every package
 must retain the durable dist-tag state `bootstrap=0.0.0-bootstrap.1` and
-`latest=0.1.3`. The existing publisher registry verification enforces the
-stable version and `latest=0.1.3`; it does not require or authorize removing
+`latest=0.1.4`. The existing publisher registry verification enforces the
+stable version and `latest=0.1.4`; it does not require or authorize removing
 the bootstrap pointer. Do not commit or configure an `NPM_TOKEN` for normal
 releases; if the maintainer later chooses another officially supported
 bootstrap path, it must preserve the bootstrap tag and must not weaken the
@@ -306,7 +325,8 @@ checks each public registry record and requires
 `npm audit signatures --include-attestations` to show the matching provenance
 attestation; the published-release consumer workflow separately validates the
 public GitHub Release, installer, and Homebrew cask. These checks are evidence
-requirements, not a claim that npm publication has already succeeded.
+requirements for a complete release, not a claim that the partial `v0.1.3`
+publication is complete.
 
 ## External prerequisites and blockers
 
@@ -317,14 +337,14 @@ requirements, not a claim that npm publication has already succeeded.
   publishing or approval is selected.
 - A public GitHub repository and exact `repository.url` in every manifest so
   npm can attach provenance to the intended source.
-- GitHub-hosted runners, Node >=22.14.0, npm >=11.5.1 (and npm >=11.15.0
+- GitHub-hosted runners, Node >=22.14.0, npm 11.12.1 (and npm >=11.15.0
   when staging), `id-token: write`, and the exact trusted-publisher workflow
   filename `release.yml` configured independently on all five packages.
 - An authenticated npm maintainer with 2FA for the one-time `bootstrap`-tagged
   publication. npm may temporarily assign `latest` to that first publication;
   no `NPM_TOKEN` is committed or configured for normal releases, and after
   bootstrap every stable publish uses Trusted Publishing/OIDC.
-- A hard gate forbidding creation or push of `v0.1.3` until all five package
+- A hard gate forbidding creation or push of `v0.1.4` until all five package
   names exist and all five trusted-publisher configurations are saved.
 - The accepted implementation is in `.github/workflows/release.yml`,
   `npm/metadata.json`, the npm templates, and the staging/packing/publishing

@@ -8,6 +8,9 @@ project_root=$(CDPATH=; cd -- "$script_dir/.." && pwd)
 release_workflow=$project_root/.github/workflows/release.yml
 ci_workflow=$project_root/.github/workflows/ci.yml
 goreleaser_config=$project_root/.goreleaser.yml
+# npm 11.12.1 is the reviewed release CLI: unlike the former 11.5.1 pin, it
+# supports the provenance-attestation audit used by the OIDC publisher.
+reviewed_npm_version=11.12.1
 
 fail() {
     echo "release workflow test: $*" >&2
@@ -57,8 +60,10 @@ for e2e_job in release-e2e-linux release-e2e-macos; do
     e2e_block=$(job_block "$e2e_job")
     printf '%s\n' "$e2e_block" | grep -Fq "node-version: '22.14.0'" ||
         fail "$e2e_job does not pin the reviewed Node.js version"
-    printf '%s\n' "$e2e_block" | grep -Fq 'npm install --global npm@11.5.1' ||
+    printf '%s\n' "$e2e_block" | grep -Fq "npm install --global npm@$reviewed_npm_version" ||
         fail "$e2e_job does not install the reviewed npm version"
+    printf '%s\n' "$e2e_block" | grep -Fq "test \"\$(npm --version)\" = '$reviewed_npm_version'" ||
+        fail "$e2e_job does not verify the reviewed npm version"
     printf '%s\n' "$e2e_block" | grep -Fq './scripts/npm-package-e2e.sh --dist dist' ||
         fail "$e2e_job does not run the real npm package E2E"
 done
@@ -77,6 +82,10 @@ if printf '%s\n' "$homebrew_block" | grep -Fq -- '--online'; then
     fail 'Homebrew E2E performs network-dependent audit against snapshot URLs'
 fi
 release_block=$(job_block release)
+printf '%s\n' "$release_block" | grep -Fq "npm install --global npm@$reviewed_npm_version" ||
+    fail 'stable release job does not install the reviewed npm version'
+printf '%s\n' "$release_block" | grep -Fq "test \"\$(npm --version)\" = '$reviewed_npm_version'" ||
+    fail 'stable release job does not verify the reviewed npm version'
 printf '%s\n' "$release_block" | grep -Fq 'name: Run stable release quality gate' ||
     fail 'stable release job has no named quality gate'
 printf '%s\n' "$release_block" | grep -Fq 'run: ./scripts/release-workflow-test.sh' ||
@@ -173,6 +182,10 @@ printf '%s\n' "$release_block" | grep -Fq 'Upload audited npm publication inputs
 printf '%s\n' "$release_block" | grep -Fq 'path: dist/npm-packages' ||
     fail 'canonical release job does not upload the expected npm package directory'
 npm_block=$(job_block npm-publish)
+printf '%s\n' "$npm_block" | grep -Fq "npm install --global npm@$reviewed_npm_version" ||
+    fail 'npm publish job does not install the reviewed npm version'
+printf '%s\n' "$npm_block" | grep -Fq "test \"\$(npm --version)\" = '$reviewed_npm_version'" ||
+    fail 'npm publish job does not verify the reviewed npm version'
 printf '%s\n' "$npm_block" | grep -Eq '^    needs: release$' ||
     fail 'npm publish job is not gated on canonical release job'
 printf '%s\n' "$npm_block" | grep -Eq '^      id-token: write$' ||

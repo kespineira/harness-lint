@@ -44,6 +44,10 @@ class PublishError(Exception):
     pass
 
 
+class RetryableProvenanceError(PublishError):
+    """A registry propagation state that may become verifiable shortly."""
+
+
 def fail(message: str) -> None:
     raise PublishError(message)
 
@@ -122,7 +126,28 @@ def fetch_packument(registry: str, name: str) -> dict[str, Any] | None:
     return payload
 
 
-def verify_audit_signatures(name: str, version: str, registry: str) -> None:
+def attestation_endpoint_unavailable(detail: str) -> bool:
+    """Recognize npm errors caused by an attestation endpoint not being ready."""
+    normalized = detail.lower()
+    mentions_attestation = "attest" in normalized or "provenance" in normalized
+    propagation_markers = (
+        "404",
+        "e404",
+        "not found",
+        "not available",
+        "unavailable",
+        "not yet",
+        "pending",
+        "propagat",
+        "timed out",
+        "timeout",
+        "eai_again",
+        "enotfound",
+    )
+    return mentions_attestation and any(marker in normalized for marker in propagation_markers)
+
+
+def _verify_audit_signatures_once(name: str, version: str, registry: str) -> None:
     """Use npm's documented consumer verification path for provenance."""
     with tempfile.TemporaryDirectory(prefix="harness-lint-npm-signatures-") as directory:
         root = Path(directory)
@@ -155,7 +180,9 @@ def verify_audit_signatures(name: str, version: str, registry: str) -> None:
         )
         if install.returncode != 0:
             detail = install.stderr.strip() or install.stdout.strip()
-            fail(f"isolated npm install for provenance audit failed for {name}: {detail}")
+            raise RetryableProvenanceError(
+                f"isolated npm install for provenance audit is not ready for {name}: {detail}"
+            )
         audit = subprocess.run(
             [
                 "npm",
@@ -172,13 +199,17 @@ def verify_audit_signatures(name: str, version: str, registry: str) -> None:
             capture_output=True,
             check=False,
         )
+        detail = "\n".join(part for part in (audit.stderr.strip(), audit.stdout.strip()) if part)
+        if audit.returncode != 0 and attestation_endpoint_unavailable(detail):
+            raise RetryableProvenanceError(
+                f"npm provenance attestation endpoint is not ready for {name}: {detail}"
+            )
         try:
             report = json.loads(audit.stdout)
         except json.JSONDecodeError as error:
             fail(f"npm audit signatures returned invalid JSON for {name}: {error}")
-        if audit.returncode != 0 or not isinstance(report, dict):
-            detail = audit.stderr.strip() or "npm audit signatures failed"
-            fail(f"npm provenance audit failed for {name}: {detail}")
+        if not isinstance(report, dict):
+            fail(f"npm provenance audit returned a non-object report for {name}")
         invalid = report.get("invalid")
         missing = report.get("missing")
         if not isinstance(invalid, list) or not isinstance(missing, list):
@@ -186,23 +217,45 @@ def verify_audit_signatures(name: str, version: str, registry: str) -> None:
         if invalid or missing:
             fail(f"npm audit signatures reported an invalid or missing record for {name}@{version}")
         verified = report.get("verified")
-        match = next(
+        if not isinstance(verified, list):
+            fail(f"npm audit signatures omitted verified results for {name}")
+        candidate = next(
             (
                 item
                 for item in verified
                 if isinstance(item, dict)
                 and item.get("name") == name
                 and item.get("version") == version
-                and isinstance(item.get("attestations"), dict)
-                and isinstance(item["attestations"].get("provenance"), dict)
-                and str(item["attestations"]["provenance"].get("predicateType", "")).startswith(
-                    "https://slsa.dev/provenance/"
-                )
             ),
             None,
-        ) if isinstance(verified, list) else None
-        if match is None:
-            fail(f"npm audit signatures found no verified provenance attestation for {name}@{version}")
+        )
+        if candidate is None:
+            raise RetryableProvenanceError(
+                f"npm audit signatures found no verified provenance attestation for {name}@{version}"
+            )
+        attestations = candidate.get("attestations")
+        provenance = attestations.get("provenance") if isinstance(attestations, dict) else None
+        predicate_type = provenance.get("predicateType") if isinstance(provenance, dict) else None
+        if not isinstance(predicate_type, str) or not predicate_type.startswith("https://slsa.dev/provenance/"):
+            fail(f"npm audit signatures found an invalid provenance attestation for {name}@{version}")
+        if audit.returncode != 0:
+            fail(f"npm provenance audit failed for {name}: {detail or 'unknown error'}")
+
+
+def verify_audit_signatures(name: str, version: str, registry: str) -> None:
+    """Verify provenance, retrying only bounded registry propagation states."""
+    last_error: RetryableProvenanceError | None = None
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            _verify_audit_signatures_once(name, version, registry)
+            return
+        except RetryableProvenanceError as error:
+            last_error = error
+            if attempt + 1 == MAX_ATTEMPTS:
+                fail(f"{error} after bounded retry")
+            time.sleep(RETRY_DELAYS[attempt])
+    if last_error is not None:
+        fail(f"{last_error} after bounded retry")
 
 
 def repository_identity(value: Any) -> str | None:
