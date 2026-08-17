@@ -191,6 +191,12 @@ printf '%s\n' "$npm_block" | grep -Fq -- '--packages dist/npm-packages' ||
     fail 'npm publisher input does not match artifact extraction path'
 printf '%s\n' "$npm_block" | grep -Fq 'publish-npm-packages.sh' ||
     fail 'npm publish job does not invoke the resumable publisher'
+# setup-node's registry-url writes an npmrc and exports a NODE_AUTH_TOKEN,
+# which would introduce token-auth state into this OIDC-only publisher. Keep
+# the job free of both the registry-url setting and explicit token auth.
+if printf '%s\n' "$npm_block" | grep -Eq 'registry-url:|NPM_TOKEN|NODE_AUTH_TOKEN|always-auth:'; then
+    fail 'npm publish job configures registry-url or token authentication'
+fi
 npm_checkout_line=$(printf '%s\n' "$npm_block" | grep -n 'uses: actions/checkout@' | cut -d: -f1)
 npm_download_line=$(printf '%s\n' "$npm_block" | grep -n 'uses: actions/download-artifact@' | cut -d: -f1)
 npm_publish_line=$(printf '%s\n' "$npm_block" | grep -n 'publish-npm-packages.sh' | cut -d: -f1)

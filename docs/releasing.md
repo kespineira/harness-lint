@@ -1,5 +1,23 @@
 # Release and publishing
 
+## Current fix-forward status
+
+Release run `32030039779` for the annotated `v0.1.2` tag created the
+canonical GitHub draft assets and Homebrew cask state, but `npm-publish`
+failed before any npm package was published. `actions/setup-node` had been
+configured with `registry-url`, which exported a placeholder
+`NODE_AUTH_TOKEN=XXXXX...`; `scripts/publish-npm-packages.py` correctly
+rejected that token-auth environment before invoking npm. All five public
+`0.1.2` npm endpoints remain unpublished (HTTP 404), so the existing tag and
+draft must not be reused or edited. `v0.1.3` is the first intended stable
+npm/npx release and must be a new immutable fix-forward tag.
+
+The fix-forward keeps the one-time bootstrap history, exact tag-derived
+versioning, native-first/root-last order, Trusted Publishing/OIDC and
+provenance checks, and the no-`NPM_TOKEN`/no-`NODE_AUTH_TOKEN` rule. The
+Homebrew cask and `install.sh` remain native distribution paths and do not
+change the npm publication status.
+
 The stable release workflow runs from a pushed annotated tag. It creates a
 draft GitHub Release, publishes the Homebrew cask, signs and verifies the
 checksum manifest, stages and audits five npm packages, publishes those
@@ -23,7 +41,7 @@ Before creating a release, confirm all of the following:
   permissions. The release job uses the repository `GITHUB_TOKEN` for the
   GitHub Release and its OIDC identity for keyless signing.
 - All five npm package names and their per-package Trusted Publisher settings
-  exist before the `v0.1.2` tag is created. Each setting is `GitHub Actions`,
+  exist before the `v0.1.3` tag is created. Each setting is `GitHub Actions`,
   organization/user `kespineira`, repository `harness-lint`, and workflow
   filename exactly `release.yml` (not `.github/workflows/release.yml`). The
   npm publisher job has `contents: read` and `id-token: write` and uses the
@@ -56,8 +74,8 @@ platform metadata; the root package's optional dependencies are exact matches
 for the same release. The root launcher only delegates to the already
 installed native executable and has no lifecycle hook or runtime download.
 
-The stable tag is the only version source. Tag `v0.1.2` derives npm version
-`0.1.2` by stripping exactly the leading `v`; all five manifests, tarball
+The stable tag is the only version source. Tag `v0.1.3` derives npm version
+`0.1.3` by stripping exactly the leading `v`; all five manifests, tarball
 filenames, native dependencies, and registry records must use that exact
 version. The `v` is never published. The native publish order is fixed and the
 root is last:
@@ -278,7 +296,12 @@ in `checksums.txt`. When Cosign is installed, it also requires and verifies
 the bundle with the identity above; a missing bundle or failed verification
 prevents installation. Without Cosign, only the SHA-256 check is available.
 
-## One-time npm bootstrap before `v0.1.2`
+## Historical one-time npm bootstrap before `v0.1.2`
+
+This section preserves the original bootstrap history and must not be used to
+recreate or retry the failed `v0.1.2` release. The next stable npm release is
+`v0.1.3`, and it uses the same bootstrap prerequisites and immutable
+fix-forward rules.
 
 npm Trusted Publishing requires an existing package, so it cannot create the
 first registry record. Before creating or pushing `v0.1.2`, an authenticated
@@ -307,30 +330,34 @@ human maintainer with npm 2FA must perform this one-time bootstrap:
    scope/name ownership, and publishability before creating and pushing the
    annotated `v0.1.2` tag.
 
-The stable `v0.1.2` workflow then publishes all five packages through OIDC
-Trusted Publishing with npm automatic provenance. It does not use an
-`NPM_TOKEN` or any other long-lived npm token. An unauthenticated registry
+The intended stable `v0.1.2` workflow was to publish all five packages through
+OIDC Trusted Publishing with npm automatic provenance. That run instead
+failed before npm publication at the placeholder-token gate described at the
+top of this document. It did not publish any `0.1.2` npm package, and it must
+not be reused. An unauthenticated registry
 HTTP 404 only means that no public metadata was returned for that request; it
 does not prove a name is available, unclaimed, publishable by this account,
 or successfully published. No successful public npm registry publication is
 claimed here; record the actual bootstrap and stable results from the registry
 checks rather than inferring them.
 
-After `v0.1.2` succeeds, the required durable dist-tag state for every package
-is `bootstrap=0.0.0-bootstrap.1` and `latest=0.1.2`. The existing publisher
-registry verification enforces the stable version and `latest=0.1.2` before
-the release can continue; it does not require or authorize cleanup of the
-bootstrap pointer. The temporary bootstrap `latest` behavior and an HTTP 400
-from an authenticated `npm dist-tag rm` are not reasons to weaken the
-native-first/root-last order, Trusted Publishing/OIDC provenance, immutable
-version policy, or stable-release gates.
+After the future `v0.1.3` succeeds, the required durable dist-tag state for
+every package is `bootstrap=0.0.0-bootstrap.1` and `latest=0.1.3`. The
+publisher registry verification enforces the stable version and
+`latest=0.1.3` before the release can continue; it does not require or
+authorize cleanup of the bootstrap pointer. The temporary bootstrap `latest`
+behavior and an HTTP 400 from an authenticated `npm dist-tag rm` are not
+reasons to weaken the native-first/root-last order, Trusted Publishing/OIDC
+provenance, immutable version policy, or stable-release gates.
 
 ## Release history and first-release record
 
 `v0.1.0` and `v0.1.1` are existing Go releases and remain part of the
 release history. Preserve the annotated `v0.1.1` tag and its published
-artifacts; the npm workflow starts with the separate `v0.1.2` version. Never
-delete, move, recreate, or retrofit npm publication onto `v0.1.1`.
+artifacts; `v0.1.2` remains a failed, unpublished npm attempt and must not be
+reused. The npm workflow starts its first intended stable release with the
+separate `v0.1.3` version. Never delete, move, recreate, or retrofit npm
+publication onto `v0.1.1` or `v0.1.2`.
 
 ### Historical first release: `v0.1.0`
 

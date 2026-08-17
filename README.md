@@ -44,10 +44,15 @@ the repository, and is included in release archives and Linux packages.
 
 ### npm (global)
 
-The npm distribution starts with `v0.1.2` and provides the same CLI through
-one cross-platform launcher and a platform-specific native package. Node.js
-is required only when using npm or npx; Homebrew, `install.sh`, Go, and GitHub
-Release installs run the native binary directly and do not require Node.js.
+The npm distribution is intended to start with `v0.1.3` and provides the same
+CLI through one cross-platform launcher and a platform-specific native
+package. The `v0.1.2` release run created a draft GitHub Release and Homebrew
+cask state but failed before npm publication at the placeholder-token gate;
+all five `0.1.2` npm records remain unpublished. Do not reuse or retry the
+immutable `v0.1.2` tag; `v0.1.3` is the first intended stable npm/npx release
+and must use the documented fix-forward workflow. Node.js is required only
+when using npm or npx; Homebrew, `install.sh`, Go, and GitHub Release installs
+run the native binary directly and do not require Node.js.
 
 With Node.js 18 or newer installed, install the latest npm release globally:
 
@@ -68,7 +73,7 @@ npx --yes harness-lint@latest --help
 ```
 
 Pin a version when reproducibility matters, for example
-`npx --yes harness-lint@0.1.2 --version`.
+`npx --yes harness-lint@0.1.3 --version`.
 
 ### install.sh (macOS/Linux)
 
