@@ -253,12 +253,11 @@ def test_existing_mismatch_fails_closed_and_receipts_are_bound() -> None:
                 raise AssertionError("accepted a tarball with a mismatched manifest")
 
 
-def test_audit_rejects_missing_invalid_and_unattested() -> None:
+def test_audit_rejects_missing_and_invalid_records() -> None:
     target = {"name": "pkg", "version": "1.0.0"}
     reports = [
         {"verified": [], "missing": [target], "invalid": []},
         {"verified": [], "missing": [], "invalid": [target]},
-        {"verified": [{"name": "pkg", "version": "1.0.0", "attestations": {}}], "missing": [], "invalid": []},
     ]
     for report in reports:
         def fake_run(command, **_kwargs):
@@ -272,6 +271,81 @@ def test_audit_rejects_missing_invalid_and_unattested() -> None:
                 assert not sleep.called
             else:
                 raise AssertionError(f"accepted bad npm audit report: {report}")
+
+
+def test_audit_retries_missing_provenance_then_succeeds() -> None:
+    target = {"name": "pkg", "version": "1.0.0"}
+    verified = {
+        **target,
+        "attestations": {
+            "provenance": {"predicateType": "https://slsa.dev/provenance/v1"}
+        },
+    }
+    reports = [
+        {"verified": [{**target}], "missing": [], "invalid": []},
+        {"verified": [{**target, "attestations": {}}], "missing": [], "invalid": []},
+        {"verified": [{**target, "attestations": {"provenance": {}}}], "missing": [], "invalid": []},
+        {"verified": [verified], "missing": [], "invalid": []},
+    ]
+    calls = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal calls
+        if command[1] == "audit":
+            report = reports[min(calls, len(reports) - 1)]
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
+        module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+    assert calls == 4
+    assert [call.args[0] for call in sleep.call_args_list] == [2, 4, 8]
+
+
+def test_audit_missing_provenance_is_bounded() -> None:
+    target = {"name": "pkg", "version": "1.0.0"}
+    report = {"verified": [{**target, "attestations": {"provenance": {}}}], "missing": [], "invalid": []}
+    calls = 0
+
+    def fake_run(command, **_kwargs):
+        nonlocal calls
+        if command[1] == "audit":
+            calls += 1
+            return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
+        try:
+            module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+        except module.PublishError as error:
+            assert "after bounded retry" in str(error)
+        else:
+            raise AssertionError("accepted an exact package without propagated provenance")
+    assert calls == module.MAX_ATTEMPTS
+    assert [call.args[0] for call in sleep.call_args_list] == list(module.RETRY_DELAYS)
+
+
+def test_audit_rejects_invalid_predicate_immediately() -> None:
+    target = {
+        "name": "pkg",
+        "version": "1.0.0",
+        "attestations": {"provenance": {"predicateType": "https://example.invalid/provenance/v1"}},
+    }
+    report = {"verified": [target], "missing": [], "invalid": []}
+
+    def fake_run(command, **_kwargs):
+        output = json.dumps(report) if command[1] == "audit" else ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    with mock.patch.object(module.subprocess, "run", fake_run), mock.patch.object(module.time, "sleep") as sleep:
+        try:
+            module.verify_audit_signatures("pkg", "1.0.0", "https://registry.npmjs.org")
+        except module.PublishError as error:
+            assert "invalid provenance attestation" in str(error)
+        else:
+            raise AssertionError("accepted non-SLSA provenance predicate")
+    assert not sleep.called
 
 
 def test_audit_retries_propagation_then_succeeds() -> None:
@@ -332,7 +406,10 @@ def main() -> int:
     test_tarball_manifest_and_receipt_filename()
     test_native_order_resume_and_root_gate()
     test_existing_mismatch_fails_closed_and_receipts_are_bound()
-    test_audit_rejects_missing_invalid_and_unattested()
+    test_audit_rejects_missing_and_invalid_records()
+    test_audit_retries_missing_provenance_then_succeeds()
+    test_audit_missing_provenance_is_bounded()
+    test_audit_rejects_invalid_predicate_immediately()
     test_audit_retries_propagation_then_succeeds()
     test_audit_propagation_retry_is_bounded()
     print("publish npm packages tests passed")

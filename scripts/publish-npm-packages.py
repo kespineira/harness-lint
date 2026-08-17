@@ -234,8 +234,20 @@ def _verify_audit_signatures_once(name: str, version: str, registry: str) -> Non
                 f"npm audit signatures found no verified provenance attestation for {name}@{version}"
             )
         attestations = candidate.get("attestations")
-        provenance = attestations.get("provenance") if isinstance(attestations, dict) else None
-        predicate_type = provenance.get("predicateType") if isinstance(provenance, dict) else None
+        if not isinstance(attestations, dict):
+            raise RetryableProvenanceError(
+                f"npm audit signatures found exact package without provenance attestations for {name}@{version}"
+            )
+        provenance = attestations.get("provenance")
+        if not isinstance(provenance, dict):
+            raise RetryableProvenanceError(
+                f"npm audit signatures found exact package without a provenance record for {name}@{version}"
+            )
+        if "predicateType" not in provenance:
+            raise RetryableProvenanceError(
+                f"npm audit signatures found exact package without a provenance predicate type for {name}@{version}"
+            )
+        predicate_type = provenance["predicateType"]
         if not isinstance(predicate_type, str) or not predicate_type.startswith("https://slsa.dev/provenance/"):
             fail(f"npm audit signatures found an invalid provenance attestation for {name}@{version}")
         if audit.returncode != 0:
