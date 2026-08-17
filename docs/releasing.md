@@ -29,8 +29,10 @@ Before creating a release, confirm all of the following:
   npm publisher job has `contents: read` and `id-token: write` and uses the
   public registry at `https://registry.npmjs.org`.
 - The one-time bootstrap has been completed by an authenticated human npm
-  maintainer with 2FA, using a non-latest `bootstrap` dist-tag. Normal
-  releases do not use `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
+  maintainer with 2FA, requesting the non-stable `bootstrap` dist-tag. npm
+  may temporarily also assign `latest` to that first publication; this is an
+  observed registry behavior, not a desired bootstrap state. Normal releases
+  do not use `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
 
 GoReleaser is pinned to **v2.17.1**, Cosign is pinned to **v3.1.3**, Node.js is
 pinned to **22.14.0**, and npm is pinned to **11.5.1** in the workflow. Do not
@@ -287,12 +289,18 @@ human maintainer with npm 2FA must perform this one-time bootstrap:
    such as `0.0.0-bootstrap.1`, and run the package content, pack, and hash
    checks. Do not create or push `v0.1.2` yet.
 2. Publish the four native packages, then the root package, directly with npm
-   and 2FA using `--access public --tag bootstrap`. Do not use `latest`, and
-   do not describe this human bootstrap as a provenance-bearing stable
-   release.
-3. Verify all five package records and bootstrap versions, confirm that no
-   `latest` tag was created, and confirm that the native tarballs contain the
-   intended GoReleaser snapshot binaries.
+   and 2FA using `--access public --tag bootstrap`. Request the `bootstrap`
+   tag only; npm may nevertheless temporarily assign `latest` to the first
+   (and, for each package, only) publication. This extra `latest` pointer is
+   not desirable and must not be treated as a stable release. Do not describe
+   this human bootstrap as a provenance-bearing stable release.
+3. Verify all five package records and bootstrap versions, record any
+   temporary `latest` pointer, and confirm that the native tarballs contain
+   the intended GoReleaser snapshot binaries. An authenticated `npm dist-tag
+   rm` can be rejected with HTTP 400; do not turn that rejection into a retry
+   loop or a request to replace/delete an immutable package. Query and record
+   the registry state, then continue with the ownership and Trusted Publisher
+   gates.
 4. Configure and save one Trusted Publisher for each package with provider
    `GitHub Actions`, organization/user `kespineira`, repository `harness-lint`,
    and workflow filename exactly `release.yml`. Confirm package existence,
@@ -307,6 +315,15 @@ does not prove a name is available, unclaimed, publishable by this account,
 or successfully published. No successful public npm registry publication is
 claimed here; record the actual bootstrap and stable results from the registry
 checks rather than inferring them.
+
+After `v0.1.2` succeeds, the required durable dist-tag state for every package
+is `bootstrap=0.0.0-bootstrap.1` and `latest=0.1.2`. The existing publisher
+registry verification enforces the stable version and `latest=0.1.2` before
+the release can continue; it does not require or authorize cleanup of the
+bootstrap pointer. The temporary bootstrap `latest` behavior and an HTTP 400
+from an authenticated `npm dist-tag rm` are not reasons to weaken the
+native-first/root-last order, Trusted Publishing/OIDC provenance, immutable
+version policy, or stable-release gates.
 
 ## Release history and first-release record
 

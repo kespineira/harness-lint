@@ -149,6 +149,14 @@ possible, or retry when the registry's immutable package, metadata, integrity,
 or provenance does not match the audited input. A mismatch is unsafe and
 requires fix-forward.
 
+Bootstrap has one observed npm registry exception: the first (and, for each
+package, only) publication requested with `--tag bootstrap` may temporarily
+also receive the `latest` dist-tag. This is not a desired state or a reason to
+change publication order. An authenticated `npm dist-tag rm` used to remove
+that temporary pointer may itself be rejected with HTTP 400; record the
+registry response and continue through the documented gates rather than
+retrying tag mutation, deleting an immutable package, or republishing it.
+
 Several partial states are unavoidable: GoReleaser may have committed a
 Homebrew cask that references the still-draft GitHub Release; a native npm
 failure may leave some platform `latest` tags updated while the root
@@ -220,14 +228,18 @@ package, so they cannot create the first registry record. Before creating a
    the root package directly with npm 2FA, each using
    `npm publish --access public --tag bootstrap`. This is the official direct
    public-package path; `npm stage publish` cannot be used for a brand-new
-   package. The `bootstrap` dist-tag is deliberately non-latest, and the
-   temporary packages must never be presented as the stable release.
+   package. The requested `bootstrap` dist-tag is intentionally non-stable,
+   but npm may temporarily also assign `latest` to this first publication;
+   the temporary extra pointer must never be presented as the stable release.
 3. Verify that all five package records and bootstrap versions are present,
-   that the native tarballs contain the intended GoReleaser snapshot
-   binaries, and that no `latest` tag was created. Configure one Trusted
-   Publisher for each package using the exact `release.yml` filename, select
-   `npm publish` as the allowed action, and confirm all five configurations
-   are saved before proceeding.
+   record any temporary `latest` tag, and confirm that the native tarballs
+   contain the intended GoReleaser snapshot binaries. An authenticated
+   `npm dist-tag rm` may be rejected with HTTP 400; treat that as observed
+   registry behavior, not a reason to retry tag mutation or weaken the
+   immutable/fix-forward policy. Configure one Trusted Publisher for each
+   package using the exact `release.yml` filename, select `npm publish` as the
+   allowed action, and confirm all five configurations are saved before
+   proceeding.
 4. Only after package existence, scope/name ownership, and all five trusted
    publishers are configured may the release-ready commit receive and push
    the annotated `v0.1.2` tag. The stable workflow then publishes all five
@@ -240,10 +252,14 @@ publisher and OIDC build identity. A canonical GoReleaser snapshot makes the
 bootstrap native binaries reproducible and aligned with the project release,
 but it does not create npm provenance attestations for those human-published
 bootstrap package versions. The first stable `v0.1.2` packages are the
-provenance-bearing OIDC publication. Do not commit or configure an
-`NPM_TOKEN` for normal releases; if the maintainer later chooses another
-officially supported bootstrap path, it must preserve the non-latest tag and
-must not weaken the no-token stable-release contract.
+provenance-bearing OIDC publication. After that release, every package must
+retain the durable dist-tag state `bootstrap=0.0.0-bootstrap.1` and
+`latest=0.1.2`. The existing publisher registry verification enforces the
+stable version and `latest=0.1.2`; it does not require or authorize removing
+the bootstrap pointer. Do not commit or configure an `NPM_TOKEN` for normal
+releases; if the maintainer later chooses another officially supported
+bootstrap path, it must preserve the bootstrap tag and must not weaken the
+no-token stable-release contract.
 
 ## Validation and implementation evidence
 
@@ -280,9 +296,10 @@ requirements, not a claim that npm publication has already succeeded.
 - GitHub-hosted runners, Node >=22.14.0, npm >=11.5.1 (and npm >=11.15.0
   when staging), `id-token: write`, and the exact trusted-publisher workflow
   filename `release.yml` configured independently on all five packages.
-- An authenticated npm maintainer with 2FA for the one-time non-latest
-  bootstrap. No `NPM_TOKEN` is committed or configured for normal releases;
-  after bootstrap, every stable publish uses Trusted Publishing/OIDC.
+- An authenticated npm maintainer with 2FA for the one-time `bootstrap`-tagged
+  publication. npm may temporarily assign `latest` to that first publication;
+  no `NPM_TOKEN` is committed or configured for normal releases, and after
+  bootstrap every stable publish uses Trusted Publishing/OIDC.
 - A hard gate forbidding creation or push of `v0.1.2` until all five package
   names exist and all five trusted-publisher configurations are saved.
 - The accepted implementation is in `.github/workflows/release.yml`,
