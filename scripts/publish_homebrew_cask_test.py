@@ -67,7 +67,7 @@ def _assert_publication_error(cask: Path, responses: list[dict[str, object]], ex
 def _run_conflict(cask: Path, raced: str) -> tuple[bool, list[str]]:
     calls: list[str] = []
     original_request = publisher._api_request
-    old = normalize_cask_text(_cask("1.2.2"))
+    old = normalize_cask_text(_cask("0.1.4"))
     responses = iter([_response(old, "old-sha"), _response(raced, "raced-sha")])
 
     def fake_request(api_url: str, token: str, method: str, endpoint: str, payload=None):
@@ -86,8 +86,8 @@ def _run_conflict(cask: Path, raced: str) -> tuple[bool, list[str]]:
 
 
 def main() -> int:
-    new = _cask("1.2.3")
-    old = normalize_cask_text(_cask("1.2.2"))
+    new = _cask("0.1.5")
+    old = normalize_cask_text(_cask("0.1.4"))
     normalized_new = normalize_cask_text(new)
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -121,12 +121,30 @@ def main() -> int:
         # Newer managed content is protected.
         _assert_publication_error(
             cask,
-            [_response(normalize_cask_text(_cask("1.2.4")), "newer-sha")],
+            [_response(normalize_cask_text(_cask("0.1.6")), "newer-sha")],
             "newer",
         )
 
+        # The public cask format uses GoReleaser's exact dynamic URL template.
+        # A literal release path, another domain, or a non-canonical target is
+        # rejected before any Contents PUT can occur.
+        for label, replacement in (
+            ("literal release URL", ("v#{version}", "v0.1.4")),
+            (
+                "wrong-domain URL",
+                ("https://github.com/kespineira/harness-lint", "https://example.invalid/harness-lint"),
+            ),
+            ("wrong-target URL", ("_darwin_amd64.tar.gz", "_darwin_386.tar.gz")),
+        ):
+            bad_remote = old.replace(*replacement)
+            _assert_publication_error(
+                cask,
+                [_response(bad_remote, f"{label}-sha")],
+                "canonical harness-lint archive URLs",
+            )
+
         # Same-version content with a different checksum is not idempotent.
-        same_version_different = _cask("1.2.3", seed=7)
+        same_version_different = _cask("0.1.5", seed=7)
         _assert_publication_error(
             cask,
             [_response(normalize_cask_text(same_version_different), "same-sha")],

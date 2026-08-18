@@ -15,22 +15,22 @@ cask "harness-lint" do
   on_macos do
     on_intel do
       sha256 "1111111111111111111111111111111111111111111111111111111111111111"
-      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_darwin_amd64.tar.gz"
+      url "https://github.com/kespineira/harness-lint/releases/download/v#{version}/harness-lint_#{version}_darwin_amd64.tar.gz"
     end
     on_arm do
       sha256 "2222222222222222222222222222222222222222222222222222222222222222"
-      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_darwin_arm64.tar.gz"
+      url "https://github.com/kespineira/harness-lint/releases/download/v#{version}/harness-lint_#{version}_darwin_arm64.tar.gz"
     end
   end
 
   on_linux do
     on_intel do
       sha256 "3333333333333333333333333333333333333333333333333333333333333333"
-      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_linux_amd64.tar.gz"
+      url "https://github.com/kespineira/harness-lint/releases/download/v#{version}/harness-lint_#{version}_linux_amd64.tar.gz"
     end
     on_arm do
       sha256 "4444444444444444444444444444444444444444444444444444444444444444"
-      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_linux_arm64.tar.gz"
+      url "https://github.com/kespineira/harness-lint/releases/download/v#{version}/harness-lint_#{version}_linux_arm64.tar.gz"
     end
   end
 

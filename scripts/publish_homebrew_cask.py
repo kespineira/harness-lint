@@ -124,8 +124,8 @@ def _semver_key(version: str) -> tuple[int, int, int, tuple[tuple[int, object], 
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)), suffix)
 
 
-def _canonical_url(version: str, target: str) -> str:
-    return f"{_REPOSITORY}/v{version}/harness-lint_#{{version}}_{target}.tar.gz"
+def _canonical_url(target: str) -> str:
+    return f"{_REPOSITORY}/v#{{version}}/harness-lint_#{{version}}_{target}.tar.gz"
 
 
 def _managed_signature(cask: str) -> list[str]:
@@ -159,7 +159,7 @@ def _validate_managed_cask(cask: str, expected_signature: list[str]) -> str:
 
     urls = _URL_LINE.findall(normalized)
     if len(urls) != len(_TARGETS) or set(urls) != {
-        _canonical_url(version, target) for target in _TARGETS
+        _canonical_url(target) for target in _TARGETS
     }:
         raise PublicationError("remote cask does not use canonical harness-lint archive URLs")
     if len(_SHA_LINE.findall(normalized)) != len(_TARGETS):
