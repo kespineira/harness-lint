@@ -171,7 +171,6 @@ gh attestation verify "$archive" \
   --repo kespineira/harness-lint \
   --signer-workflow "$workflow" \
   --source-ref refs/tags/vX.Y.Z \
-  --cert-identity "https://github.com/$workflow@refs/tags/vX.Y.Z" \
   --predicate-type https://slsa.dev/provenance/v1
 
 sbom="$archive.spdx.json"
@@ -180,7 +179,6 @@ gh attestation verify "$archive" \
   --repo kespineira/harness-lint \
   --signer-workflow "$workflow" \
   --source-ref refs/tags/vX.Y.Z \
-  --cert-identity "https://github.com/$workflow@refs/tags/vX.Y.Z" \
   --predicate-type https://spdx.dev/Document/v2.3
 ```
 

@@ -315,6 +315,11 @@ done
 if grep -Fq -- '--cert-identity' "$attestation_script"; then
     fail 'attestation verifier combines mutually exclusive identity flags'
 fi
+for documentation in "$project_root/README.md" "$project_root"/docs/*.md; do
+    if grep -Fq -- '--cert-identity' "$documentation"; then
+        fail "documentation combines mutually exclusive identity flags: $documentation"
+    fi
+done
 npm_block=$(job_block npm-publish)
 printf '%s\n' "$npm_block" | grep -Fq "npm install --global npm@$reviewed_npm_version" ||
     fail 'npm publish job does not install the reviewed npm version'
