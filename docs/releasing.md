@@ -86,6 +86,7 @@ go build -trimpath -o "$release_tmp/harness-lint" ./cmd/harness-lint
 ./scripts/install_test.sh
 ./scripts/release-workflow-test.sh
 ./scripts/release-sbom-test.sh
+./scripts/verify-release-attestations-test.sh
 ./scripts/stage-npm-packages-test.sh
 ./scripts/pack-npm-packages-test.sh
 ./scripts/publish-npm-packages-test.sh
