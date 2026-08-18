@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 from pathlib import Path
 import stat
 import subprocess
@@ -13,6 +14,11 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "pack-npm-packages.sh"
+SCRIPT_PY = ROOT / "scripts" / "pack-npm-packages.py"
+MODULE_SPEC = importlib.util.spec_from_file_location("pack_npm_packages", SCRIPT_PY)
+assert MODULE_SPEC is not None and MODULE_SPEC.loader is not None
+PACK_MODULE = importlib.util.module_from_spec(MODULE_SPEC)
+MODULE_SPEC.loader.exec_module(PACK_MODULE)
 NATIVES = [
     ("@kespineira/harness-lint-darwin-arm64", "darwin", "arm64"),
     ("@kespineira/harness-lint-darwin-x64", "darwin", "x64"),
@@ -110,6 +116,31 @@ def write_package(package: Path, manifest: dict, files: dict[str, bytes]) -> Non
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(contents)
         path.chmod(0o755)
+
+
+def test_normalize_npm_pack_json() -> None:
+    name = "harness-lint"
+    record = {"name": name, "files": []}
+    assert PACK_MODULE.normalize_npm_pack_json([record], name) == record
+    assert PACK_MODULE.normalize_npm_pack_json({name: record}, name) == record
+
+    malformed = [
+        [],
+        [record, record],
+        [None],
+        {},
+        {name: record, "other": record},
+        {"wrong-name": record},
+        {name: {"name": "wrong-name"}},
+        {name: None},
+        {name: {"files": []}},
+    ]
+    for parsed in malformed:
+        try:
+            PACK_MODULE.normalize_npm_pack_json(parsed, name)
+        except PACK_MODULE.PackError:
+            continue
+        raise AssertionError(f"accepted malformed npm pack JSON: {parsed!r}")
 
 
 def run(
@@ -312,6 +343,7 @@ def test_rejects_version_receipt_and_bootstrap_contracts(root: Path) -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="harness-lint-pack-tests-") as directory:
         root = Path(directory)
+        test_normalize_npm_pack_json()
         test_pack_and_root_last(root / "success")
         test_dry_run_rejects_missing_and_extra_content(root / "contents")
         test_receipt_detects_unsealed_staged_mutations(root / "mutations")
