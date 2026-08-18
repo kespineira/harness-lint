@@ -5,6 +5,12 @@ Local context hygiene and usage analyzer for coding agent harnesses.
 [![CI](https://github.com/kespineira/harness-lint/actions/workflows/ci.yml/badge.svg)](https://github.com/kespineira/harness-lint/actions/workflows/ci.yml)
 [![Release](https://github.com/kespineira/harness-lint/actions/workflows/release.yml/badge.svg)](https://github.com/kespineira/harness-lint/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/kespineira/harness-lint?sort=semver)](https://github.com/kespineira/harness-lint/releases/latest)
+[![npm](https://img.shields.io/npm/v/harness-lint)](https://www.npmjs.com/package/harness-lint)
+[![Go Reference](https://pkg.go.dev/badge/github.com/kespineira/harness-lint.svg)](https://pkg.go.dev/github.com/kespineira/harness-lint)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kespineira/harness-lint)](https://goreportcard.com/report/github.com/kespineira/harness-lint)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](#install)
+[![Linux](https://img.shields.io/badge/platform-Linux-lightgrey)](#install)
 
 `harness-lint` inventories the local capabilities that a coding-agent
 harness can see, records metadata-only usage observations, and produces
@@ -45,13 +51,12 @@ the repository, and is included in release archives and Linux packages.
 ### npm (global)
 
 The npm distribution provides the same CLI through one cross-platform launcher
-and platform-specific native packages. The immutable `v0.1.3` publication was
-partial: `@kespineira/harness-lint-darwin-arm64@0.1.3` is public, provenance
-verification failed under npm 11.5.1, and the other stable package versions
-were not published; the GitHub `v0.1.3` Release remains a draft. Do not reuse
-or retry `v0.1.3`; `v0.1.4` is the fix-forward candidate. Node.js is required
-only when using npm or npx; Homebrew, `install.sh`, Go, and GitHub Release
-installs run the native binary directly and do not require Node.js.
+and platform-specific native packages. Node.js is required only when using npm
+or npx; Homebrew, `install.sh`, Go, and GitHub Release installs run the native
+binary directly and do not require Node.js.
+
+The launcher keeps consumer compatibility at Node.js `>=18.0.0`. Node.js 18
+is EOL; use a supported LTS release for new installations.
 
 With Node.js 18 or newer installed, install the latest npm release globally:
 
@@ -71,9 +76,8 @@ To run the latest npm release without a global install (Node.js 18 or newer):
 npx --yes harness-lint@latest --help
 ```
 
-Pin a version when reproducibility matters, for example
-`npx --yes harness-lint@0.1.4 --version` once the fix-forward release is
-published.
+Pin a published version when reproducibility matters, for example
+`npx --yes harness-lint@X.Y.Z --version`.
 
 ### install.sh (macOS/Linux)
 
@@ -98,7 +102,7 @@ archive against its unique SHA-256 entry in `checksums.txt`, and installs to
 with environment variables:
 
 ```sh
-HARNESS_LINT_VERSION=v0.1.0 \
+HARNESS_LINT_VERSION=vX.Y.Z \
 HARNESS_LINT_INSTALL_DIR="$HOME/.local/bin" \
   sh /tmp/harness-lint-install.sh
 ```
@@ -121,10 +125,10 @@ go install github.com/kespineira/harness-lint/cmd/harness-lint@latest
 For a reproducible install, pin the module version explicitly:
 
 ```sh
-go install github.com/kespineira/harness-lint/cmd/harness-lint@v0.1.0
+go install github.com/kespineira/harness-lint/cmd/harness-lint@vX.Y.Z
 ```
 
-This requires Go 1.24 or newer and puts the binary in Go's usual bin
+This requires Go 1.26 or newer and puts the binary in Go's usual bin
 directory. `go install` is not the signed GitHub release archive path; use
 the curl installer or a release artifact when you need the release checksum
 and Cosign verification flow.
@@ -138,6 +142,66 @@ include `.deb`, `.rpm`, and `.apk` packages; package managers, upgrade
 policies, and service integration are intentionally not configured by this
 project. Packages install the executable as `/usr/bin/harness-lint` and do
 not install or enable a daemon.
+
+## Supply-chain verification
+
+GitHub Release archives have complementary integrity controls: verify the
+archive's SHA-256 entry, then verify the signed checksum manifest with Cosign.
+For release `vX.Y.Z`, replace `X.Y.Z` in the commands below and run them from
+the directory containing the downloaded assets:
+
+```sh
+archive=harness-lint_X.Y.Z_linux_amd64.tar.gz
+grep "  $archive$" checksums.txt | sha256sum -c -
+
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity "https://github.com/kespineira/harness-lint/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The release workflow also publishes GitHub build provenance for each archive
+and an SPDX 2.3 SBOM attestation whose subject is that exact archive. Verify
+both attestations with GitHub CLI; the SBOM file must be the matching
+`<archive>.spdx.json` asset:
+
+```sh
+workflow=kespineira/harness-lint/.github/workflows/release.yml
+gh attestation verify "$archive" \
+  --repo kespineira/harness-lint \
+  --signer-workflow "$workflow" \
+  --source-ref refs/tags/vX.Y.Z \
+  --cert-identity "https://github.com/$workflow@refs/tags/vX.Y.Z" \
+  --predicate-type https://slsa.dev/provenance/v1
+
+sbom="$archive.spdx.json"
+jq -e '.spdxVersion == "SPDX-2.3" and .SPDXID == "SPDXRef-DOCUMENT"' "$sbom"
+gh attestation verify "$archive" \
+  --repo kespineira/harness-lint \
+  --signer-workflow "$workflow" \
+  --source-ref refs/tags/vX.Y.Z \
+  --cert-identity "https://github.com/$workflow@refs/tags/vX.Y.Z" \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
+
+Public npm packages use Trusted Publishing through GitHub OIDC and receive
+npm provenance. To audit a consumer installation, use an empty temporary
+directory and the reviewed npm command:
+
+```sh
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+cd "$tmpdir"
+npm init --yes >/dev/null
+npm install --ignore-scripts --no-audit --no-fund --package-lock=true \
+  --save-exact --registry https://registry.npmjs.org harness-lint@X.Y.Z
+npm audit signatures --json --include-attestations \
+  --registry https://registry.npmjs.org
+```
+
+The npm audit must show the exact package/version as verified with a SLSA
+provenance attestation. A real published release is required before any
+attestation result or provenance status can be claimed for a version.
 
 ## First run
 
