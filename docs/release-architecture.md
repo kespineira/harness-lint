@@ -1,21 +1,18 @@
 # Release architecture
 
-This document is the release artifact and integrity contract for
-`harness-lint`. The implementation lives in `.goreleaser.yml` and
-`.github/workflows/release.yml`; changes to either must preserve the
-invariants below.
+This document defines the release artifact and supply-chain contract for
+`harness-lint`. The implementation lives in `.goreleaser.yml`,
+`.github/workflows/release.yml`, and the release verification scripts; changes
+to those files must preserve these invariants.
 
-## Version source and build metadata
+## Version, build, and targets
 
-Stable releases are annotated tags matching `vX.Y.Z`. The tag is the source
-of the semantic version; the binary reports that version without the leading
-`v`, the source commit, and the build date through `harness-lint version` (and
-`--version`). Development and source builds use safe `0.0.0-dev`, `unknown`,
-and `unknown` defaults. A `go install` build may recover a non-development
-module version and VCS revision/time from `runtime/debug.BuildInfo`; empty or
-development values are ignored. No generated version file is required.
+Stable releases use annotated tags matching `vX.Y.Z`. The tag is the only
+semantic-version source. The binary reports the version without `v`, the
+source commit, and the build date through `harness-lint version` and
+`--version`; development builds use safe unknown values.
 
-Release builds set these linker values:
+Release builds set:
 
 ```text
 -X github.com/kespineira/harness-lint/internal/version.Version={{.Version}}
@@ -23,61 +20,77 @@ Release builds set these linker values:
 -X github.com/kespineira/harness-lint/internal/version.BuildDate={{.Date}}
 ```
 
-## Supported targets and artifacts
+Supported release targets are macOS and Linux on amd64 and arm64. Every
+release contains four archives named
+`harness-lint_<version>_<os>_<arch>.tar.gz`, a SHA-256 `checksums.txt`, and
+four matching SPDX 2.3 SBOM files. Linux also publishes `.deb`, `.rpm`, and
+`.apk` packages installing `/usr/bin/harness-lint`; no package installs or
+enables a daemon. Homebrew publishes the macOS cask to the configured tap.
+GitHub Release assets are the canonical distribution surface.
 
-- Supported release targets are macOS and Linux on amd64 and arm64 only.
-- The binary is named `harness-lint`.
-- Archives are named `harness-lint_<version>_<os>_<arch>.tar.gz`, where
-  `<version>` has no leading `v`.
-- Every release includes `checksums.txt`, containing SHA-256 entries for the
-  release artifacts.
-- Linux packages are `.deb`, `.rpm`, and `.apk`; they install the binary as
-  `/usr/bin/harness-lint` and do not install a daemon.
-- Homebrew publishes the macOS cask to `kespineira/homebrew-tap`.
-- GitHub Release artifacts are canonical for distribution and verification.
+GoReleaser keeps `CGO_ENABLED=0`; archives include `LICENSE` and `README.md`.
+The release toolchain is pinned to Go **1.26.6**, Node.js **24.19.0** (Active
+LTS), npm **12.0.2**, GoReleaser **2.17.1**, Cosign **3.1.3**, and Syft
+**1.51.0**.
 
-GoReleaser retains `CGO_ENABLED=0`; the embedded pure-Go SQLite driver needs
-no C toolchain. The release archive includes `LICENSE` and `README.md`.
+## Validation and promotion gates
 
-## Tag validation levels
+The tag workflow first runs three read-only artifact validation jobs:
 
-Before the stable release job can publish, three tag-triggered E2E jobs build
-and inspect a GoReleaser snapshot:
+- Linux executes its matching native archive and inspects non-native archives
+  and Linux package metadata.
+- macOS executes its matching native archive and inspects non-native archives.
+- Homebrew validates cask Ruby, style, audit, and load in a temporary hosted
+  runner tap that is removed and never pushed.
 
-- The Linux job executes the artifact matching its Linux runner and inspects
-  non-native archives for structure and architecture only. It also checks
-  Linux package metadata and payloads.
-- The macOS job executes the artifact matching its macOS runner and inspects
-  non-native archives for structure and architecture only.
-- The Homebrew job checks generated cask Ruby plus Homebrew style, audit, and
-  load in an isolated hosted-runner tap. Cleanup removes that temporary tap;
-  no local user's Homebrew installation is changed and no tap commit is
-  pushed.
+All three jobs have only `contents: read`. The stable release job requires all
+three, validates an annotated tag whose commit is reachable from `main`,
+rejects an existing GitHub Release for the tag, checks the clean source and
+release policy, and runs the Go, installer, package, and smoke-test gates.
 
-The E2E jobs have `contents: read` only. The stable release job's tap-token
-preflight occurs before its checkout and publication steps; this ordering does
-not imply that the E2E jobs skip checkout, since they need the source to build
-their validation snapshots.
+The promotion sequence is deliberately monotonic:
 
-## Checksum authenticity
+1. GoReleaser creates a draft GitHub Release and generates (but does not
+   upload) `dist/homebrew/Casks/harness-lint.rb`. The pinned v2.17.1 cask
+   generator emits architecture blocks in lexical order, so the release then
+   runs `scripts/publish_homebrew_cask.py` once to normalize the local file and
+   publish it through the scoped tap Contents API (`on_arm` before `on_intel`
+   and no blank line between the macOS and Linux blocks).
+2. A read-only gate validates that the actual stable `dist/` contains exactly
+   the four archives, four matching SPDX SBOMs, six Linux packages, and their
+   fourteen unique, correct checksums.
+3. Cosign signs and verifies `dist/checksums.txt`.
+4. GitHub attests the checksum subject with SLSA build provenance and attests
+   each archive with its matching SPDX 2.3 SBOM. Verification checks exact
+   archive subjects, repository, workflow, tag, and predicate identities before
+   npm staging.
+5. The release job stages and audits all five npm tarballs from the same
+   GoReleaser output, then uploads those immutable inputs.
+6. The OIDC npm job publishes the four native packages in fixed order and the
+   root launcher last, verifying exact metadata, integrity, `latest`, and npm
+   provenance after each package.
+7. The final job promotes the GitHub draft only after every npm gate succeeds.
 
-The release workflow signs `dist/checksums.txt` with Cosign v3.1.3 and
-uploads the current Cosign v3 bundle as
-`checksums.txt.sigstore.json`. Consumers that have Cosign installed should
-verify both the archive's SHA-256 entry and the checksum bundle. The exact
-keyless identity for the canonical repository is:
+There is no transaction across GitHub, Homebrew, and npm. A matching
+immutable package/version may be verified and skipped on a bounded failed-job
+continuation while the tagged run is unpublished and audited inputs remain
+available. Any mismatch, missing input, or unsafe retry stops the run.
 
-```text
-https://github.com/kespineira/harness-lint/.github/workflows/release.yml@refs/tags/vX.Y.Z
-```
+The cask publication is structural only: the strict normalizer preserves the
+GoReleaser version, canonical archive URLs, and SHA-256 values without manual
+edits. The Contents API publisher is idempotent and fails closed unless the tap
+file is already the exact normalized bytes or is a strict harness-lint-managed
+older cask; same-version mismatches, newer casks, and manual/unrecognized files
+are rejected. It supplies the current file SHA for the one PUT, then performs a
+fresh GET and compares bytes because the PUT response contains metadata rather
+than file content. The tap token is read only from the workflow environment and
+is never passed as a command-line argument, logged, or included in GoReleaser's
+environment.
 
-The required OIDC issuer is:
+## Integrity and attestations
 
-```text
-https://token.actions.githubusercontent.com
-```
-
-Equivalent verification for release `vX.Y.Z` is:
+Cosign signs the checksum manifest with keyless GitHub OIDC. Consumers verify
+the archive's unique SHA-256 line and then:
 
 ```sh
 cosign verify-blob checksums.txt \
@@ -86,26 +99,46 @@ cosign verify-blob checksums.txt \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-The curl installer performs this same verification when `cosign` is present;
-missing or invalid bundle data then fails closed. Without Cosign it still
-requires the archive's SHA-256 check and reports that authenticity was not
-verified.
+For each archive, the build-provenance subject is the archive itself and the
+SBOM-provenance subject is the same archive, with predicate types
+`https://slsa.dev/provenance/v1` and `https://spdx.dev/Document/v2.3`.
+`scripts/verify-release-attestations.sh` verifies all four archive subjects
+against the exact repository, `release.yml` workflow, and `refs/tags/vX.Y.Z`
+source ref. It also requires each generated SBOM to declare `SPDX-2.3`.
 
-## Immutability and fix-forward
+The npm publisher uses Trusted Publishing with short-lived GitHub OIDC,
+requests `--provenance`, suppresses lifecycle scripts, and verifies each
+public registry record with `npm audit signatures --include-attestations`.
+Normal releases never use `NPM_TOKEN` or `NODE_AUTH_TOKEN`.
 
-GitHub's **Immutable Releases** repository setting must be enabled. A
-published release, its tag, and its artifacts are treated as immutable even
-if a repository setting or provider behavior would otherwise permit edits.
-The workflow rejects an existing release for the tag, and release policy
-forbids replacing artifacts or reusing a tag. If a release is wrong, correct
-the issue in a new commit and publish a new version (fix forward); never
-delete and recreate `vX.Y.Z`.
+## Least privilege and action pins
 
-The publication sequence is not transactional across GitHub and the tap:
-after GoReleaser updates the tap, a later signing or verification failure can
-leave a cask commit referencing the draft while the GitHub Release remains
-unpublished. This is detectable and requires investigation and fix-forward;
-it is not an all-or-nothing guarantee.
+The release workflow has top-level `permissions: {}` and declares permissions
+per job. E2E jobs have only `contents: read`; the canonical release job has
+`contents: write`, `id-token: write`, and `attestations: write`; npm publishing
+has `contents: read` and `id-token: write`; final GitHub promotion has only
+`contents: write`. The Homebrew token is a separately scoped repository secret.
 
-The complete operational sequence, required credentials, and first-release
-checklist are in [Release and publishing](releasing.md).
+Every referenced GitHub Action in CI and release workflows is pinned to a
+full immutable commit SHA with a version comment. The local
+`scripts/release-workflow-test.sh` policy gate checks the full-SHA rule, exact
+tool pins, permissions, artifact subjects, ordering, no-token rule, and
+promotion dependencies.
+
+## Immutability, dependencies, and fix-forward
+
+GitHub **Immutable Releases** must be enabled. Tags, release assets, and
+accepted npm `name@version` records are never deleted, replaced, or reused.
+If a release is wrong or a gate finds an integrity, metadata, provenance, or
+subject mismatch, correct the source in a new commit and publish a new version
+(fix forward). Do not rerun GoReleaser to replace audited artifacts or retry
+an accepted package.
+
+Dependabot is configured for grouped GitHub Actions and Go module updates on a
+weekly Monday schedule. Dependabot changes are reviewed and merged manually;
+there is no auto-merge policy. Tool-pin, permission, action-SHA, or release
+contract changes require the same release-policy review and tests.
+
+Operational release steps and exact local commands are in
+[Release and publishing](releasing.md). npm package-specific decisions are in
+[npm distribution architecture](npm-distribution-architecture.md).

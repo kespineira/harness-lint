@@ -1,0 +1,26 @@
+version: 2
+
+# npm files in this repository are generated package templates, not committed manifests.
+# Dependabot PRs remain manual; no auto-merge configuration is enabled.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    groups:
+      gomod:
+        patterns:
+          - "*"

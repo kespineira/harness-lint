@@ -13,7 +13,6 @@ trap cleanup 0
 trap 'cleanup; exit 1' 1 2 3 15
 fail() { echo "release E2E: $*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
-count_is() { [ "$1" -eq "$2" ] || fail "$3: found $1, want $2"; }
 file_description_matches() {
     file_os=$1
     file_arch=$2
@@ -89,10 +88,17 @@ require curl
 require awk
 require sort
 require cmp
+require python3
 if command -v sha256sum >/dev/null 2>&1; then checksum_tool=sha256sum
 elif command -v shasum >/dev/null 2>&1; then checksum_tool=shasum
 else fail 'required SHA-256 command is unavailable'
 fi
+checksum_for() {
+    case "$checksum_tool" in
+        sha256sum) sha256sum "$1" | awk '{print $1}' ;;
+        shasum) shasum -a 256 "$1" | awk '{print $1}' ;;
+    esac
+}
 
 goreleaser release --snapshot --clean --skip=publish
 dist_dir=$project_root/dist
@@ -100,54 +106,10 @@ dist_dir=$project_root/dist
 version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$dist_dir/metadata.json" | sed -n '1p')
 [ -n "$version" ] || fail 'GoReleaser metadata has no version'
 
-expected=$work_dir/expected
-for os in darwin linux; do
-    for arch in amd64 arm64; do
-        printf '%s\n' "harness-lint_${version}_${os}_${arch}.tar.gz" >> "$expected"
-    done
-done
-for format in deb rpm apk; do
-    for arch in amd64 arm64; do
-        printf '%s\n' "harness-lint_${version}_linux_$arch.$format" >> "$expected"
-    done
-done
-sort -o "$expected" "$expected"
-archive_count=$(find "$dist_dir" -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')
-count_is "$archive_count" 4 'tar.gz archive count'
-windows_count=$(find "$dist_dir" -maxdepth 1 -type f \( -name '*_windows_*' -o -name '*.zip' -o -name '*.exe' \) | wc -l | tr -d ' ')
-count_is "$windows_count" 0 'unsupported Windows artifacts'
-for format in deb rpm apk; do
-    package_count=$(find "$dist_dir" -maxdepth 1 -type f -name "*.$format" | wc -l | tr -d ' ')
-    count_is "$package_count" 2 "$format Linux package count"
-done
-find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -exec basename {} \; | sort > "$work_dir/actual"
-cmp -s "$expected" "$work_dir/actual" || fail 'distributable artifact set differs from four archives and six Linux packages'
-
-checksum_names=$work_dir/checksum-names
-awk '
-    NF == 0 { bad = 1; next }
-    NF != 2 { bad = 1; next }
-    { name=$2; sub(/^\*/, "", name); if ($1 !~ /^[[:xdigit:]]{64}$/ || name == "") bad=1; print name }
-    END { if (bad) exit 1 }
-' "$dist_dir/checksums.txt" > "$checksum_names" || fail 'checksums.txt contains malformed entries'
-checksum_count=$(wc -l < "$checksum_names" | tr -d ' ')
-count_is "$checksum_count" 10 'checksum entry count'
-sort -o "$checksum_names" "$checksum_names"
-duplicate_count=$(uniq -d "$checksum_names" | wc -l | tr -d ' ')
-count_is "$duplicate_count" 0 'duplicate checksum entries'
-cmp -s "$expected" "$checksum_names" || fail 'checksums.txt does not cover exactly ten distributable artifacts'
-checksum_for() {
-    case "$checksum_tool" in
-        sha256sum) sha256sum "$1" | awk '{print $1}' ;;
-        shasum) shasum -a 256 "$1" | awk '{print $1}' ;;
-    esac
-}
-while IFS= read -r artifact; do
-    want=$(awk -v target="$artifact" '$2 == target { print $1 }' "$dist_dir/checksums.txt")
-    got=$(checksum_for "$dist_dir/$artifact")
-    [ "$want" = "$got" ] || fail "checksum mismatch for $artifact"
-done < "$expected"
-echo 'validated checksums for all ten distributable artifacts'
+# Validate the exact stable output that GoReleaser just created. This gate is
+# intentionally local and read-only: it does not rebuild or execute artifacts.
+PYTHONDONTWRITEBYTECODE=1 "$script_dir/validate-release-dist.sh" \
+    --dist "$dist_dir" --version "$version"
 
 for os in darwin linux; do
     for arch in amd64 arm64; do
@@ -250,14 +212,24 @@ done
 
 cask=$dist_dir/homebrew/Casks/harness-lint.rb
 [ -r "$cask" ] || fail 'GoReleaser did not generate a Homebrew Cask'
+# GoReleaser v2.17.1 generates the cask locally, but has no template/configuration
+# hook for Homebrew's current architecture stanza order. Normalize only the
+# generated structural layout; version, URLs, and checksums remain GoReleaser-owned.
+PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/normalize_homebrew_cask.py" "$cask"
 ruby -c "$cask" >/dev/null || fail 'generated Homebrew Cask is not valid Ruby'
 if grep -Eq '^[[:space:]]+license[[:space:]]' "$cask"; then fail 'generated Cask has an unsupported top-level license stanza'; fi
 if grep -Eq '^  desc "[^\"]*\."$' "$cask"; then fail 'generated Cask description ends with a full stop'; fi
 if grep -Fq 'com.apple.quarantine' "$cask"; then fail 'generated Cask contains an unsigned-binary quarantine hook'; fi
+if ! awk '/^    on_arm do$/ { arm = NR } /^    on_intel do$/ { intel = NR } END { exit !(arm && intel && arm < intel) }' "$cask"; then
+    fail 'generated Cask does not place on_arm before on_intel'
+fi
+if ! awk 'previous == "  end" && $0 == "  on_linux do" { found = 1 } { previous = $0 } END { exit !found }' "$cask"; then
+    fail 'generated Cask has a blank separator between OS blocks'
+fi
 if ! awk 'END { if (NR < 2 || $0 != "end" || previous == "") exit 1 } { previous = $0 }' "$cask"; then
     fail 'generated Cask has an empty line before its closing end'
 fi
-echo 'validated generated Homebrew Cask Ruby syntax (brew style/audit/load run only in macOS CI)'
+echo 'validated and normalized generated Homebrew Cask (brew style/audit/load run only in macOS CI)'
 
 host_os=$(uname -s)
 host_arch=$(uname -m)

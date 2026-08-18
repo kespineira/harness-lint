@@ -275,7 +275,26 @@ def audit_manifest(name: str, package: Path, version: str) -> dict[str, Any]:
     return manifest
 
 
-def npm_json(command: list[str], package: Path, environment: dict[str, str]) -> dict[str, Any]:
+def normalize_npm_pack_json(parsed: Any, name: str) -> dict[str, Any]:
+    """Normalize npm 11 and npm 12 pack JSON to one validated record."""
+    if isinstance(parsed, list):
+        if len(parsed) != 1:
+            fail(f"npm pack JSON for {name} is not one package record")
+        record = parsed[0]
+    elif isinstance(parsed, dict):
+        if len(parsed) != 1 or name not in parsed:
+            fail(f"npm pack JSON for {name} is not keyed by exactly one package name")
+        record = parsed[name]
+    else:
+        fail(f"npm pack JSON for {name} is not one package record")
+    if not isinstance(record, dict) or record.get("name") != name:
+        fail(f"npm pack JSON for {name} has a malformed or wrong-name record")
+    return record
+
+
+def npm_json(
+    command: list[str], package: Path, environment: dict[str, str], name: str
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
             command,
@@ -294,9 +313,7 @@ def npm_json(command: list[str], package: Path, environment: dict[str, str]) -> 
         parsed = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         fail(f"npm pack did not produce JSON for {package.name}: {error}")
-    if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
-        fail(f"npm pack JSON for {package.name} is not one package record")
-    return parsed[0]
+    return normalize_npm_pack_json(parsed, name)
 
 
 def dry_files(record: dict[str, Any], name: str) -> set[str]:
@@ -442,6 +459,7 @@ def pack(args: argparse.Namespace) -> Path:
                 ["npm", "pack", "--dry-run", "--json", "--ignore-scripts", "--offline", "--no-audit", "--no-fund", "--no-update-notifier", "--cache", str(npm_cache), "--userconfig", str(npm_config), "--globalconfig", str(npm_global_config)],
                 package,
                 npm_environment,
+                name,
             )
             dry_paths = dry_files(dry, name)
             if dry_paths != expected_files:
@@ -471,6 +489,7 @@ def pack(args: argparse.Namespace) -> Path:
                 ],
                 package,
                 npm_environment,
+                name,
             )
             filename = actual.get("filename")
             if not isinstance(filename, str) or Path(filename).name != filename or not filename.endswith(".tgz"):

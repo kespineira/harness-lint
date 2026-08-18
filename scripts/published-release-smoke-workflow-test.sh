@@ -31,6 +31,10 @@ fi
 # Every action reference, if one is added later, must be an immutable commit.
 bad_pins=$(grep -E '^[[:space:]]*uses:' "$workflow" | grep -Ev '@[0-9a-f]{40}([[:space:]]|#|$)' || true)
 [ -z "$bad_pins" ] || fail "an action is not pinned to a full commit: $bad_pins"
+missing_pin_comments=$(grep -E '^[[:space:]]*uses:' "$workflow" | grep -Ev '@[0-9a-f]{40}[[:space:]]+# v[0-9]' || true)
+[ -z "$missing_pin_comments" ] || fail "an action pin is missing its version comment: $missing_pin_comments"
+grep -Fq 'uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2' "$workflow" ||
+    fail 'published smoke does not pin Cosign to the reviewed action'
 
 grep -Fq 'github.event.release.tag_name' "$workflow" || fail 'release event tag is not used'
 grep -Fq 'inputs.tag' "$workflow" || fail 'workflow dispatch tag is not used'
@@ -48,6 +52,34 @@ grep -Fq 'HOMEBREW_NO_ANALYTICS' "$workflow" || fail 'Homebrew analytics are not
 grep -Fq 'export HOME=' "$workflow" || fail 'consumer smoke does not isolate HOME'
 grep -Fq 'harness-lint version' "$workflow" || fail 'consumer version is not verified'
 grep -Fq 'harness-lint --help' "$workflow" || fail 'consumer help is not verified'
+
+linux_block=$(awk '
+    $0 == "  linux-published-consumer:" { in_job = 1; next }
+    in_job && /^  [A-Za-z0-9_-]+:/ { exit }
+    in_job { print }
+' "$workflow")
+for required in \
+    'download_asset "$archive"' \
+    'download_asset checksums.txt' \
+    'download_asset checksums.txt.sigstore.json' \
+    'download_asset "$sbom"' \
+    'sha256sum -c -' \
+    'cosign verify-blob' \
+    'gh attestation verify' \
+    "--predicate-type 'https://slsa.dev/provenance/v1'" \
+    "--predicate-type 'https://spdx.dev/Document/v2.3'" \
+    'spdxVersion == "SPDX-2.3"' \
+    '--repo "$GITHUB_REPOSITORY"' \
+    '--signer-workflow "$workflow"' \
+    '--source-ref "$source_ref"' \
+    '--cert-identity "$certificate_identity"'; do
+    printf '%s\n' "$linux_block" | grep -Fq -- "$required" ||
+        fail "Linux published consumer omits supply-chain gate: $required"
+done
+verify_line=$(printf '%s\n' "$linux_block" | grep -n 'gh attestation verify' | head -n1 | cut -d: -f1)
+installer_line=$(printf '%s\n' "$linux_block" | grep -n 'Install and exercise the published archive' | cut -d: -f1)
+[ -n "$verify_line" ] && [ -n "$installer_line" ] && [ "$verify_line" -lt "$installer_line" ] ||
+    fail 'published archive verification does not precede installer consumer test'
 
 if grep -Eiq 'gh[[:space:]]+release|git[[:space:]]+(push|tag|commit)|curl[^\n]*-[[:alnum:]]*[Xx][[:space:]]*(POST|PUT|PATCH|DELETE)|brew[[:space:]]+tap-new' "$workflow"; then
     fail 'workflow contains a repository or release mutation command'

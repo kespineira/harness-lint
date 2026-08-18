@@ -18,21 +18,21 @@ jobs:
           persist-credentials: false
 
       - name: Set up reviewed Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '22.14.0'
+          node-version: '24.19.0'
           package-manager-cache: false
 
       - name: Install reviewed npm
-        run: npm install --global npm@11.5.1
+        run: npm install --global npm@12.0.2
 
       - name: Verify reviewed Node.js and npm
-        run: test "$(node --version)" = 'v22.14.0' && test "$(npm --version)" = '11.5.1'
+        run: test "$(node --version)" = 'v24.19.0' && test "$(npm --version)" = '12.0.2'
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version: '1.26.6'
           cache: true
 
       - name: Check diff
@@ -40,6 +40,15 @@ jobs:
 
       - name: Run release workflow policy test
         run: ./scripts/release-workflow-test.sh
+
+      - name: Run release SBOM policy test
+        run: ./scripts/release-sbom-test.sh
+
+      - name: Run release dist validation tests
+        run: ./scripts/release-dist-test.sh
+
+      - name: Run release attestation verifier test
+        run: ./scripts/verify-release-attestations-test.sh
 
       - name: Run published release smoke workflow policy test
         run: ./scripts/published-release-smoke-workflow-test.sh

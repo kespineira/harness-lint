@@ -52,6 +52,24 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# Syft is installed by the release environment at the coordinator-approved
+# v1.51.0 pin. Catalog the canonical archives after GoReleaser has assembled
+# them; do not scan the repository or a separately built binary.
+sboms:
+  - id: archive-spdx
+    artifacts: archive
+    ids:
+      - default
+    cmd: syft
+    args:
+      - "$artifact"
+      - "--output"
+      - "spdx-json=$document"
+    documents:
+      - "${artifact}.spdx.json"
+    env:
+      - SYFT_CHECK_FOR_APP_UPDATE=false
+
 # The release workflow keylessly signs dist/checksums.txt with Cosign v3 and
 # uploads checksums.txt.sigstore.json before publishing the draft release.
 
@@ -85,7 +103,7 @@ homebrew_casks:
       owner: kespineira
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: true
     directory: Casks
     commit_author:
       name: goreleaserbot
