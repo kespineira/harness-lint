@@ -37,8 +37,8 @@ homebrew_publisher=$project_root/scripts/publish_homebrew_cask.py
 [ -r "$homebrew_publisher" ] || fail 'Homebrew cask publisher is missing'
 homebrew_publisher_test=$project_root/scripts/publish_homebrew_cask_test.py
 [ -r "$homebrew_publisher_test" ] || fail 'Homebrew cask publisher test is missing'
-python3 "$homebrew_normalizer_test" || fail 'Homebrew cask normalizer tests failed'
-python3 "$homebrew_publisher_test" || fail 'Homebrew cask publisher tests failed'
+PYTHONDONTWRITEBYTECODE=1 python3 "$homebrew_normalizer_test" || fail 'Homebrew cask normalizer tests failed'
+PYTHONDONTWRITEBYTECODE=1 python3 "$homebrew_publisher_test" || fail 'Homebrew cask publisher tests failed'
 
 # Keep this policy test itself as an explicit gate in both normal CI and the
 # stable release job. This prevents a future workflow edit from silently
