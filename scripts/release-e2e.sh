@@ -13,7 +13,6 @@ trap cleanup 0
 trap 'cleanup; exit 1' 1 2 3 15
 fail() { echo "release E2E: $*" >&2; exit 1; }
 require() { command -v "$1" >/dev/null 2>&1 || fail "required command is unavailable: $1"; }
-count_is() { [ "$1" -eq "$2" ] || fail "$3: found $1, want $2"; }
 file_description_matches() {
     file_os=$1
     file_arch=$2
@@ -94,6 +93,12 @@ if command -v sha256sum >/dev/null 2>&1; then checksum_tool=sha256sum
 elif command -v shasum >/dev/null 2>&1; then checksum_tool=shasum
 else fail 'required SHA-256 command is unavailable'
 fi
+checksum_for() {
+    case "$checksum_tool" in
+        sha256sum) sha256sum "$1" | awk '{print $1}' ;;
+        shasum) shasum -a 256 "$1" | awk '{print $1}' ;;
+    esac
+}
 
 goreleaser release --snapshot --clean --skip=publish
 dist_dir=$project_root/dist
@@ -101,58 +106,9 @@ dist_dir=$project_root/dist
 version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$dist_dir/metadata.json" | sed -n '1p')
 [ -n "$version" ] || fail 'GoReleaser metadata has no version'
 
-expected=$work_dir/expected
-for os in darwin linux; do
-    for arch in amd64 arm64; do
-        archive_name=harness-lint_${version}_${os}_${arch}.tar.gz
-        printf '%s\n' "$archive_name" >> "$expected"
-        printf '%s\n' "$archive_name.spdx.json" >> "$expected"
-    done
-done
-for format in deb rpm apk; do
-    for arch in amd64 arm64; do
-        printf '%s\n' "harness-lint_${version}_linux_$arch.$format" >> "$expected"
-    done
-done
-sort -o "$expected" "$expected"
-archive_count=$(find "$dist_dir" -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')
-count_is "$archive_count" 4 'tar.gz archive count'
-windows_count=$(find "$dist_dir" -maxdepth 1 -type f \( -name '*_windows_*' -o -name '*.zip' -o -name '*.exe' \) | wc -l | tr -d ' ')
-count_is "$windows_count" 0 'unsupported Windows artifacts'
-for format in deb rpm apk; do
-    package_count=$(find "$dist_dir" -maxdepth 1 -type f -name "*.$format" | wc -l | tr -d ' ')
-    count_is "$package_count" 2 "$format Linux package count"
-done
-find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.spdx.json' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -exec basename {} \; | sort > "$work_dir/actual"
-cmp -s "$expected" "$work_dir/actual" || fail 'distributable artifact set differs from four archives, four SBOMs, and six Linux packages'
-
-checksum_names=$work_dir/checksum-names
-awk '
-    NF == 0 { bad = 1; next }
-    NF != 2 { bad = 1; next }
-    { name=$2; sub(/^\*/, "", name); if ($1 !~ /^[[:xdigit:]]{64}$/ || name == "") bad=1; print name }
-    END { if (bad) exit 1 }
-' "$dist_dir/checksums.txt" > "$checksum_names" || fail 'checksums.txt contains malformed entries'
-checksum_count=$(wc -l < "$checksum_names" | tr -d ' ')
-count_is "$checksum_count" 14 'checksum entry count'
-sort -o "$checksum_names" "$checksum_names"
-duplicate_count=$(uniq -d "$checksum_names" | wc -l | tr -d ' ')
-count_is "$duplicate_count" 0 'duplicate checksum entries'
-cmp -s "$expected" "$checksum_names" || fail 'checksums.txt does not cover exactly fourteen distributable artifacts'
-checksum_for() {
-    case "$checksum_tool" in
-        sha256sum) sha256sum "$1" | awk '{print $1}' ;;
-        shasum) shasum -a 256 "$1" | awk '{print $1}' ;;
-    esac
-}
-while IFS= read -r artifact; do
-    want=$(awk -v target="$artifact" '$2 == target { print $1 }' "$dist_dir/checksums.txt")
-    got=$(checksum_for "$dist_dir/$artifact")
-    [ "$want" = "$got" ] || fail "checksum mismatch for $artifact"
-done < "$expected"
-echo 'validated checksums for all fourteen distributable artifacts'
-
-PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/release-sbom.py" \
+# Validate the exact stable output that GoReleaser just created. This gate is
+# intentionally local and read-only: it does not rebuild or execute artifacts.
+PYTHONDONTWRITEBYTECODE=1 "$script_dir/validate-release-dist.sh" \
     --dist "$dist_dir" --version "$version"
 
 for os in darwin linux; do

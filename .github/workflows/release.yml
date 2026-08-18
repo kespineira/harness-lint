@@ -313,6 +313,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
+      - name: Validate actual stable release output
+        run: ./scripts/validate-release-dist.sh --dist dist --version "$NPM_VERSION"
+
       - name: Sign checksums
         run: |
           cosign sign-blob --yes --bundle dist/checksums.txt.sigstore.json dist/checksums.txt

@@ -44,6 +44,9 @@ jobs:
       - name: Run release SBOM policy test
         run: ./scripts/release-sbom-test.sh
 
+      - name: Run release dist validation tests
+        run: ./scripts/release-dist-test.sh
+
       - name: Run release attestation verifier test
         run: ./scripts/verify-release-attestations-test.sh
 

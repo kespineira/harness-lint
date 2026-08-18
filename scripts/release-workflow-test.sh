@@ -25,6 +25,10 @@ publish_script=$project_root/scripts/publish-npm-packages.py
 [ -r "$publish_script" ] || fail 'npm publish script is missing'
 attestation_script=$project_root/scripts/verify-release-attestations.sh
 [ -r "$attestation_script" ] || fail 'release attestation verifier is missing'
+release_dist_validator=$project_root/scripts/validate-release-dist.sh
+[ -r "$release_dist_validator" ] || fail 'stable release dist validator is missing'
+release_dist_validator_test=$project_root/scripts/release-dist-test.sh
+[ -r "$release_dist_validator_test" ] || fail 'stable release dist validator test is missing'
 
 # Keep this policy test itself as an explicit gate in both normal CI and the
 # stable release job. This prevents a future workflow edit from silently
@@ -170,7 +174,7 @@ grep -Fq "node-version: '$reviewed_node_version'" "$ci_workflow" || fail 'CI Nod
 grep -Fq "npm install --global npm@$reviewed_npm_version" "$ci_workflow" || fail 'CI npm version is not exact'
 for gate in './scripts/isolated-smoke.sh' './scripts/stage-npm-packages-test.sh' \
     './scripts/pack-npm-packages-test.sh' './scripts/publish-npm-packages-test.sh' \
-    './scripts/npm-package-e2e-test.sh'; do
+    './scripts/npm-package-e2e-test.sh' './scripts/release-dist-test.sh'; do
     grep -Fq "$gate" "$ci_workflow" || fail "CI is missing deterministic gate $gate"
 done
 if grep -Eq 'NPM_TOKEN|NODE_AUTH_TOKEN' "$release_workflow" "$ci_workflow"; then
@@ -226,6 +230,25 @@ printf '%s\n' "$release_block" | grep -Fq 'Upload audited npm publication inputs
     fail 'canonical release job does not upload audited npm inputs'
 printf '%s\n' "$release_block" | grep -Fq 'path: dist/npm-packages' ||
     fail 'canonical release job does not upload the expected npm package directory'
+
+# Validate the actual stable GoReleaser dist after its one release build and
+# before any signing, attestation, or npm staging consumes it.
+printf '%s\n' "$release_block" | grep -Fq 'Validate actual stable release output' ||
+    fail 'canonical release job has no actual-dist validation step'
+# The literal GitHub expression is intentionally single-quoted for grep.
+# shellcheck disable=SC2016
+printf '%s\n' "$release_block" | grep -Fq 'run: ./scripts/validate-release-dist.sh --dist dist --version "$NPM_VERSION"' ||
+    fail 'canonical release job does not run the actual-dist validator'
+dist_validation_line=$(printf '%s\n' "$release_block" | grep -n 'validate-release-dist.sh' | cut -d: -f1)
+cosign_line=$(printf '%s\n' "$release_block" | grep -n 'cosign sign-blob' | cut -d: -f1)
+attest_line=$(printf '%s\n' "$release_block" | grep -n 'uses: actions/attest@' | cut -d: -f1 | sed -n '1p')
+npm_stage_line=$(printf '%s\n' "$release_block" | grep -n 'stage-npm-packages.sh' | cut -d: -f1)
+[ -n "$dist_validation_line" ] && [ -n "$cosign_line" ] && [ -n "$attest_line" ] && [ -n "$npm_stage_line" ] ||
+    fail 'actual-dist validator/signing/attestation/npm steps are incomplete'
+[ "$dist_validation_line" -lt "$cosign_line" ] &&
+    [ "$dist_validation_line" -lt "$attest_line" ] &&
+    [ "$dist_validation_line" -lt "$npm_stage_line" ] ||
+    fail 'actual-dist validation does not precede signing, attestation, and npm staging'
 
 # Attest the actual GoReleaser checksum subjects, then verify each canonical
 # archive before any npm staging or publication can run.
