@@ -76,6 +76,83 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.validate-published-release.outputs.release_tag }}
     steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Download and verify the published Linux archive supply chain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_dir=$(mktemp -d "$RUNNER_TEMP/harness-lint-published-release.XXXXXX")
+          cleanup() { rm -rf "$release_dir"; }
+          trap cleanup EXIT INT TERM
+
+          version=${RELEASE_TAG#v}
+          archive="harness-lint_${version}_linux_amd64.tar.gz"
+          sbom="$archive.spdx.json"
+          api_root="https://api.github.com/repos/$GITHUB_REPOSITORY"
+          release_json="$release_dir/release.json"
+          curl --fail --location --silent --show-error --retry 3 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api_root/releases/tags/$RELEASE_TAG" >"$release_json"
+
+          asset_url() {
+            jq -er --arg name "$1" \
+              '.assets[] | select(.name == $name) | .browser_download_url' "$release_json"
+          }
+          download_asset() {
+            name=$1
+            curl --fail --location --silent --show-error --retry 3 \
+              --header 'Accept: application/octet-stream' \
+              "$(asset_url "$name")" -o "$release_dir/$name"
+          }
+          download_asset "$archive"
+          download_asset checksums.txt
+          download_asset checksums.txt.sigstore.json
+          download_asset "$sbom"
+
+          checksum_line=$(awk -v name="$archive" '$2 == name { print }' \
+            "$release_dir/checksums.txt")
+          [ "$(printf '%s\n' "$checksum_line" | wc -l | tr -d ' ')" = '1' ]
+          (cd "$release_dir" && printf '%s\n' "$checksum_line" | sha256sum -c -)
+
+          cosign verify-blob "$release_dir/checksums.txt" \
+            --bundle "$release_dir/checksums.txt.sigstore.json" \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/tags/$RELEASE_TAG" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+
+          workflow="$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          source_ref="refs/tags/$RELEASE_TAG"
+          certificate_identity="https://github.com/$workflow@$source_ref"
+          gh attestation verify "$release_dir/$archive" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" \
+            --source-ref "$source_ref" \
+            --cert-identity "$certificate_identity" \
+            --predicate-type 'https://slsa.dev/provenance/v1'
+
+          jq -e '.spdxVersion == "SPDX-2.3" and .SPDXID == "SPDXRef-DOCUMENT" and (.packages | type == "array") and (.relationships | type == "array")' \
+            "$release_dir/$sbom" >/dev/null
+          sbom_verification="$release_dir/sbom-verification.json"
+          gh attestation verify "$release_dir/$archive" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$workflow" \
+            --source-ref "$source_ref" \
+            --cert-identity "$certificate_identity" \
+            --predicate-type 'https://spdx.dev/Document/v2.3' \
+            --format json >"$sbom_verification"
+          jq -e --arg archive "$archive" --slurpfile expected "$release_dir/$sbom" '
+            length > 0 and any(.[];
+              any(.verificationResult.statement.subject[]?; .name == $archive) and
+              .verificationResult.statement.predicate == $expected[0]
+            )
+          ' "$sbom_verification" >/dev/null
+
       - name: Install and exercise the published archive
         run: |
           set -euo pipefail
