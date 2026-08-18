@@ -52,7 +52,6 @@ command -v jq >/dev/null 2>&1 || fail 'jq is required'
 
 workflow="$repository/.github/workflows/release.yml"
 source_ref="refs/tags/$tag"
-certificate_identity="https://github.com/$workflow@$source_ref"
 provenance_predicate='https://slsa.dev/provenance/v1'
 sbom_predicate='https://spdx.dev/Document/v2.3'
 verification_dir=$(mktemp -d "${TMPDIR:-/tmp}/harness-lint-attestations.XXXXXX")
@@ -80,7 +79,6 @@ verify_provenance() {
         --repo "$repository" \
         --signer-workflow "$workflow" \
         --source-ref "$source_ref" \
-        --cert-identity "$certificate_identity" \
         --predicate-type "$provenance_predicate" \
         --format json >"$result"
     verify_subject_name "$result" "$archive"
@@ -96,7 +94,6 @@ verify_sbom() {
         --repo "$repository" \
         --signer-workflow "$workflow" \
         --source-ref "$source_ref" \
-        --cert-identity "$certificate_identity" \
         --predicate-type "$sbom_predicate" \
         --format json >"$result"
     jq -e --arg archive "$archive" --slurpfile expected "$dist/$sbom" '

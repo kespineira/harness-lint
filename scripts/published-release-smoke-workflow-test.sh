@@ -71,11 +71,13 @@ for required in \
     'spdxVersion == "SPDX-2.3"' \
     '--repo "$GITHUB_REPOSITORY"' \
     '--signer-workflow "$workflow"' \
-    '--source-ref "$source_ref"' \
-    '--cert-identity "$certificate_identity"'; do
+    '--source-ref "$source_ref"'; do
     printf '%s\n' "$linux_block" | grep -Fq -- "$required" ||
         fail "Linux published consumer omits supply-chain gate: $required"
 done
+if printf '%s\n' "$linux_block" | grep -Fq -- '--cert-identity "$certificate_identity"'; then
+    fail 'published Linux consumer combines mutually exclusive identity flags'
+fi
 verify_line=$(printf '%s\n' "$linux_block" | grep -n 'gh attestation verify' | head -n1 | cut -d: -f1)
 installer_line=$(printf '%s\n' "$linux_block" | grep -n 'Install and exercise the published archive' | cut -d: -f1)
 [ -n "$verify_line" ] && [ -n "$installer_line" ] && [ "$verify_line" -lt "$installer_line" ] ||
