@@ -19,10 +19,11 @@ type configDocument struct {
 }
 
 type eventAnalysis struct {
-	event         string
-	exactHandlers int
-	partial       int
-	lookalikes    int
+	event          string
+	exactHandlers  int
+	legacyHandlers int
+	partial        int
+	lookalikes     int
 }
 
 type inspection struct {
@@ -39,6 +40,7 @@ type handlerMatch uint8
 const (
 	handlerUnrelated handlerMatch = iota
 	handlerExact
+	handlerLegacy
 	handlerPartial
 	handlerLookalike
 )
@@ -211,9 +213,9 @@ func managedEntryReports(events []eventAnalysis) []ManagedEntry {
 	result := make([]ManagedEntry, 0, len(events))
 	for _, event := range events {
 		state := ManagedEntryNotInstalled
-		if event.exactHandlers == 1 && event.partial == 0 {
+		if event.exactHandlers == 1 && event.legacyHandlers == 0 && event.partial == 0 {
 			state = ManagedEntryInstalled
-		} else if event.exactHandlers > 0 || event.partial > 0 {
+		} else if event.exactHandlers > 0 || event.legacyHandlers > 0 || event.partial > 0 {
 			state = ManagedEntryPartial
 		}
 		result = append(result, ManagedEntry{
@@ -234,9 +236,9 @@ func aggregateManagedState(events []eventAnalysis) ManagedEntryState {
 	installed := 0
 	partial := 0
 	for _, event := range events {
-		if event.exactHandlers == 1 && event.partial == 0 {
+		if event.exactHandlers == 1 && event.legacyHandlers == 0 && event.partial == 0 {
 			installed++
-		} else if event.exactHandlers > 0 || event.partial > 0 {
+		} else if event.exactHandlers > 0 || event.legacyHandlers > 0 || event.partial > 0 {
 			partial++
 		}
 	}
@@ -256,9 +258,9 @@ func aggregateStatus(events []eventAnalysis) StatusCode {
 	installed := 0
 	partial := 0
 	for _, event := range events {
-		if event.exactHandlers == 1 && event.partial == 0 {
+		if event.exactHandlers == 1 && event.legacyHandlers == 0 && event.partial == 0 {
 			installed++
-		} else if event.exactHandlers > 0 || event.partial > 0 {
+		} else if event.exactHandlers > 0 || event.legacyHandlers > 0 || event.partial > 0 {
 			partial++
 		}
 	}
@@ -314,6 +316,9 @@ func (m *manager) analyze(root *jsonNode) ([]eventAnalysis, error) {
 				switch m.matchHandler(event, group, handler) {
 				case handlerExact:
 					analysis.exactHandlers++
+				case handlerLegacy:
+					analysis.exactHandlers++
+					analysis.legacyHandlers++
 				case handlerPartial:
 					analysis.partial++
 				case handlerLookalike:
@@ -332,6 +337,9 @@ func (m *manager) matchHandler(event string, group, handler *jsonNode) handlerMa
 	}
 	if isExactHandler(m.runtime, event, handler) {
 		return handlerExact
+	}
+	if isLegacyCodexHandler(m.runtime, event, handler) {
+		return handlerLegacy
 	}
 	if isPartialHandler(m.runtime, event, handler) {
 		return handlerPartial
@@ -472,7 +480,7 @@ func allEventsInstalled(events []eventAnalysis) bool {
 		return false
 	}
 	for _, event := range events {
-		if event.exactHandlers != 1 || event.partial != 0 {
+		if event.exactHandlers != 1 || event.legacyHandlers != 0 || event.partial != 0 {
 			return false
 		}
 	}
@@ -489,8 +497,12 @@ func totalExactHandlers(events []eventAnalysis) int {
 
 func (m *manager) installPlan() []Change {
 	result := make([]Change, 0, len(expectedEvents(m.runtime))+1)
+	delivery := "synchronous"
+	if m.runtime == RuntimeClaude {
+		delivery = "asynchronous"
+	}
 	for _, event := range expectedEvents(m.runtime) {
-		result = append(result, Change{Kind: "add-handler", Path: m.configPath, Detail: "merge managed async command hook for " + event})
+		result = append(result, Change{Kind: "add-handler", Path: m.configPath, Detail: "merge managed " + delivery + " command hook for " + event})
 	}
 	if m.runtime == RuntimeCodex {
 		result = append(result, Change{Kind: "warning", Path: filepath.Join(m.configRoot, "config.toml"), Detail: "inline hooks, if present, are merged by Codex and require separate trust review"})

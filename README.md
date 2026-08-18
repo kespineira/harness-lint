@@ -409,10 +409,14 @@ Direct command-hook capture is the preferred usage source because the runtime
 delivers one event at the point where the tool call is observed. The generated
 hook only forwards a bounded JSON document to the quiet `ingest` receiver; it
 does not run `scan`, read transcripts, start a daemon, use the network, or
-gate the agent on report generation. The handler is asynchronous (`async: true`
-with the manager's ten-second timeout), so the runtime remains responsible for
-its own hook scheduling and failure behavior; `harness-lint` does not make the
-hook a synchronous policy gate.
+gate the agent on report generation. Claude's handler is asynchronous
+(`async: true` with the manager's ten-second timeout), while Codex's handler
+omits `async` so it uses the default synchronous delivery supported by Codex
+0.147.0 and newer command-hook releases. Codex first added asynchronous
+command hooks in 0.148.0. In both runtimes `harness-lint` only records metadata
+and does not turn hook delivery into a policy gate. Installing also migrates the
+harness-lint-owned current-v1 Codex shape that previously included
+`async: true`; user, lookalike, and stale-version entries are preserved.
 
 Transcript and file-capture imports are fallback, backfill, and verification
 paths. They are useful when hooks were not installed, when a delivery was

@@ -20,7 +20,8 @@ import (
 func TestExecuteMilestone2IsolatedHooksAndIngestE2E(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
-	dbPath := filepath.Join(root, "state", "harness-lint.db")
+	configDir := filepath.Join(root, "config")
+	dbPath := filepath.Join(configDir, "harness-lint", "harness-lint.db")
 	claudeConfig := filepath.Join(home, ".claude", "settings.json")
 	codexConfig := filepath.Join(home, ".codex", "hooks.json")
 	writeMilestone2UserConfig(t, claudeConfig, "user-claude-preserved")
@@ -31,6 +32,7 @@ func TestExecuteMilestone2IsolatedHooksAndIngestE2E(t *testing.T) {
 		Home:        home,
 		CWD:         root,
 		ProjectRoot: root,
+		ConfigDir:   configDir,
 		Now:         func() time.Time { return now },
 		// The manager still performs its real install/uninstall operations; the
 		// lookup is injected only so the test does not depend on a developer's

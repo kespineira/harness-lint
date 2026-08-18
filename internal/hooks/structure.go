@@ -42,14 +42,6 @@ func isExactHandler(runtime Runtime, event string, handler *jsonNode) bool {
 	if !ok {
 		return false
 	}
-	asyncValue, asyncFound, asyncErr := handler.field("async")
-	if asyncErr != nil || !asyncFound {
-		return false
-	}
-	async, ok := asyncValue.boolValue()
-	if !ok || !async {
-		return false
-	}
 	timeoutValue, timeoutFound, timeoutErr := handler.field("timeout")
 	if timeoutErr != nil || !timeoutFound {
 		return false
@@ -62,12 +54,27 @@ func isExactHandler(runtime Runtime, event string, handler *jsonNode) bool {
 		if event != "PostToolUse" || command != expectedCodexCommand() {
 			return false
 		}
+		// Omitting async is the canonical synchronous Codex shape. Older
+		// harness-lint versions emitted async:true; that legacy shape is
+		// recognized separately so install can migrate it in place.
+		_, asyncFound, asyncErr := handler.field("async")
+		if asyncErr != nil || asyncFound {
+			return false
+		}
 		// Codex's documented hooks.json form is shell-command based. An args
 		// field would be a different shape, so it cannot be our owned entry.
 		_, argsFound, argsErr := handler.field("args")
 		return argsErr == nil && !argsFound
 	}
 	if runtime != RuntimeClaude || command != BinaryName {
+		return false
+	}
+	asyncValue, asyncFound, asyncErr := handler.field("async")
+	if asyncErr != nil || !asyncFound {
+		return false
+	}
+	async, ok := asyncValue.boolValue()
+	if !ok || !async {
 		return false
 	}
 	argsValue, argsFound, argsErr := handler.field("args")
@@ -85,6 +92,50 @@ func isExactHandler(runtime Runtime, event string, handler *jsonNode) bool {
 		}
 	}
 	return event == "PostToolUse" || event == "PostToolUseFailure" || event == "UserPromptExpansion"
+}
+
+func isLegacyCodexHandler(runtime Runtime, event string, handler *jsonNode) bool {
+	if runtime != RuntimeCodex || event != "PostToolUse" || handler == nil || handler.kind != jsonObjectKind {
+		return false
+	}
+	typeValue, typeFound, typeErr := handler.field("type")
+	if typeErr != nil || !typeFound {
+		return false
+	}
+	typeName, ok := typeValue.stringValue()
+	if !ok || typeName != "command" {
+		return false
+	}
+	commandValue, commandFound, commandErr := handler.field("command")
+	if commandErr != nil || !commandFound {
+		return false
+	}
+	command, ok := commandValue.stringValue()
+	if !ok || command != expectedCodexCommand() {
+		return false
+	}
+	timeoutValue, timeoutFound, timeoutErr := handler.field("timeout")
+	if timeoutErr != nil || !timeoutFound {
+		return false
+	}
+	timeout, ok := timeoutValue.numberValue()
+	if !ok || timeout != hookTimeout {
+		return false
+	}
+	asyncValue, asyncFound, asyncErr := handler.field("async")
+	if asyncErr != nil || !asyncFound {
+		return false
+	}
+	async, ok := asyncValue.boolValue()
+	if !ok || !async {
+		return false
+	}
+	_, argsFound, argsErr := handler.field("args")
+	return argsErr == nil && !argsFound
+}
+
+func isOwnedHandler(runtime Runtime, event string, handler *jsonNode) bool {
+	return isExactHandler(runtime, event, handler) || isLegacyCodexHandler(runtime, event, handler)
 }
 
 func isPartialHandler(runtime Runtime, event string, handler *jsonNode) bool {
@@ -199,7 +250,9 @@ func newManagedHandler(runtime Runtime, event string) *jsonNode {
 	} else {
 		_ = handler.setField("command", newJSONString(expectedCodexCommand()))
 	}
-	_ = handler.setField("async", newJSONBool(true))
+	if runtime == RuntimeClaude {
+		_ = handler.setField("async", newJSONBool(true))
+	}
 	_ = handler.setField("timeout", newJSONNumber(hookTimeout))
 	return handler
 }
@@ -244,11 +297,88 @@ func (m *manager) addManagedHooks(root *jsonNode) (bool, error) {
 		if eventValue.kind != jsonArrayKind {
 			return changed, fmt.Errorf("hooks.%s must be an array", event)
 		}
+		legacyChanged, err := normalizeCodexLegacyHandlers(m.runtime, eventValue, event)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || legacyChanged
 		if eventHasExactManagedHandler(m.runtime, event, eventValue) {
 			continue
 		}
 		eventValue.elements = append(eventValue.elements, newManagedGroup(m.runtime, event))
 		changed = true
+	}
+	return changed, nil
+}
+
+// normalizeCodexLegacyHandlers migrates current-v1 Codex handlers emitted by
+// older harness-lint versions. If a config contains both canonical and legacy
+// owned handlers, retain only one owned handler; user, lookalike, and stale
+// marker entries do not match either ownership predicate and remain untouched.
+func normalizeCodexLegacyHandlers(runtime Runtime, eventValue *jsonNode, event string) (bool, error) {
+	if runtime != RuntimeCodex || event != "PostToolUse" || eventValue == nil || eventValue.kind != jsonArrayKind {
+		return false, nil
+	}
+	hasLegacy := false
+	for _, group := range eventValue.elements {
+		if group == nil || group.kind != jsonObjectKind || !managedGroupShape(group) {
+			continue
+		}
+		handlers, found, err := group.field("hooks")
+		if err != nil {
+			return false, err
+		}
+		if !found || handlers.kind != jsonArrayKind {
+			continue
+		}
+		for _, handler := range handlers.elements {
+			if isLegacyCodexHandler(RuntimeCodex, event, handler) {
+				hasLegacy = true
+				break
+			}
+		}
+		if hasLegacy {
+			break
+		}
+	}
+	if !hasLegacy {
+		return false, nil
+	}
+	changed := false
+	ownedKept := false
+	for _, group := range eventValue.elements {
+		if group == nil || group.kind != jsonObjectKind || !managedGroupShape(group) {
+			continue
+		}
+		handlers, found, err := group.field("hooks")
+		if err != nil {
+			return changed, err
+		}
+		if !found || handlers.kind != jsonArrayKind {
+			continue
+		}
+		remaining := make([]*jsonNode, 0, len(handlers.elements))
+		for _, handler := range handlers.elements {
+			canonical := isExactHandler(RuntimeCodex, event, handler)
+			legacy := isLegacyCodexHandler(RuntimeCodex, event, handler)
+			if !canonical && !legacy {
+				remaining = append(remaining, handler)
+				continue
+			}
+			if ownedKept {
+				changed = true
+				continue
+			}
+			ownedKept = true
+			if legacy {
+				if err := handler.removeField("async"); err != nil {
+					return changed, err
+				}
+				changed = true
+			}
+			remaining = append(remaining, handler)
+		}
+		handlers.elements = remaining
 	}
 	return changed, nil
 }
@@ -266,7 +396,7 @@ func eventHasExactManagedHandler(runtime Runtime, event string, eventValue *json
 			continue
 		}
 		for _, handler := range handlers.elements {
-			if isExactHandler(runtime, event, handler) {
+			if isOwnedHandler(runtime, event, handler) {
 				return true
 			}
 		}
@@ -312,7 +442,7 @@ func (m *manager) removeManagedHooks(root *jsonNode) (bool, error) {
 			remaining := make([]*jsonNode, 0, len(handlers.elements))
 			removed := false
 			for _, handler := range handlers.elements {
-				if managedGroupShape(group) && isExactHandler(m.runtime, event, handler) {
+				if managedGroupShape(group) && isOwnedHandler(m.runtime, event, handler) {
 					removed = true
 					changed = true
 					continue
