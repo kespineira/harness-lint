@@ -41,6 +41,12 @@ jobs:
       - name: Run release workflow policy test
         run: ./scripts/release-workflow-test.sh
 
+      - name: Run release SBOM policy test
+        run: ./scripts/release-sbom-test.sh
+
+      - name: Run release attestation verifier test
+        run: ./scripts/verify-release-attestations-test.sh
+
       - name: Run published release smoke workflow policy test
         run: ./scripts/published-release-smoke-workflow-test.sh
 

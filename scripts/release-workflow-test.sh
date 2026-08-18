@@ -75,10 +75,32 @@ for e2e_job in release-e2e-linux release-e2e-macos; do
         fail "$e2e_job does not run the real npm package E2E"
 done
 homebrew_block=$(job_block release-homebrew-e2e)
-printf '%s\n' "$homebrew_block" | grep -Fq "go-version: '$reviewed_go_version'" ||
+homebrew_go_step=$(printf '%s\n' "$homebrew_block" | awk '
+    $0 == "      - name: Set up Go" { in_step = 1; next }
+    in_step && /^      - name:/ { exit }
+    in_step { print }
+')
+printf '%s\n' "$homebrew_go_step" | grep -Fq 'uses: actions/setup-go@' ||
+    fail 'Homebrew E2E does not use the reviewed setup-go action'
+printf '%s\n' "$homebrew_go_step" | grep -Fq "go-version: '$reviewed_go_version'" ||
     fail 'Homebrew E2E does not pin the exact reviewed Go version'
-printf '%s\n' "$homebrew_block" | grep -Fq "syft-version: '$reviewed_syft_version'" ||
+printf '%s\n' "$homebrew_go_step" | grep -Eq '^        with:$' ||
+    fail 'Homebrew E2E setup-go has no with block'
+printf '%s\n' "$homebrew_go_step" | grep -Eq '^          cache: true$' ||
+    fail 'Homebrew E2E setup-go cache is not enabled'
+homebrew_syft_step=$(printf '%s\n' "$homebrew_block" | awk '
+    $0 == "      - name: Install Syft" { in_step = 1; next }
+    in_step && /^      - name:/ { exit }
+    in_step { print }
+')
+printf '%s\n' "$homebrew_syft_step" | grep -Fq 'uses: anchore/sbom-action/download-syft@' ||
+    fail 'Homebrew E2E does not use the reviewed Syft action'
+printf '%s\n' "$homebrew_syft_step" | grep -Fq "syft-version: '$reviewed_syft_version'" ||
     fail 'Homebrew E2E does not install the exact reviewed Syft version'
+syft_input_count=$(printf '%s\n' "$homebrew_syft_step" |
+    awk '$0 ~ /^          [A-Za-z0-9_-]+:/ { count++ } END { print count + 0 }')
+[ "$syft_input_count" -eq 1 ] ||
+    fail 'Homebrew E2E Syft action has inputs beyond the reviewed syft-version'
 printf '%s\n' "$homebrew_block" | grep -Fq "RELEASE_E2E_TAP: harness-lint/e2e-" ||
     fail 'Homebrew E2E tap is not runner-specific'
 printf '%s\n' "$homebrew_block" | grep -Fq "HOMEBREW_NO_AUTO_UPDATE: '1'" ||
@@ -240,6 +262,9 @@ printf '%s\n' "$npm_block" | grep -Fq 'Download audited npm publication inputs' 
     fail 'npm publish job does not download audited inputs'
 printf '%s\n' "$npm_block" | grep -Fq 'uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' ||
     fail 'npm publish job does not checkout with the reviewed action'
+# The literal GitHub expression must remain single-quoted for grep; it is not
+# a shell expression despite shellcheck's generic interpolation warning.
+# shellcheck disable=SC2016
 printf '%s\n' "$npm_block" | grep -Fq 'ref: ${{ github.sha }}' ||
     fail 'npm publish job does not checkout the exact tagged commit'
 printf '%s\n' "$npm_block" | grep -Fq 'persist-credentials: false' ||
