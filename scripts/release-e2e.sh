@@ -89,6 +89,7 @@ require curl
 require awk
 require sort
 require cmp
+require python3
 if command -v sha256sum >/dev/null 2>&1; then checksum_tool=sha256sum
 elif command -v shasum >/dev/null 2>&1; then checksum_tool=shasum
 else fail 'required SHA-256 command is unavailable'
@@ -103,7 +104,9 @@ version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$dist_dir/metadata.json" | 
 expected=$work_dir/expected
 for os in darwin linux; do
     for arch in amd64 arm64; do
-        printf '%s\n' "harness-lint_${version}_${os}_${arch}.tar.gz" >> "$expected"
+        archive_name=harness-lint_${version}_${os}_${arch}.tar.gz
+        printf '%s\n' "$archive_name" >> "$expected"
+        printf '%s\n' "$archive_name.spdx.json" >> "$expected"
     done
 done
 for format in deb rpm apk; do
@@ -120,8 +123,8 @@ for format in deb rpm apk; do
     package_count=$(find "$dist_dir" -maxdepth 1 -type f -name "*.$format" | wc -l | tr -d ' ')
     count_is "$package_count" 2 "$format Linux package count"
 done
-find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -exec basename {} \; | sort > "$work_dir/actual"
-cmp -s "$expected" "$work_dir/actual" || fail 'distributable artifact set differs from four archives and six Linux packages'
+find "$dist_dir" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.spdx.json' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -exec basename {} \; | sort > "$work_dir/actual"
+cmp -s "$expected" "$work_dir/actual" || fail 'distributable artifact set differs from four archives, four SBOMs, and six Linux packages'
 
 checksum_names=$work_dir/checksum-names
 awk '
@@ -131,11 +134,11 @@ awk '
     END { if (bad) exit 1 }
 ' "$dist_dir/checksums.txt" > "$checksum_names" || fail 'checksums.txt contains malformed entries'
 checksum_count=$(wc -l < "$checksum_names" | tr -d ' ')
-count_is "$checksum_count" 10 'checksum entry count'
+count_is "$checksum_count" 14 'checksum entry count'
 sort -o "$checksum_names" "$checksum_names"
 duplicate_count=$(uniq -d "$checksum_names" | wc -l | tr -d ' ')
 count_is "$duplicate_count" 0 'duplicate checksum entries'
-cmp -s "$expected" "$checksum_names" || fail 'checksums.txt does not cover exactly ten distributable artifacts'
+cmp -s "$expected" "$checksum_names" || fail 'checksums.txt does not cover exactly fourteen distributable artifacts'
 checksum_for() {
     case "$checksum_tool" in
         sha256sum) sha256sum "$1" | awk '{print $1}' ;;
@@ -147,7 +150,10 @@ while IFS= read -r artifact; do
     got=$(checksum_for "$dist_dir/$artifact")
     [ "$want" = "$got" ] || fail "checksum mismatch for $artifact"
 done < "$expected"
-echo 'validated checksums for all ten distributable artifacts'
+echo 'validated checksums for all fourteen distributable artifacts'
+
+PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/release-sbom.py" \
+    --dist "$dist_dir" --version "$version"
 
 for os in darwin linux; do
     for arch in amd64 arm64; do
