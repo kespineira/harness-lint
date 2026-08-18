@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -139,10 +140,13 @@ func TestInstallCleanConfigProducesOfficialShapeForBothRuntimes(t *testing.T) {
 				t.Fatalf("PostToolUse handlers = %#v", handlers)
 			}
 			handler := asJSONObject(t, handlers[0])
-			if handler["type"] != "command" || handler["async"] != true || handler["timeout"] != float64(hookTimeout) {
+			if handler["type"] != "command" || handler["timeout"] != float64(hookTimeout) {
 				t.Fatalf("handler = %#v", handler)
 			}
 			if runtime == RuntimeClaude {
+				if handler["async"] != true {
+					t.Fatalf("Claude handler async = %#v, want true", handler["async"])
+				}
 				if _, found := hooks["PreToolUse"]; found {
 					t.Fatal("Claude install unexpectedly added PreToolUse")
 				}
@@ -161,6 +165,9 @@ func TestInstallCleanConfigProducesOfficialShapeForBothRuntimes(t *testing.T) {
 					t.Fatalf("Claude args = %#v, want %#v", args, want)
 				}
 			} else {
+				if _, found := handler["async"]; found {
+					t.Fatalf("Codex handler unexpectedly has async: %#v", handler)
+				}
 				if handler["command"] != expectedCodexCommand() {
 					t.Fatalf("Codex command = %#v, want %q", handler["command"], expectedCodexCommand())
 				}
@@ -175,6 +182,117 @@ func TestInstallCleanConfigProducesOfficialShapeForBothRuntimes(t *testing.T) {
 				t.Fatal("install did not create configuration tree")
 			}
 		})
+	}
+}
+
+func TestCodexLegacyAsyncHandlerMigratesInPlaceAndPreservesUnownedEntries(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "config")
+	legacy := fmt.Sprintf(`{"type":"command","command":%q,"async":true,"timeout":%d}`, expectedCodexCommand(), hookTimeout)
+	canonicalHandler := fmt.Sprintf(`{"type":"command","command":%q,"timeout":%d}`, expectedCodexCommand(), hookTimeout)
+	content := fmt.Sprintf(`{"hooks":{"PostToolUse":[
+  {"hooks":[%s,%s,{"type":"command","command":"user-hook"}]},
+  {"matcher":"Write","hooks":[{"type":"command","command":"harness-lint","args":["ingest","--runtime","codex","--managed-by","harness-lint-hooks/v0"],"async":true,"timeout":10}]},
+  {"hooks":[{"type":"command","command":"echo harness-lint ingest --runtime codex --managed-by harness-lint-hooks/v1"}]}
+]}}`, legacy, canonicalHandler)
+	path := writeHookConfig(t, root, RuntimeCodex, content)
+	manager := resolvedManager(RuntimeCodex, root)
+
+	status, err := manager.Status(context.Background())
+	if err != nil || status.Code != StatusPartiallyInstalled || status.Managed != ManagedEntryPartial {
+		t.Fatalf("legacy status = %#v, err=%v", status, err)
+	}
+	if got := status.ManagedEntries[0]; got.ExactHandlers != 2 || got.Partial != 0 || got.Lookalikes != 1 || got.State != ManagedEntryPartial {
+		t.Fatalf("legacy entry = %#v", got)
+	}
+	beforeDryRun, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dryRun, err := manager.DryRun(context.Background(), ActionInstall)
+	if err != nil || !dryRun.WouldChange || dryRun.Changed {
+		t.Fatalf("legacy dry-run = %#v, err=%v", dryRun, err)
+	}
+	afterDryRun, _ := os.ReadFile(path)
+	if string(beforeDryRun) != string(afterDryRun) {
+		t.Fatal("legacy dry-run changed configuration")
+	}
+
+	installed, err := manager.Install(context.Background())
+	if err != nil || !installed.Changed || installed.Status.Code != StatusInstalled {
+		t.Fatalf("legacy install = %#v, err=%v", installed, err)
+	}
+	value := readJSON(t, path)
+	post := asJSONArray(t, asJSONObject(t, value["hooks"])["PostToolUse"])
+	if len(post) != 3 {
+		t.Fatalf("migration created or removed groups: %#v", post)
+	}
+	firstHandlers := asJSONArray(t, asJSONObject(t, post[0])["hooks"])
+	if len(firstHandlers) != 2 {
+		t.Fatalf("migration changed user handlers: %#v", firstHandlers)
+	}
+	migrated := asJSONObject(t, firstHandlers[0])
+	if _, found := migrated["async"]; found {
+		t.Fatalf("migrated Codex handler retained async: %#v", migrated)
+	}
+	if asJSONObject(t, firstHandlers[1])["command"] != "user-hook" {
+		t.Fatalf("migration changed user hook: %#v", firstHandlers)
+	}
+
+	status, err = manager.Status(context.Background())
+	if err != nil || status.Code != StatusInstalled || status.Managed != ManagedEntryInstalled {
+		t.Fatalf("migrated status = %#v, err=%v", status, err)
+	}
+	canonical, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Install(context.Background())
+	if err != nil || second.Changed || second.WouldChange {
+		t.Fatalf("second migrated install = %#v, err=%v", second, err)
+	}
+	canonicalAgain, _ := os.ReadFile(path)
+	if string(canonical) != string(canonicalAgain) {
+		t.Fatal("second migrated install changed bytes")
+	}
+
+	uninstalled, err := manager.Uninstall(context.Background())
+	if err != nil || !uninstalled.Changed {
+		t.Fatalf("migrated uninstall = %#v, err=%v", uninstalled, err)
+	}
+	value = readJSON(t, path)
+	post = asJSONArray(t, asJSONObject(t, value["hooks"])["PostToolUse"])
+	if len(post) != 3 {
+		t.Fatalf("uninstall changed unowned groups: %#v", post)
+	}
+	if len(asJSONArray(t, asJSONObject(t, post[0])["hooks"])) != 1 || asJSONObject(t, asJSONArray(t, asJSONObject(t, post[0])["hooks"])[0])["command"] != "user-hook" {
+		t.Fatalf("uninstall removed user hook: %#v", post)
+	}
+	if _, err := manager.Uninstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	remaining := readJSON(t, path)
+	if len(asJSONArray(t, asJSONObject(t, remaining["hooks"])["PostToolUse"])) != 3 {
+		t.Fatal("second uninstall changed preserved entries")
+	}
+}
+
+func TestClaudeInstallDoesNotNormalizeCodexShapedUserHook(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "config")
+	legacyCodex := fmt.Sprintf(`{"type":"command","command":%q,"async":true,"timeout":%d}`, expectedCodexCommand(), hookTimeout)
+	path := writeHookConfig(t, root, RuntimeClaude, fmt.Sprintf(`{"hooks":{"PostToolUse":[{"hooks":[%s]}]}}`, legacyCodex))
+	manager := resolvedManager(RuntimeClaude, root)
+
+	if _, err := manager.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	value := readJSON(t, path)
+	post := asJSONArray(t, asJSONObject(t, value["hooks"])["PostToolUse"])
+	if len(post) != 2 {
+		t.Fatalf("Claude install changed Codex-shaped user group count: %#v", post)
+	}
+	preserved := asJSONObject(t, asJSONArray(t, asJSONObject(t, post[0])["hooks"])[0])
+	if preserved["async"] != true || preserved["command"] != expectedCodexCommand() {
+		t.Fatalf("Claude install normalized Codex-shaped user hook: %#v", preserved)
 	}
 }
 
