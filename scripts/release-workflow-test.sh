@@ -309,8 +309,16 @@ verify_line=$(printf '%s\n' "$release_block" | grep -n 'verify-release-attestati
 stage_line=$(printf '%s\n' "$release_block" | grep -n 'stage-npm-packages.sh' | cut -d: -f1)
 [ -n "$verify_line" ] && [ -n "$stage_line" ] && [ "$verify_line" -lt "$stage_line" ] ||
     fail 'archive attestation verification does not precede npm staging'
-for identity in '--repo' '--signer-workflow' '--source-ref' '--cert-identity' 'https://spdx.dev/Document/v2.3' 'https://slsa.dev/provenance/v1'; do
+for identity in '--repo' '--signer-workflow' '--source-ref' 'https://spdx.dev/Document/v2.3' 'https://slsa.dev/provenance/v1'; do
     grep -Fq -- "$identity" "$attestation_script" || fail "attestation verifier omits exact identity/predicate gate $identity"
+done
+if grep -Fq -- '--cert-identity' "$attestation_script"; then
+    fail 'attestation verifier combines mutually exclusive identity flags'
+fi
+for documentation in "$project_root/README.md" "$project_root"/docs/*.md; do
+    if grep -Fq -- '--cert-identity' "$documentation"; then
+        fail "documentation does not use the selected signer-workflow identity policy: $documentation"
+    fi
 done
 npm_block=$(job_block npm-publish)
 printf '%s\n' "$npm_block" | grep -Fq "npm install --global npm@$reviewed_npm_version" ||

@@ -128,12 +128,10 @@ jobs:
 
           workflow="$GITHUB_REPOSITORY/.github/workflows/release.yml"
           source_ref="refs/tags/$RELEASE_TAG"
-          certificate_identity="https://github.com/$workflow@$source_ref"
           gh attestation verify "$release_dir/$archive" \
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$workflow" \
             --source-ref "$source_ref" \
-            --cert-identity "$certificate_identity" \
             --predicate-type 'https://slsa.dev/provenance/v1'
 
           jq -e '.spdxVersion == "SPDX-2.3" and .SPDXID == "SPDXRef-DOCUMENT" and (.packages | type == "array") and (.relationships | type == "array")' \
@@ -143,7 +141,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --signer-workflow "$workflow" \
             --source-ref "$source_ref" \
-            --cert-identity "$certificate_identity" \
             --predicate-type 'https://spdx.dev/Document/v2.3' \
             --format json >"$sbom_verification"
           jq -e --arg archive "$archive" --slurpfile expected "$release_dir/$sbom" '

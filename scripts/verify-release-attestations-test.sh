@@ -33,8 +33,18 @@ printf '%s\n' "$*" >>"$calls_file"
 artifact=$3
 archive=${artifact##*/}
 predicate=
+signer_workflow_seen=0
+cert_identity_seen=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --signer-workflow)
+            signer_workflow_seen=1
+            shift 2
+            ;;
+        --cert-identity)
+            cert_identity_seen=1
+            shift 2
+            ;;
         --predicate-type)
             predicate=$2
             shift 2
@@ -44,6 +54,15 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+[ "$signer_workflow_seen" -eq 1 ] || {
+    echo 'fake gh: signer workflow is required' >&2
+    exit 2
+}
+[ "$cert_identity_seen" -eq 0 ] || {
+    echo 'fake gh: --signer-workflow and --cert-identity are mutually exclusive' >&2
+    exit 2
+}
 
 case "$predicate" in
     https://slsa.dev/provenance/v1)
@@ -70,7 +89,6 @@ repository=example/harness-lint
 tag=v$version
 workflow=$repository/.github/workflows/release.yml
 source_ref=refs/tags/$tag
-certificate_identity=https://github.com/$workflow@$source_ref
 slsa_predicate=https://slsa.dev/provenance/v1
 spdx_predicate=https://spdx.dev/Document/v2.3
 
@@ -93,10 +111,14 @@ grep -Fqx 'verified exact build-provenance and SPDX 2.3 attestations for four ca
 
 call_count=$(wc -l <"$calls" | awk '{ print $1 }')
 [ "$call_count" -eq 8 ] || fail "expected eight gh calls, got $call_count"
+provenance_call_count=$(grep -F -- "--predicate-type $slsa_predicate" "$calls" | wc -l | awk '{ print $1 }')
+[ "$provenance_call_count" -eq 4 ] || fail "expected four provenance gh calls, got $provenance_call_count"
+sbom_call_count=$(grep -F -- "--predicate-type $spdx_predicate" "$calls" | wc -l | awk '{ print $1 }')
+[ "$sbom_call_count" -eq 4 ] || fail "expected four SBOM gh calls, got $sbom_call_count"
 for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
     archive=harness-lint_${version}_${target}.tar.gz
-    provenance_line="attestation verify $dist/$archive --repo $repository --signer-workflow $workflow --source-ref $source_ref --cert-identity $certificate_identity --predicate-type $slsa_predicate --format json"
-    sbom_line="attestation verify $dist/$archive --repo $repository --signer-workflow $workflow --source-ref $source_ref --cert-identity $certificate_identity --predicate-type $spdx_predicate --format json"
+    provenance_line="attestation verify $dist/$archive --repo $repository --signer-workflow $workflow --source-ref $source_ref --predicate-type $slsa_predicate --format json"
+    sbom_line="attestation verify $dist/$archive --repo $repository --signer-workflow $workflow --source-ref $source_ref --predicate-type $spdx_predicate --format json"
     for expected in "$provenance_line" "$sbom_line"; do
         matches=$(awk -v expected="$expected" '$0 == expected { count++ } END { print count + 0 }' "$calls")
         [ "$matches" -eq 1 ] || fail "expected exactly one gh call: $expected"
