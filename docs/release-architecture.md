@@ -51,17 +51,20 @@ release policy, and runs the Go, installer, package, and smoke-test gates.
 The promotion sequence is deliberately monotonic:
 
 1. GoReleaser creates a draft GitHub Release and updates Homebrew.
-2. Cosign signs and verifies `dist/checksums.txt`.
-3. GitHub attests the checksum subject with SLSA build provenance and attests
+2. A read-only gate validates that the actual stable `dist/` contains exactly
+   the four archives, four matching SPDX SBOMs, six Linux packages, and their
+   fourteen unique, correct checksums.
+3. Cosign signs and verifies `dist/checksums.txt`.
+4. GitHub attests the checksum subject with SLSA build provenance and attests
    each archive with its matching SPDX 2.3 SBOM. Verification checks exact
    archive subjects, repository, workflow, tag, and predicate identities before
    npm staging.
-4. The release job stages and audits all five npm tarballs from the same
+5. The release job stages and audits all five npm tarballs from the same
    GoReleaser output, then uploads those immutable inputs.
-5. The OIDC npm job publishes the four native packages in fixed order and the
+6. The OIDC npm job publishes the four native packages in fixed order and the
    root launcher last, verifying exact metadata, integrity, `latest`, and npm
    provenance after each package.
-6. The final job promotes the GitHub draft only after every npm gate succeeds.
+7. The final job promotes the GitHub draft only after every npm gate succeeds.
 
 There is no transaction across GitHub, Homebrew, and npm. A matching
 immutable package/version may be verified and skipped on a bounded failed-job

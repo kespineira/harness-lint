@@ -86,6 +86,7 @@ go build -trimpath -o "$release_tmp/harness-lint" ./cmd/harness-lint
 ./scripts/install_test.sh
 ./scripts/release-workflow-test.sh
 ./scripts/release-sbom-test.sh
+./scripts/release-dist-test.sh
 ./scripts/verify-release-attestations-test.sh
 ./scripts/stage-npm-packages-test.sh
 ./scripts/pack-npm-packages-test.sh
@@ -117,11 +118,13 @@ with read-only permissions before the stable release job. The stable job then:
 3. Installs and verifies the exact pinned toolchain and runs all source,
    release-policy, formatting, test, build, installer, and smoke gates.
 4. Runs GoReleaser once to create a draft GitHub Release and publish Homebrew.
-5. Signs and verifies `dist/checksums.txt` with Cosign.
-6. Publishes one build-provenance attestation for the checksum subject and one
+5. Validates the actual stable `dist/` artifact set, SPDX documents, and all
+   fourteen checksums without rebuilding or executing it.
+6. Signs and verifies `dist/checksums.txt` with Cosign.
+7. Publishes one build-provenance attestation for the checksum subject and one
    SPDX 2.3 SBOM attestation for each of the four archive subjects. It verifies
    all subjects before npm staging.
-7. Stages, packs, audits, and uploads all five npm tarballs from that exact
+8. Stages, packs, audits, and uploads all five npm tarballs from that exact
    GoReleaser output.
 
 The separate npm job checks out the exact tagged commit, consumes only the
