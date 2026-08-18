@@ -212,14 +212,24 @@ done
 
 cask=$dist_dir/homebrew/Casks/harness-lint.rb
 [ -r "$cask" ] || fail 'GoReleaser did not generate a Homebrew Cask'
+# GoReleaser v2.17.1 has no template/configuration hook for Homebrew's current
+# architecture stanza order. Normalize only the generated structural layout;
+# version, URLs, and checksums remain GoReleaser-owned.
+PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/normalize_homebrew_cask.py" "$cask"
 ruby -c "$cask" >/dev/null || fail 'generated Homebrew Cask is not valid Ruby'
 if grep -Eq '^[[:space:]]+license[[:space:]]' "$cask"; then fail 'generated Cask has an unsupported top-level license stanza'; fi
 if grep -Eq '^  desc "[^\"]*\."$' "$cask"; then fail 'generated Cask description ends with a full stop'; fi
 if grep -Fq 'com.apple.quarantine' "$cask"; then fail 'generated Cask contains an unsigned-binary quarantine hook'; fi
+if ! awk '/^    on_arm do$/ { arm = NR } /^    on_intel do$/ { intel = NR } END { exit !(arm && intel && arm < intel) }' "$cask"; then
+    fail 'generated Cask does not place on_arm before on_intel'
+fi
+if ! awk 'previous == "  end" && $0 == "  on_linux do" { found = 1 } { previous = $0 } END { exit !found }' "$cask"; then
+    fail 'generated Cask has a blank separator between OS blocks'
+fi
 if ! awk 'END { if (NR < 2 || $0 != "end" || previous == "") exit 1 } { previous = $0 }' "$cask"; then
     fail 'generated Cask has an empty line before its closing end'
 fi
-echo 'validated generated Homebrew Cask Ruby syntax (brew style/audit/load run only in macOS CI)'
+echo 'validated and normalized generated Homebrew Cask (brew style/audit/load run only in macOS CI)'
 
 host_os=$(uname -s)
 host_arch=$(uname -m)

@@ -313,6 +313,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
+      - name: Normalize published Homebrew cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -eu
+          python3 scripts/publish_homebrew_cask.py \
+            --dist-cask dist/homebrew/Casks/harness-lint.rb \
+            --owner kespineira \
+            --repository homebrew-tap \
+            --branch main \
+            --path Casks/harness-lint.rb
+
       - name: Validate actual stable release output
         run: ./scripts/validate-release-dist.sh --dist dist --version "$NPM_VERSION"
 

@@ -50,7 +50,11 @@ release policy, and runs the Go, installer, package, and smoke-test gates.
 
 The promotion sequence is deliberately monotonic:
 
-1. GoReleaser creates a draft GitHub Release and updates Homebrew.
+1. GoReleaser creates a draft GitHub Release and updates Homebrew. The pinned
+   v2.17.1 cask generator emits architecture blocks in lexical order, so the
+   release then runs `scripts/publish_homebrew_cask.py` to make the exact
+   generated cask Homebrew-style-compliant (`on_arm` before `on_intel` and no
+   blank line between the macOS and Linux blocks).
 2. A read-only gate validates that the actual stable `dist/` contains exactly
    the four archives, four matching SPDX SBOMs, six Linux packages, and their
    fourteen unique, correct checksums.
@@ -70,6 +74,14 @@ There is no transaction across GitHub, Homebrew, and npm. A matching
 immutable package/version may be verified and skipped on a bounded failed-job
 continuation while the tagged run is unpublished and audited inputs remain
 available. Any mismatch, missing input, or unsafe retry stops the run.
+
+The cask correction is structural only: the strict normalizer preserves the
+GoReleaser version, archive URLs, and SHA-256 values without manual edits. The
+Contents API publisher is idempotent and fails closed unless the tap file is
+exactly the just-published GoReleaser output (or is already normalized), so it
+cannot overwrite a newer or manually changed tap revision. The tap token is
+read only from the workflow environment and is never passed as a command-line
+argument or printed.
 
 ## Integrity and attestations
 

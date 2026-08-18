@@ -29,6 +29,16 @@ release_dist_validator=$project_root/scripts/validate-release-dist.sh
 [ -r "$release_dist_validator" ] || fail 'stable release dist validator is missing'
 release_dist_validator_test=$project_root/scripts/release-dist-test.sh
 [ -r "$release_dist_validator_test" ] || fail 'stable release dist validator test is missing'
+homebrew_normalizer=$project_root/scripts/normalize_homebrew_cask.py
+[ -r "$homebrew_normalizer" ] || fail 'Homebrew cask normalizer is missing'
+homebrew_normalizer_test=$project_root/scripts/normalize_homebrew_cask_test.py
+[ -r "$homebrew_normalizer_test" ] || fail 'Homebrew cask normalizer test is missing'
+homebrew_publisher=$project_root/scripts/publish_homebrew_cask.py
+[ -r "$homebrew_publisher" ] || fail 'Homebrew cask publisher is missing'
+homebrew_publisher_test=$project_root/scripts/publish_homebrew_cask_test.py
+[ -r "$homebrew_publisher_test" ] || fail 'Homebrew cask publisher test is missing'
+python3 "$homebrew_normalizer_test" || fail 'Homebrew cask normalizer tests failed'
+python3 "$homebrew_publisher_test" || fail 'Homebrew cask publisher tests failed'
 
 # Keep this policy test itself as an explicit gate in both normal CI and the
 # stable release job. This prevents a future workflow edit from silently
@@ -235,6 +245,16 @@ printf '%s\n' "$release_block" | grep -Fq 'path: dist/npm-packages' ||
 # before any signing, attestation, or npm staging consumes it.
 printf '%s\n' "$release_block" | grep -Fq 'Validate actual stable release output' ||
     fail 'canonical release job has no actual-dist validation step'
+printf '%s\n' "$release_block" | grep -Fq 'Normalize published Homebrew cask' ||
+    fail 'canonical release job does not normalize the published Homebrew cask'
+printf '%s\n' "$release_block" | grep -Fq 'python3 scripts/publish_homebrew_cask.py' ||
+    fail 'canonical release job does not run the Homebrew cask publisher'
+printf '%s\n' "$release_block" | grep -Fq -- '--dist-cask dist/homebrew/Casks/harness-lint.rb' ||
+    fail 'Homebrew cask publisher does not consume the canonical dist cask'
+if grep -Eiq 'echo[[:space:]].*(\$\{?HOMEBREW_TAP_TOKEN|\$HOMEBREW_TAP_TOKEN)|printf[[:space:]].*(\$\{?HOMEBREW_TAP_TOKEN|\$HOMEBREW_TAP_TOKEN)' \
+    "$release_workflow"; then
+    fail 'release workflow exposes the Homebrew tap token'
+fi
 # The literal GitHub expression is intentionally single-quoted for grep.
 # shellcheck disable=SC2016
 printf '%s\n' "$release_block" | grep -Fq 'run: ./scripts/validate-release-dist.sh --dist dist --version "$NPM_VERSION"' ||
