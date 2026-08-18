@@ -212,9 +212,9 @@ done
 
 cask=$dist_dir/homebrew/Casks/harness-lint.rb
 [ -r "$cask" ] || fail 'GoReleaser did not generate a Homebrew Cask'
-# GoReleaser v2.17.1 has no template/configuration hook for Homebrew's current
-# architecture stanza order. Normalize only the generated structural layout;
-# version, URLs, and checksums remain GoReleaser-owned.
+# GoReleaser v2.17.1 generates the cask locally, but has no template/configuration
+# hook for Homebrew's current architecture stanza order. Normalize only the
+# generated structural layout; version, URLs, and checksums remain GoReleaser-owned.
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/normalize_homebrew_cask.py" "$cask"
 ruby -c "$cask" >/dev/null || fail 'generated Homebrew Cask is not valid Ruby'
 if grep -Eq '^[[:space:]]+license[[:space:]]' "$cask"; then fail 'generated Cask has an unsupported top-level license stanza'; fi

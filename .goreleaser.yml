@@ -103,7 +103,7 @@ homebrew_casks:
       owner: kespineira
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: true
     directory: Casks
     commit_author:
       name: goreleaserbot

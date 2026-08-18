@@ -222,6 +222,26 @@ if grep -Eiq '^[[:space:]]*(clobber|replacement):[[:space:]]*(true|yes|on)$' \
     fail 'release configuration enables clobber or replacement'
 fi
 
+# GoReleaser generates the cask in the canonical dist directory but must not
+# publish it: only the scoped Contents API publisher may mutate the tap.
+grep -Eq '^    skip_upload: true$' "$goreleaser_config" ||
+    fail 'Homebrew cask generation does not explicitly skip upload'
+if grep -Eq '^[[:space:]]+token:.*HOMEBREW_TAP_TOKEN' "$goreleaser_config"; then
+    fail 'GoReleaser still receives the Homebrew tap token'
+fi
+goreleaser_step=$(printf '%s\n' "$release_block" | awk '
+    $0 == "      - name: Create draft release and generate Homebrew cask" { in_step = 1 }
+    in_step && /^      - name:/ && $0 != "      - name: Create draft release and generate Homebrew cask" { exit }
+    in_step { print }
+')
+printf '%s\n' "$goreleaser_step" | grep -Fq 'args: release --clean' ||
+    fail 'canonical GoReleaser step does not create the draft release'
+if printf '%s\n' "$goreleaser_step" | grep -Fq 'HOMEBREW_TAP_TOKEN'; then
+    fail 'canonical GoReleaser step receives the Homebrew tap token'
+fi
+printf '%s\n' "$release_block" | grep -Fq 'Publish normalized Homebrew cask once' ||
+    fail 'canonical job does not have a single custom cask publication step'
+
 # Publication is gated on every artifact E2E job.
 printf '%s\n' "$release_block" | grep -Eq '^    needs:$' ||
     fail 'release job has no E2E dependency list'
@@ -245,8 +265,8 @@ printf '%s\n' "$release_block" | grep -Fq 'path: dist/npm-packages' ||
 # before any signing, attestation, or npm staging consumes it.
 printf '%s\n' "$release_block" | grep -Fq 'Validate actual stable release output' ||
     fail 'canonical release job has no actual-dist validation step'
-printf '%s\n' "$release_block" | grep -Fq 'Normalize published Homebrew cask' ||
-    fail 'canonical release job does not normalize the published Homebrew cask'
+printf '%s\n' "$release_block" | grep -Fq 'Publish normalized Homebrew cask once' ||
+    fail 'canonical release job does not publish the normalized Homebrew cask'
 printf '%s\n' "$release_block" | grep -Fq 'python3 scripts/publish_homebrew_cask.py' ||
     fail 'canonical release job does not run the Homebrew cask publisher'
 printf '%s\n' "$release_block" | grep -Fq -- '--dist-cask dist/homebrew/Casks/harness-lint.rb' ||

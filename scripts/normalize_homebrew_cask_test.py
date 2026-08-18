@@ -14,23 +14,23 @@ cask "harness-lint" do
 
   on_macos do
     on_intel do
-      sha256 "intel-macos"
-      url "https://example.invalid/harness-lint_#{version}_darwin_amd64.tar.gz"
+      sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_darwin_amd64.tar.gz"
     end
     on_arm do
-      sha256 "arm-macos"
-      url "https://example.invalid/harness-lint_#{version}_darwin_arm64.tar.gz"
+      sha256 "2222222222222222222222222222222222222222222222222222222222222222"
+      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_darwin_arm64.tar.gz"
     end
   end
 
   on_linux do
     on_intel do
-      sha256 "intel-linux"
-      url "https://example.invalid/harness-lint_#{version}_linux_amd64.tar.gz"
+      sha256 "3333333333333333333333333333333333333333333333333333333333333333"
+      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_linux_amd64.tar.gz"
     end
     on_arm do
-      sha256 "arm-linux"
-      url "https://example.invalid/harness-lint_#{version}_linux_arm64.tar.gz"
+      sha256 "4444444444444444444444444444444444444444444444444444444444444444"
+      url "https://github.com/kespineira/harness-lint/releases/download/v1.2.3/harness-lint_#{version}_linux_arm64.tar.gz"
     end
   end
 
@@ -57,7 +57,7 @@ def main() -> int:
     ]
     assert separator == "\n"
     assert 'version "1.2.3"' in normalized
-    for marker in ('arm-macos', 'intel-macos', 'arm-linux', 'intel-linux'):
+    for marker in ('1' * 64, '2' * 64, '3' * 64, '4' * 64):
         assert marker in normalized
     assert normalize_cask_text(normalized) == normalized
 

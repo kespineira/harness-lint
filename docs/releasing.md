@@ -117,10 +117,12 @@ with read-only permissions before the stable release job. The stable job then:
    `origin/main`, and absence of an existing GitHub Release.
 3. Installs and verifies the exact pinned toolchain and runs all source,
    release-policy, formatting, test, build, installer, and smoke gates.
-4. Runs GoReleaser once to create a draft GitHub Release and publish Homebrew,
-   then applies the strict idempotent cask normalizer through the scoped tap
-   Contents API correction step. This preserves the generated version, URLs,
-   and checksums while satisfying current Homebrew stanza ordering.
+4. Runs GoReleaser once to create a draft GitHub Release and generate the cask
+   locally (the `homebrew_casks` upload is skipped), then runs the custom
+   publisher exactly once. The publisher normalizes the generated file and
+   uses the scoped tap Contents API to replace only a strict older managed
+   cask, preserving the generated version, canonical URLs, and checksums while
+   satisfying current Homebrew stanza ordering.
 5. Validates the actual stable `dist/` artifact set, SPDX documents, and all
    fourteen checksums without rebuilding or executing it.
 6. Signs and verifies `dist/checksums.txt` with Cosign.
