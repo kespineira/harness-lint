@@ -111,7 +111,7 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 	if !strings.Contains(stdout.String(), presentation.FormatBytes(explicitInfo.Size())) {
 		t.Fatalf("backup output = %q, want final size %d", stdout.String(), explicitInfo.Size())
 	}
-	if !strings.Contains(stdout.String(), filepath.Base(explicit)) {
+	if !strings.Contains(strings.Join(strings.Fields(stdout.String()), ""), filepath.Base(explicit)) {
 		t.Fatalf("backup output = %q, want explicit destination", stdout.String())
 	}
 	before, err := os.ReadFile(explicit)
