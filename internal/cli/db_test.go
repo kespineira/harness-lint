@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/presentation"
 	"github.com/kespineira/harness-lint/internal/store"
 )
 
@@ -23,7 +23,7 @@ func TestDatabaseHelpAndStatusJSONAreStableAndPrivate(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"db", "--help"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("db help: %v", err)
 	}
-	for _, want := range []string{"db <status|check|backup>", "--json", "--output"} {
+	for _, want := range []string{"harness-lint db <command>", "status", "check", "backup"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("db help = %q, missing %q", stdout.String(), want)
 		}
@@ -56,7 +56,7 @@ func TestDatabaseStatusPopulatedAndCheckHealthy(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"db", "status", "--db", dbPath}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("populated status: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "path="+dbPath) || !strings.Contains(stdout.String(), "usage-events=1") || !strings.Contains(stdout.String(), "integrity=not-checked") {
+	if !strings.Contains(stdout.String(), "Database\n") || !strings.Contains(stdout.String(), "Events") || !strings.Contains(stdout.String(), "Integrity  Not checked") {
 		t.Fatalf("populated status = %q", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "private-event-sentinel") || strings.Contains(stdout.String(), "session-private-sentinel") || strings.Contains(stdout.String(), "project-private-sentinel") || strings.Contains(stdout.String(), "PROMPT_SENTINEL") {
@@ -107,10 +107,10 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "size-bytes="+strconv.FormatInt(explicitInfo.Size(), 10)) {
+	if !strings.Contains(stdout.String(), presentation.FormatBytes(explicitInfo.Size())) {
 		t.Fatalf("backup output = %q, want final size %d", stdout.String(), explicitInfo.Size())
 	}
-	if !strings.Contains(stdout.String(), explicit) {
+	if !strings.Contains(stdout.String(), filepath.Base(explicit)) {
 		t.Fatalf("backup output = %q, want explicit destination", stdout.String())
 	}
 	before, err := os.ReadFile(explicit)
@@ -142,14 +142,14 @@ func TestDatabaseCheckErrorAndBackupOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "size-bytes="+strconv.FormatInt(defaultInfo.Size(), 10)) {
+	if !strings.Contains(stdout.String(), presentation.FormatBytes(defaultInfo.Size())) {
 		t.Fatalf("default backup output = %q, want final size %d", stdout.String(), defaultInfo.Size())
 	}
 	stdout.Reset()
 	if err := ExecuteWithOptions(options, []string{"db", "backup", "--db", dbPath}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("colliding default backup: %v", err)
 	}
-	if !strings.Contains(stdout.String(), filepath.Join(root, "state", "backups", "harness-lint-20260814T120000Z-1.db")) {
+	if !strings.Contains(stdout.String(), "Database backup") || !strings.Contains(stdout.String(), "-1.db") {
 		t.Fatalf("colliding default backup output = %q", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "home")); !os.IsNotExist(err) {

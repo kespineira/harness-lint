@@ -130,7 +130,7 @@ func TestExecuteHooksTestIsReadOnlyAndReportsDeliveryState(t *testing.T) {
 	if err := ExecuteWithOptions(options, args, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("hooks test idle error = %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "hooks-test aggregate healthy=0 idle=2 degraded=0 broken=0 unknown=0") || !strings.Contains(stdout.String(), "selftest=ok") || !strings.Contains(stdout.String(), "limitation=synthetic self-test proves local ingest/SQLite but not true runtime delivery without activity") {
+	if !strings.Contains(stdout.String(), "Hook health") || !strings.Contains(stdout.String(), "Claude Code  - Idle") || !strings.Contains(stdout.String(), "Codex        - Idle") || !strings.Contains(stdout.String(), "0/2 runtimes healthy · 2 idle") {
 		t.Fatalf("hooks test output = %q", stdout.String())
 	}
 	db, err := store.Open(dbPath)
@@ -151,11 +151,11 @@ func TestExecuteHooksTestIsReadOnlyAndReportsDeliveryState(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout.Reset()
-	err = ExecuteWithOptions(options, args, nil, &stdout, &stderr)
+	err = ExecuteWithOptions(options, append(append([]string(nil), args...), "--verbose"), nil, &stdout, &stderr)
 	if err == nil || err.Error() != hookTestFailureMessage {
 		t.Fatalf("hooks test degraded error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "degraded=1") || !strings.Contains(stdout.String(), "failure-kind=database_busy") || !strings.Contains(stdout.String(), "last-failed=") {
+	if !strings.Contains(stdout.String(), "! Degraded") || !strings.Contains(stdout.String(), "1 recent delivery failure") || !strings.Contains(stdout.String(), "Failure kind") || !strings.Contains(stdout.String(), "database_busy") || !strings.Contains(stdout.String(), "Last failure") {
 		t.Fatalf("hooks test degraded output = %q", stdout.String())
 	}
 	stdout.Reset()

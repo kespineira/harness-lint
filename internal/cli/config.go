@@ -12,6 +12,7 @@ import (
 
 	"github.com/kespineira/harness-lint/internal/compatibility"
 	"github.com/kespineira/harness-lint/internal/domain"
+	"github.com/kespineira/harness-lint/internal/presentation"
 )
 
 const (
@@ -33,6 +34,8 @@ var supportedCommands = map[string]struct{}{
 }
 
 type stringListFlag []string
+
+var errMissingSubcommand = errors.New("missing subcommand")
 
 func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
 
@@ -82,6 +85,10 @@ type parsedFlags struct {
 	outputSet      bool
 	monthly        bool
 	monthlySet     bool
+	verbose        bool
+	verboseSet     bool
+	color          string
+	colorSet       bool
 	hooksAction    string
 	hooksRuntime   string
 	dbAction       string
@@ -112,6 +119,8 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 	fs.BoolVar(&result.json, "json", false, "render stable JSON output")
 	fs.StringVar(&result.output, "output", "", "backup destination path")
 	fs.BoolVar(&result.monthly, "monthly", false, "include UTC monthly usage evidence")
+	fs.BoolVar(&result.verbose, "verbose", false, "include detailed diagnostics")
+	fs.StringVar(&result.color, "color", "auto", "color output: auto, always, or never")
 	var hooks stringListFlag
 	fs.Var(&hooks, "hook-capture", "repeatable metadata-only hook capture path")
 
@@ -160,6 +169,10 @@ func parseFlags(command string, args []string, stderr io.Writer) (parsedFlags, e
 			result.outputSet = true
 		case "monthly":
 			result.monthlySet = true
+		case "verbose":
+			result.verboseSet = true
+		case "color":
+			result.colorSet = true
 		}
 	})
 	if result.days < 0 {
@@ -197,10 +210,7 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 		positionalIndexes = append(positionalIndexes, index)
 	}
 	if len(positionals) == 0 {
-		if command == "db" {
-			return parsedFlags{}, nil, errors.New("db action is required: status, check, or backup")
-		}
-		return parsedFlags{}, nil, errors.New("hooks action is required: status, test, install, or uninstall")
+		return parsedFlags{}, nil, errMissingSubcommand
 	}
 	if len(positionals) > 2 {
 		if command == "db" {
@@ -234,6 +244,22 @@ func parseCommandArgs(command string, args []string) (parsedFlags, []string, err
 }
 
 func validateCommandFlags(command string, flags parsedFlags) error {
+	switch strings.ToLower(strings.TrimSpace(flags.color)) {
+	case "auto", "always", "never":
+	case "":
+		if flags.colorSet {
+			return fmt.Errorf("invalid --color %q (want auto, always, or never)", flags.color)
+		}
+	default:
+		return fmt.Errorf("invalid --color %q (want auto, always, or never)", flags.color)
+	}
+	if flags.verboseSet {
+		switch command {
+		case "scan", "hooks", "db":
+		default:
+			return fmt.Errorf("--verbose is not supported for %s", command)
+		}
+	}
 	switch command {
 	case "version":
 		if flags.dbSet || flags.homeSet || flags.projectSet || flags.configDirSet || flags.codexSet || flags.claudeSet || flags.nowSet || flags.sinceSet || flags.daysSet || flags.hooksSet || flags.runtimeSet || flags.eventSet || flags.managedSet || flags.typeSet || flags.dryRunSet || flags.jsonSet || flags.outputSet || flags.monthlySet {
@@ -406,6 +432,8 @@ type commandConfig struct {
 	lookPath        func(string) (string, error)
 	versionResolver compatibility.ExecutableResolver
 	versionRunner   compatibility.CommandRunner
+	renderer        presentation.HumanRenderer
+	verbose         bool
 }
 
 // resolveDBConfig is intentionally narrower than resolveConfig. Database
@@ -928,7 +956,7 @@ func unknownCommandError(command string) error {
 
 func consumesValueFlag(arg string) bool {
 	switch arg {
-	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-type", "--type", "-event", "--event", "-managed-by", "--managed-by", "-output", "--output":
+	case "-db", "--db", "-home", "--home", "-project", "--project", "-config-dir", "--config-dir", "-codex-home", "--codex-home", "-claude-config", "--claude-config", "-now", "--now", "-since", "--since", "-days", "--days", "-hook-capture", "--hook-capture", "-runtime", "--runtime", "-type", "--type", "-event", "--event", "-managed-by", "--managed-by", "-output", "--output", "-color", "--color":
 		return true
 	default:
 		return false
@@ -936,76 +964,19 @@ func consumesValueFlag(arg string) bool {
 }
 
 func writeUsage(w io.Writer) {
-	fmt.Fprintln(w, "usage: harness-lint <scan|usage|report|context|stale|doctor|ingest|hooks|db|version> [options]")
-	fmt.Fprintln(w, "commands: scan, usage, report, context, stale, doctor, ingest, hooks, db, version")
-	fmt.Fprintln(w, "use harness-lint <command> --help for command options")
+	writeRootHelp(w)
 }
 
 func writeCommandUsage(w io.Writer, command string) {
-	if command == "version" {
-		fmt.Fprintln(w, "usage: harness-lint version")
-		fmt.Fprintln(w, "prints the semantic version, commit, and build date")
+	if command == "hooks" || command == "db" {
+		writeGroupHelp(w, command)
 		return
 	}
-	if command == "ingest" {
-		fmt.Fprintln(w, "usage: harness-lint ingest [options]")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --config-dir PATH          default database configuration directory")
-		fmt.Fprintln(w, "  --runtime claude|codex     named hook runtime")
-		fmt.Fprintln(w, "  --event EVENT              documented hook event (optional)")
-		fmt.Fprintln(w, "  --managed-by harness-lint-hooks/v1")
-		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
-		return
-	}
-	if command == "usage" {
-		fmt.Fprintln(w, "usage: harness-lint usage [options]")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --days N                   closed UTC period length (default 90; positive)")
-		fmt.Fprintln(w, "  --runtime claude|claude-code|codex")
-		fmt.Fprintln(w, "  --type skill|mcp|tool|agent")
-		fmt.Fprintln(w, "  --monthly                  include UTC monthly evidence")
-		fmt.Fprintln(w, "  --json                     stable JSON output")
-		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
-		return
-	}
-	if command == "hooks" {
-		fmt.Fprintln(w, "usage: harness-lint hooks <status|test|install|uninstall> [claude|codex] [options]")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --json                     stable JSON output (status only)")
-		fmt.Fprintln(w, "  --dry-run                  show install/uninstall changes without writing")
-		fmt.Fprintln(w, "  --home PATH                synthetic user home")
-		fmt.Fprintln(w, "  --codex-home PATH          Codex configuration root")
-		fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
-		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
-		return
-	}
-	if command == "db" {
-		fmt.Fprintln(w, "usage: harness-lint db <status|check|backup> [options]")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --config-dir PATH          default database configuration directory")
-		fmt.Fprintln(w, "  --json                     stable JSON output (status/check only)")
-		fmt.Fprintln(w, "  --output PATH              backup destination (backup only)")
-		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
-		return
-	}
-	fmt.Fprintf(w, "usage: harness-lint %s [options]\n", command)
-	fmt.Fprintln(w, "options:")
-	fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-	fmt.Fprintln(w, "  --home PATH                synthetic user home")
-	fmt.Fprintln(w, "  --project PATH             project root")
-	fmt.Fprintln(w, "  --config-dir PATH          default database configuration directory")
-	fmt.Fprintln(w, "  --codex-home PATH          Codex configuration root")
-	fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
-	fmt.Fprintln(w, "  --hook-capture PATH        repeatable metadata-only hook capture path")
-	fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
-	fmt.Fprintf(w, "  --days N                   stale threshold in days (default %d)\n", defaultDays(command))
-	fmt.Fprintln(w, "  --now RFC3339              observation time")
-	if command == "report" || command == "stale" {
-		fmt.Fprintln(w, "  --json                     stable JSON output")
-	}
+	writeCommandHelp(w, command)
+}
+
+func writeActionUsage(w io.Writer, command, action string) {
+	writeActionHelp(w, command, action)
 }
 
 func defaultDays(command string) int {

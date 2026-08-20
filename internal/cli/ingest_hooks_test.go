@@ -243,8 +243,8 @@ func TestExecuteHooksLifecycleAndStableJSON(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"hooks", "uninstall", "claude", "--dry-run"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("hook dry-run error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "would-change=true") {
-		t.Fatalf("dry-run output = %q, want would-change=true", stdout.String())
+	if !strings.Contains(stdout.String(), "Changes would be made") {
+		t.Fatalf("dry-run output = %q, want a human preview", stdout.String())
 	}
 	if _, err := os.Stat(configPath); err != nil {
 		t.Fatalf("dry-run removed config: %v", err)

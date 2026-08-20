@@ -40,7 +40,7 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"scan", "--db", db, "--home", home, "--project", project, "--hook-capture", hook, "--since", "2026-08-13T14:30:00Z"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("scan error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "runtime=codex") || !strings.Contains(stdout.String(), "capabilities=1") {
+	if !strings.Contains(stdout.String(), "Scan complete") || !strings.Contains(stdout.String(), "Codex") || !strings.Contains(stdout.String(), "1 capabilities discovered") {
 		t.Fatalf("scan output = %q, want codex capability total", stdout.String())
 	}
 
@@ -398,7 +398,7 @@ func TestScanDiscoveryFailureDoesNotReplaceCurrentInventoryWithEmpty(t *testing.
 		t.Fatalf("seed inventory: %v", err)
 	}
 	var stdout bytes.Buffer
-	err = runScanWithAdapters(context.Background(), commandConfig{now: now}, db, &stdout, []runtimepkg.Adapter{failingDiscoveryAdapter{}})
+	err = runScanWithAdapters(context.Background(), commandConfig{now: now, verbose: true}, db, &stdout, []runtimepkg.Adapter{failingDiscoveryAdapter{}})
 	if err == nil || !strings.Contains(err.Error(), "runtime codex discovery") {
 		t.Fatalf("scan failure = %v, want runtime-qualified error", err)
 	}
@@ -409,7 +409,7 @@ func TestScanDiscoveryFailureDoesNotReplaceCurrentInventoryWithEmpty(t *testing.
 	if len(current) != 1 || current[0].Name != capability.Name {
 		t.Fatalf("current inventory after failed discovery = %#v, want previous capability preserved", current)
 	}
-	if !strings.Contains(stdout.String(), "inventory=not-recorded") {
+	if !strings.Contains(stdout.String(), "Inventory") || !strings.Contains(stdout.String(), "not recorded") {
 		t.Fatalf("scan output = %q, want not-recorded status", stdout.String())
 	}
 	if err := db.Close(); err != nil {
@@ -456,7 +456,7 @@ func TestExecuteHelpFlagsSucceedForGlobalAndEveryCommand(t *testing.T) {
 			if err := ExecuteWithOptions(Options{}, testArgs, nil, &stdout, &stderr); err != nil {
 				t.Fatalf("help error = %v\nstderr=%s", err, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "usage: harness-lint") {
+			if !strings.Contains(strings.ToLower(stdout.String()), "usage:") || !strings.Contains(stdout.String(), "harness-lint") {
 				t.Fatalf("help output = %q, want usage", stdout.String())
 			}
 		})

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/compatibility"
+	"github.com/kespineira/harness-lint/internal/presentation"
 	buildversion "github.com/kespineira/harness-lint/internal/version"
 )
 
@@ -23,6 +24,12 @@ type Options struct {
 	ConfigDir   string
 	Now         func() time.Time
 	LookPath    func(string) (string, error)
+
+	// IsTerminal and LookupEnv keep terminal/color policy deterministic in
+	// tests. When unset, the CLI uses the process writer's character-device
+	// status and os.LookupEnv respectively.
+	IsTerminal func(io.Writer) bool
+	LookupEnv  func(string) (string, bool)
 
 	// VersionResolver and VersionRunner are used only by low-frequency
 	// doctor/hooks-test diagnostics. They are deliberately absent from the
@@ -69,14 +76,24 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		writeUsage(stdout)
 		return nil
 	}
-	if hasHelpFlag(args) {
-		writeCommandUsage(stdout, command)
-		return nil
-	}
 
 	nested, parseArgs, err := parseCommandArgs(command, commandArgs)
 	if err != nil {
+		if errors.Is(err, errMissingSubcommand) {
+			writeCommandUsage(stdout, command)
+			return nil
+		}
 		return err
+	}
+	if hasHelpFlag(args) {
+		if command == "hooks" && nested.hooksAction != "" {
+			writeActionUsage(stdout, command, nested.hooksAction)
+		} else if command == "db" && nested.dbAction != "" {
+			writeActionUsage(stdout, command, nested.dbAction)
+		} else {
+			writeCommandUsage(stdout, command)
+		}
+		return nil
 	}
 	parsed, err := parseFlags(command, parseArgs, stderr)
 	if err != nil {
@@ -93,6 +110,10 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		return nil
 	}
 	if err := validateCommandFlags(command, parsed); err != nil {
+		return err
+	}
+	renderer, err := resolveHumanRenderer(options, parsed, stdout)
+	if err != nil {
 		return err
 	}
 	ctx := context.Background()
@@ -120,6 +141,10 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	if err != nil {
 		return err
 	}
+	rendererOptions := renderer.Options()
+	rendererOptions.Now = config.now
+	config.renderer = presentation.NewHumanRenderer(rendererOptions)
+	config.verbose = parsed.verbose
 
 	switch command {
 	case "hooks":

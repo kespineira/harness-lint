@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kespineira/harness-lint/internal/presentation"
 	"github.com/kespineira/harness-lint/internal/store"
 )
 
@@ -86,19 +87,20 @@ func runDatabaseStatus(ctx context.Context, db *store.Store, config commandConfi
 	if config.json {
 		return writeDatabaseJSON(out, document)
 	}
-	size := "unknown"
-	if document.SizeBytes != nil {
-		size = strconv.FormatInt(*document.SizeBytes, 10)
-	}
-	fmt.Fprintf(out, "db status path=%s schema-current=%d schema-latest=%d size-bytes=%s usage-events=%d oldest-observed=%s latest-observed=%s integrity=not-checked\n",
-		cleanText(document.Path), document.Schema.Current, document.Schema.Latest, size, document.UsageEventCount,
-		statusTimestamp(document.OldestObservedAt), statusTimestamp(document.LatestObservedAt))
+	renderDatabaseStatusView(out, config.renderer, config.verbose, document)
 	return nil
 }
 
 func runDatabaseCheck(ctx context.Context, db *store.Store, config commandConfig, out io.Writer) error {
 	check, err := db.CheckDatabase(ctx)
 	if err != nil {
+		if !config.json {
+			fmt.Fprintln(out, "Database check")
+			fmt.Fprintln(out)
+			fmt.Fprintf(out, "  %s\n", config.renderer.Status("unavailable"))
+			fmt.Fprintln(out)
+			fmt.Fprintln(out, "Database could not be checked.")
+		}
 		return errors.New("run database integrity check")
 	}
 	document := databaseCheckDocument(check, config.now)
@@ -107,16 +109,7 @@ func runDatabaseCheck(ctx context.Context, db *store.Store, config commandConfig
 			return err
 		}
 	} else {
-		issues := "none"
-		if len(document.Issues) > 0 {
-			checks := make([]string, 0, len(document.Issues))
-			for _, issue := range document.Issues {
-				checks = append(checks, issue.Check)
-			}
-			issues = strings.Join(checks, ",")
-		}
-		fmt.Fprintf(out, "db check healthy=%t quick-check=%s foreign-key-check=%s schema=%s issues=%s\n",
-			document.Healthy, document.QuickCheck, document.ForeignKeyCheck, document.Schema, issues)
+		renderDatabaseCheckView(out, config.renderer, config.verbose, document)
 	}
 	if !document.Healthy {
 		return errors.New("database check found integrity issues")
@@ -134,7 +127,7 @@ func runDatabaseBackup(ctx context.Context, db *store.Store, config commandConfi
 		if err := db.Backup(ctx, destination); err != nil {
 			return databaseBackupError(err)
 		}
-		return writeDatabaseBackupResult(out, destination)
+		return writeDatabaseBackupResultWithRenderer(out, config.renderer, config.verbose, destination)
 	}
 
 	if !isFilesystemDatabase(config.dbPath) {
@@ -156,7 +149,7 @@ func runDatabaseBackup(ctx context.Context, db *store.Store, config commandConfi
 			}
 			return databaseBackupError(err)
 		}
-		return writeDatabaseBackupResult(out, destination)
+		return writeDatabaseBackupResultWithRenderer(out, config.renderer, config.verbose, destination)
 	}
 	return errors.New("too many database backup destinations")
 }
@@ -176,12 +169,12 @@ func databaseBackupError(err error) error {
 	}
 }
 
-func writeDatabaseBackupResult(out io.Writer, destination string) error {
+func writeDatabaseBackupResultWithRenderer(out io.Writer, renderer presentation.HumanRenderer, verbose bool, destination string) error {
 	info, err := os.Stat(destination)
 	if err != nil {
 		return errors.New("read database backup size")
 	}
-	fmt.Fprintf(out, "db backup output=%s size-bytes=%d\n", cleanText(destination), info.Size())
+	renderDatabaseBackupView(out, renderer, verbose, destination, info.Size())
 	return nil
 }
 

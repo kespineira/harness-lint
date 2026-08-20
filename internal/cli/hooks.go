@@ -82,9 +82,7 @@ func runHookStatus(ctx context.Context, config commandConfig, runtimes []hooks.R
 			return err
 		}
 	} else {
-		for _, report := range reports {
-			printHookStatus(out, report)
-		}
+		renderHookStatusView(out, config.renderer, config.verbose, reports)
 	}
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))
@@ -107,7 +105,7 @@ func runHookOperation(ctx context.Context, config commandConfig, runtimes []hook
 		} else {
 			result, err = manager.Uninstall(ctx)
 		}
-		printHookOperation(out, result)
+		renderHookOperationView(out, config.renderer, config.verbose, result, dryRun)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s %s: %s", runtime, action, cleanText(err.Error())))
 			continue
@@ -117,7 +115,9 @@ func runHookOperation(ctx context.Context, config commandConfig, runtimes []hook
 		// installs, and failed config mutations must not touch capture epochs.
 		if action == "uninstall" && !dryRun && result.Changed {
 			if lifecycleErr := closeManagedHookCaptureEpoch(ctx, config, runtime); lifecycleErr != nil {
-				fmt.Fprintf(out, "  warning=capture lifecycle close failed after config mutation: %s\n", cleanText(lifecycleErr.Error()))
+				fmt.Fprintln(out, "")
+				fmt.Fprintln(out, "Warning")
+				fmt.Fprintf(out, "  Capture lifecycle close failed after the configuration changed: %s\n", cleanText(lifecycleErr.Error()))
 				failures = append(failures, fmt.Sprintf("%s uninstall capture lifecycle: %s", runtime, cleanText(lifecycleErr.Error())))
 			}
 		}
@@ -211,14 +211,7 @@ func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Run
 			summary.Unknown++
 		}
 	}
-	fmt.Fprintf(out, "hooks-test aggregate healthy=%d idle=%d degraded=%d broken=%d unknown=%d\n", summary.Healthy, summary.Idle, summary.Degraded, summary.Broken, summary.Unknown)
-	for _, report := range reports {
-		printHookTestReport(out, report)
-	}
-	for _, diagnostic := range compatibilityResults {
-		printCompatibilityDiagnostic(out, diagnostic)
-	}
-	fmt.Fprintln(out, "limitation=synthetic self-test proves local ingest/SQLite but not true runtime delivery without activity")
+	renderHookTestView(out, config.renderer, config.verbose, reports, compatibilityResults, summary)
 	if summary.Broken > 0 || summary.Degraded > 0 || summary.Unknown > 0 {
 		return errors.New(hookTestFailureMessage)
 	}

@@ -94,35 +94,8 @@ func runScan(ctx context.Context, config commandConfig, out io.Writer) error {
 }
 
 func runScanWithAdapters(ctx context.Context, config commandConfig, db *store.Store, out io.Writer, adapters []runtime.Adapter) error {
-	var failures []string
-	for _, adapter := range adapters {
-		runtimeName := adapter.Runtime()
-		discovery, discoverErr := adapter.Discover(ctx)
-		inventoryRecorded := false
-		if discoverErr == nil {
-			if recordErr := db.RecordInventory(ctx, runtimeName, config.now, discovery.Capabilities); recordErr != nil {
-				discoverErr = fmt.Errorf("record inventory: %w", recordErr)
-			} else {
-				inventoryRecorded = true
-			}
-		}
-
-		events, usageErr := adapter.ImportUsage(ctx, config.since)
-		if usageErr == nil && len(events) > 0 {
-			usageErr = db.InsertUsageEvents(ctx, events)
-		}
-		if discoverErr != nil {
-			failures = append(failures, fmt.Sprintf("runtime %s discovery: %v", runtimeName, discoverErr))
-		}
-		if usageErr != nil {
-			failures = append(failures, fmt.Sprintf("runtime %s usage import: %v", runtimeName, usageErr))
-		}
-		status := "recorded"
-		if !inventoryRecorded {
-			status = "not-recorded"
-		}
-		fmt.Fprintf(out, "scan runtime=%s capabilities=%d events=%d findings=%d inventory=%s\n", runtimeName, len(discovery.Capabilities), len(events), len(discovery.Findings), status)
-	}
+	view, failures := collectScanView(ctx, config, db, adapters)
+	renderScanView(out, config.renderer, config.verbose, view)
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))
 	}

@@ -93,17 +93,17 @@ func TestDoctorCompatibilityDiagnosticsAreConservativeAndBounded(t *testing.T) {
 
 func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t *testing.T) {
 	tests := []struct {
-		name       string
-		versionOut string
-		missing    bool
-		brokenBin  bool
-		wantError  bool
-		wantDetect string
+		name        string
+		versionOut  string
+		missing     bool
+		brokenBin   bool
+		wantError   bool
+		wantVersion string
 	}{
-		{name: "verified", versionOut: "Claude Code 2.1.232", wantDetect: "detected"},
-		{name: "missing runtime version", missing: true, wantDetect: "missing-executable"},
-		{name: "malformed runtime version", versionOut: "Claude Code ???", wantDetect: "unparsable-output"},
-		{name: "separate hook executable failure", missing: true, brokenBin: true, wantError: true, wantDetect: "missing-executable"},
+		{name: "verified", versionOut: "Claude Code 2.1.232", wantVersion: "2.1.232"},
+		{name: "missing runtime version", missing: true, wantVersion: "Not available (runtime executable not found)"},
+		{name: "malformed runtime version", versionOut: "Claude Code ???", wantVersion: "Unknown (version output not recognized)"},
+		{name: "separate hook executable failure", missing: true, brokenBin: true, wantError: true, wantVersion: "Not available (runtime executable not found)"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -137,7 +137,7 @@ func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t 
 				}),
 			}
 			var stdout, stderr bytes.Buffer
-			err := ExecuteWithOptions(options, []string{"hooks", "test", "claude", "--db", dbPath, "--claude-config", claudeRoot}, nil, &stdout, &stderr)
+			err := ExecuteWithOptions(options, []string{"hooks", "test", "claude", "--db", dbPath, "--claude-config", claudeRoot, "--verbose"}, nil, &stdout, &stderr)
 			if test.wantError {
 				if err == nil || err.Error() != hookTestFailureMessage {
 					t.Fatalf("hooks test error = %v, want %q", err, hookTestFailureMessage)
@@ -146,15 +146,14 @@ func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t 
 				t.Fatalf("hooks test error = %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 			}
 			output := stdout.String()
-			line := compatibilityLine(output, "claude-code")
-			if !strings.Contains(line, "detection="+test.wantDetect) || !strings.Contains(line, "latest-validated=unknown") {
-				t.Fatalf("compatibility line = %q, want detection=%s and latest validation", line, test.wantDetect)
+			if !strings.Contains(output, "Runtime version") || !strings.Contains(output, test.wantVersion) || !strings.Contains(output, "Runtime-version compatibility ranges are not yet encoded") {
+				t.Fatalf("verbose compatibility output = %q, want version detail %q", output, test.wantVersion)
 			}
 			if test.wantError {
-				if !strings.Contains(output, "state=broken") || !strings.Contains(output, "executable=unresolved") {
+				if !strings.Contains(output, "✗ Broken") || !strings.Contains(output, "Executable") || !strings.Contains(output, "✗ Unavailable") {
 					t.Fatalf("hooks test output = %q, want separate executable health failure", output)
 				}
-			} else if !strings.Contains(output, "state=idle") {
+			} else if !strings.Contains(output, "- Idle") {
 				t.Fatalf("hooks test output = %q, missing idle health state", output)
 			}
 		})
