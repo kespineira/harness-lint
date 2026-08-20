@@ -777,6 +777,75 @@ func TestCodexInlineConfigAndTrustReviewAreStructuredStatus(t *testing.T) {
 	}
 }
 
+func TestCodexHookStateRegistryDoesNotTriggerInlineReview(t *testing.T) {
+	tests := []struct {
+		name        string
+		config      string
+		wantInline  bool
+		wantWarning bool
+	}{
+		{
+			name: "state only",
+			config: `[hooks.state."/tmp/hooks.json"]
+enabled = true
+trusted_hash = "hash"
+`,
+			wantInline:  false,
+			wantWarning: false,
+		},
+		{
+			name: "state and event",
+			config: `[hooks.state."/tmp/hooks.json"]
+enabled = true
+trusted_hash = "hash"
+
+[hooks.PostToolUse]
+matcher = "Bash"
+`,
+			wantInline:  true,
+			wantWarning: true,
+		},
+		{
+			name: "unknown event",
+			config: `[hooks.UnknownEvent]
+matcher = "Bash"
+`,
+			wantInline:  true,
+			wantWarning: true,
+		},
+		{
+			name: "version is not inline metadata",
+			config: `[hooks.version]
+value = 1
+`,
+			wantInline:  true,
+			wantWarning: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "config")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "config.toml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			report, err := resolvedManager(RuntimeCodex, root).Status(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.InlineHooks != test.wantInline {
+				t.Fatalf("InlineHooks = %t, want %t; report = %#v", report.InlineHooks, test.wantInline, report)
+			}
+			if hasInlineWarning(report) != test.wantWarning {
+				t.Fatalf("inline warning = %t, want %t; warnings = %#v", hasInlineWarning(report), test.wantWarning, report.Warnings)
+			}
+		})
+	}
+}
+
 func TestUnresolvedBinaryNeverMutatesConfiguration(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "config")
 	manager := unresolvedManager(RuntimeClaude, root)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -38,12 +37,17 @@ func inspectCodexInlineHooks(configRoot string) (bool, string) {
 	if !found {
 		return false, ""
 	}
-	value := reflect.ValueOf(rawHooks)
-	if value.IsValid() && value.Kind() == reflect.Map {
-		if value.Len() == 0 {
-			return false, ""
+	hooks, ok := rawHooks.(map[string]any)
+	if ok {
+		for name := range hooks {
+			if name != "state" {
+				return true, ""
+			}
 		}
-		return true, ""
+		// Codex stores hooks.json trust state under hooks.state. That table
+		// records state for an external hook definition; it is not itself an
+		// inline hook definition.
+		return false, ""
 	}
 	return false, fmt.Sprintf("Codex config.toml has a non-table hooks value (%T); inline hook review is unavailable", rawHooks)
 }
