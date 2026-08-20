@@ -47,6 +47,14 @@ grep -Fq 'scripts/install.sh' "$workflow" || fail 'published installer is not co
 grep -Fq 'HARNESS_LINT_VERSION' "$workflow" || fail 'installer is not pinned to the selected release'
 grep -Fq 'HARNESS_LINT_INSTALL_DIR' "$workflow" || fail 'Linux install directory is not isolated'
 grep -Fq 'harness-lint hooks status' "$workflow" || fail 'Linux hooks status is not verified'
+grep -Fq 'hooks_json=$(harness-lint hooks status --json' "$workflow" || fail 'hooks status is not verified through the stable JSON API'
+grep -Fq '.schema_version == 1' "$workflow" || fail 'hooks status schema version is not verified'
+grep -Fq '["claude-code", "codex"]' "$workflow" || fail 'both hook runtimes are not verified'
+grep -Fq "grep -Fq 'Usage:'" "$workflow" || fail 'human help heading is not verified'
+grep -Fq "grep -Fq 'harness-lint <command>'" "$workflow" || fail 'human help usage form is not verified'
+if grep -Fq 'hooks runtime=' "$workflow"; then
+    fail 'published smoke still depends on retired machine-like human hook output'
+fi
 grep -Fq 'brew install --cask kespineira/tap/harness-lint' "$workflow" || fail 'published Homebrew cask is not installed'
 grep -Fq 'HOMEBREW_NO_ANALYTICS' "$workflow" || fail 'Homebrew analytics are not disabled'
 grep -Fq 'export HOME=' "$workflow" || fail 'consumer smoke does not isolate HOME'

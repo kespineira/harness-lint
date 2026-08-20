@@ -180,14 +180,17 @@ jobs:
           printf '%s\n' "$version_output" | grep -Eq \
             "^harness-lint version=${expected_version} commit=[^ ]+ build-date=.+$"
           help_output=$(harness-lint --help)
-          printf '%s\n' "$help_output" | grep -Fq 'usage: harness-lint'
-          hooks_output=$(harness-lint hooks status \
+          printf '%s\n' "$help_output" | grep -Fq 'Usage:'
+          printf '%s\n' "$help_output" | grep -Fq 'harness-lint <command>'
+          hooks_json=$(harness-lint hooks status --json \
             --home "$smoke_home" \
             --codex-home "$smoke_home/.codex" \
             --claude-config "$smoke_home/.claude" \
             --now 2026-08-16T00:00:00Z)
-          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=claude-code'
-          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=codex'
+          printf '%s\n' "$hooks_json" | jq -e '
+            .schema_version == 1 and
+            (([.runtimes[].runtime] | sort) == ["claude-code", "codex"])
+          ' >/dev/null
 
   macos-published-consumer:
     name: Published Homebrew cask consumer (macOS)
@@ -228,11 +231,14 @@ jobs:
           printf '%s\n' "$version_output" | grep -Eq \
             "^harness-lint version=${expected_version} commit=[^ ]+ build-date=.+$"
           help_output=$(harness-lint --help)
-          printf '%s\n' "$help_output" | grep -Fq 'usage: harness-lint'
-          hooks_output=$(harness-lint hooks status \
+          printf '%s\n' "$help_output" | grep -Fq 'Usage:'
+          printf '%s\n' "$help_output" | grep -Fq 'harness-lint <command>'
+          hooks_json=$(harness-lint hooks status --json \
             --home "$HOME" \
             --codex-home "$HOME/.codex" \
             --claude-config "$HOME/.claude" \
             --now 2026-08-16T00:00:00Z)
-          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=claude-code'
-          printf '%s\n' "$hooks_output" | grep -Fq 'hooks runtime=codex'
+          printf '%s\n' "$hooks_json" | jq -e '
+            .schema_version == 1 and
+            (([.runtimes[].runtime] | sort) == ["claude-code", "codex"])
+          ' >/dev/null
