@@ -33,7 +33,7 @@ func TestM7ReportProgressiveDisclosureAndCanonicalAttention(t *testing.T) {
 	var output bytes.Buffer
 	renderReportView(&output, renderer, false, false, result, nil, now, 60)
 	text := output.String()
-	for _, want := range []string{"Harness report", "Last 60 days", "Runtime overview"} {
+	for _, want := range []string{"Harness report", "Last 60 days", "Overview"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("default report missing %q: %q", want, text)
 		}
@@ -59,7 +59,7 @@ func TestM7ReportProgressiveDisclosureAndCanonicalAttention(t *testing.T) {
 	if strings.Contains(text, "Evidence summary") {
 		t.Fatalf("default report contains removed evidence summary block: %q", text)
 	}
-	attention := text[strings.Index(text, "Attention"):strings.Index(text, "Top used")]
+	attention := text[strings.Index(text, "Needs attention"):strings.Index(text, "Most used")]
 	var attentionHeader []string
 	for _, line := range strings.Split(attention, "\n") {
 		if strings.Contains(line, "Status") {
@@ -82,7 +82,7 @@ func TestM7ReportProgressiveDisclosureAndCanonicalAttention(t *testing.T) {
 	if strings.Contains(attention, "review-d") {
 		t.Fatalf("attention exceeded five rows = %q", attention)
 	}
-	if !strings.Contains(text, "Observation note") || !strings.Contains(text, "Missing observations do not prove non-use") || !strings.Contains(text, "Explore") {
+	if !strings.Contains(text, "Observation") || !strings.Contains(text, "Missing observations do not prove non-use") || !strings.Contains(text, "Explore") {
 		t.Fatalf("default report omitted progressive-disclosure sections: %q", text)
 	}
 

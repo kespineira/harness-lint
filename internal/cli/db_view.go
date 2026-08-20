@@ -60,9 +60,15 @@ func renderDatabaseCheckView(out io.Writer, renderer presentation.HumanRenderer,
 	}
 	if len(document.Issues) > 0 {
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Issues:")
+		fmt.Fprintln(out, "Issues")
+		seen := make(map[string]struct{}, len(document.Issues))
 		for _, issue := range document.Issues {
-			fmt.Fprintf(out, "  %s\n", boundedDatabaseIssue(issue.Check))
+			message := humanDatabaseIssue(issue.Check)
+			if _, exists := seen[message]; exists {
+				continue
+			}
+			seen[message] = struct{}{}
+			fmt.Fprintf(out, "  %s %s\n", renderer.Colorize("!", presentation.StyleWarning), message)
 		}
 	}
 	if verbose {
@@ -132,4 +138,23 @@ func boundedDatabaseIssue(value string) string {
 		return value[:max] + "…"
 	}
 	return value
+}
+
+func humanDatabaseIssue(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "quick_check":
+		return "SQLite quick check reported an issue."
+	case "foreign_key_check":
+		return "Foreign key violations were found."
+	case "schema_migrations":
+		return "Schema migration history could not be read."
+	case "schema_version_invalid":
+		return "Database schema version is invalid."
+	case "schema_version_newer":
+		return "Database schema is newer than this harness-lint build."
+	case "schema_version_mismatch":
+		return "Database schema is not current."
+	default:
+		return boundedDatabaseIssue(value)
+	}
 }

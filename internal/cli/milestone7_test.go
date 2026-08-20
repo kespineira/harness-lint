@@ -167,7 +167,7 @@ func TestM7VerboseWarningsAndDatabaseHumanView(t *testing.T) {
 		Schema:          "ok",
 		Issues:          []DatabaseIssueDTO{{Check: "quick_check"}},
 	})
-	if !strings.Contains(checkOutput.String(), "✗ SQLite quick check") || !strings.Contains(checkOutput.String(), "Database needs attention.") || !strings.Contains(checkOutput.String(), "quick_check") {
+	if !strings.Contains(checkOutput.String(), "✗ SQLite quick check") || !strings.Contains(checkOutput.String(), "Database needs attention.") || !strings.Contains(checkOutput.String(), "SQLite quick check reported an issue.") {
 		t.Fatalf("database check human output = %q", checkOutput.String())
 	}
 

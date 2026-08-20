@@ -17,12 +17,12 @@ func writeRootHelp(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  scan       Discover capabilities and import local usage evidence")
-	fmt.Fprintln(w, "  report     Summarize current inventory and observed usage")
+	fmt.Fprintln(w, "  report     Summarize capability usage and cleanup candidates")
 	fmt.Fprintln(w, "  explain    Explain one current capability's evidence and classification")
-	fmt.Fprintln(w, "  context    Explain configured and on-load context measurements")
-	fmt.Fprintln(w, "  usage      Query usage history over a closed UTC period")
-	fmt.Fprintln(w, "  stale      Classify current capabilities by observed recency")
-	fmt.Fprintln(w, "  doctor     Inspect runtime discovery findings and compatibility")
+	fmt.Fprintln(w, "  context    Estimate configured and on-load context footprint")
+	fmt.Fprintln(w, "  usage      Rank observed usage over a closed UTC period")
+	fmt.Fprintln(w, "  stale      Show capabilities classified stale by observed recency")
+	fmt.Fprintln(w, "  doctor     Find runtime configuration and discovery problems")
 	fmt.Fprintln(w, "  hooks      Inspect or manage runtime hook configuration")
 	fmt.Fprintln(w, "  db         Inspect, check, or back up the local database")
 	fmt.Fprintln(w, "  ingest     Receive one bounded metadata-only hook document")
@@ -109,13 +109,13 @@ func writeHooksActionHelp(w io.Writer, action string) {
 	fmt.Fprintln(w, "  --verbose                  Include matcher and delivery details")
 	fmt.Fprintln(w, "  --now RFC3339              Fixed observation clock")
 	if action == "status" {
-		fmt.Fprintln(w, "  --json                    Stable JSON status output")
+		fmt.Fprintln(w, "  --json                     Stable JSON status output")
 	}
 	if action == "test" {
-		fmt.Fprintln(w, "  --db PATH                 SQLite database path")
+		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
 	}
 	if action == "install" || action == "uninstall" {
-		fmt.Fprintln(w, "  --dry-run                 Preview changes without writing")
+		fmt.Fprintln(w, "  --dry-run                  Preview changes without writing")
 	}
 }
 
@@ -138,16 +138,16 @@ func writeDatabaseActionHelp(w io.Writer, action string) {
 	fmt.Fprintf(w, "  harness-lint db %s [options]\n", action)
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Options:")
-	fmt.Fprintln(w, "  --db PATH                 SQLite database path")
-	fmt.Fprintln(w, "  --config-dir PATH        Default database configuration directory")
-	fmt.Fprintln(w, "  --color auto|always|never Status color policy")
-	fmt.Fprintln(w, "  --verbose                Include diagnostic details")
-	fmt.Fprintln(w, "  --now RFC3339             Fixed observation clock")
+	fmt.Fprintln(w, "  --db PATH                  SQLite database path")
+	fmt.Fprintln(w, "  --config-dir PATH          Default database configuration directory")
+	fmt.Fprintln(w, "  --color auto|always|never  Status color policy")
+	fmt.Fprintln(w, "  --verbose                  Include diagnostic details")
+	fmt.Fprintln(w, "  --now RFC3339              Fixed observation clock")
 	if action == "status" || action == "check" {
-		fmt.Fprintln(w, "  --json                   Stable JSON output")
+		fmt.Fprintln(w, "  --json                     Stable JSON output")
 	}
 	if action == "backup" {
-		fmt.Fprintln(w, "  --output PATH             Exclusive backup destination")
+		fmt.Fprintln(w, "  --output PATH              Exclusive backup destination")
 	}
 }
 
@@ -168,64 +168,113 @@ func writeCommandHelp(w io.Writer, command string) {
 		fmt.Fprintln(w, "  --managed-by harness-lint-hooks/v1")
 		fmt.Fprintln(w, "  stdin                      one metadata-only JSON hook document")
 	case "usage":
-		fmt.Fprintln(w, "usage: harness-lint usage [options]")
-		fmt.Fprintln(w, "query usage history over a closed UTC period")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --days N                   closed UTC period length (default 90; positive)")
-		fmt.Fprintln(w, "  --runtime claude|claude-code|codex")
-		fmt.Fprintln(w, "  --type skill|mcp|tool|agent")
-		fmt.Fprintln(w, "  --monthly                  include UTC monthly evidence")
-		fmt.Fprintln(w, "  --json                     stable JSON output")
-		fmt.Fprintln(w, "  --now RFC3339              generated-at clock")
+		writeLeafCommandHelp(w,
+			"Rank observed capability usage over a closed UTC period.",
+			"harness-lint usage [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--days N                   Closed UTC period length (default 90)",
+				"--runtime claude|codex     Filter by runtime",
+				"--type skill|mcp|tool|agent",
+				"--monthly                  Include UTC monthly totals",
+				"--json                     Stable machine-readable JSON output",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
 	case "report":
-		fmt.Fprintln(w, "usage: harness-lint report [options]")
-		fmt.Fprintln(w, "summarize current inventory and observed usage")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
-		fmt.Fprintln(w, "  --now RFC3339              observation time")
-		fmt.Fprintln(w, "  --all                      show every current capability")
-		fmt.Fprintln(w, "  --verbose                  include exact evidence and coverage details")
-		fmt.Fprintln(w, "  --json                     stable JSON output (human options do not alter DTOs)")
-		fmt.Fprintln(w, "  --color auto|always|never  status color policy")
+		writeLeafCommandHelp(w,
+			"Summarize capability usage and cleanup candidates.",
+			"harness-lint report [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--days N                   Stale threshold in days (default 60)",
+				"--all                      Show every current capability",
+				"--verbose                  Include exact evidence and coverage details",
+				"--json                     Stable machine-readable JSON output",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
 	case "explain":
-		fmt.Fprintln(w, "usage: harness-lint explain <name> [options]")
-		fmt.Fprintln(w, "explain one current capability using conservative stored evidence")
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --days N                   stale threshold in days (default 60)")
-		fmt.Fprintln(w, "  --runtime claude|codex     narrow a duplicate name")
-		fmt.Fprintln(w, "  --type TYPE               narrow by capability type")
-		fmt.Fprintln(w, "  --scope global|user|project|session")
-		fmt.Fprintln(w, "  --now RFC3339              observation time")
-		fmt.Fprintln(w, "  --verbose                  include exact evidence and coverage details")
-		fmt.Fprintln(w, "  --color auto|always|never  status color policy")
+		writeLeafCommandHelp(w,
+			"Explain why one current capability received its classification.",
+			"harness-lint explain <name> [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--days N                   Stale threshold in days (default 60)",
+				"--runtime claude|codex     Narrow an ambiguous name by runtime",
+				"--type TYPE                Narrow by capability type",
+				"--scope SCOPE              Narrow by global, user, project, or session scope",
+				"--verbose                  Include exact evidence and coverage details",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
+	case "scan":
+		writeLeafCommandHelp(w,
+			"Discover capabilities and import local usage evidence.",
+			"harness-lint scan [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--home PATH                Synthetic user home",
+				"--project PATH             Project root",
+				"--config-dir PATH          Default database configuration directory",
+				"--codex-home PATH          Codex configuration root",
+				"--claude-config PATH       Claude configuration root",
+				"--hook-capture PATH        Repeatable metadata-only hook capture path",
+				"--since RFC3339            Inclusive usage-import boundary",
+				"--verbose                  Include inventory recording details",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
+	case "context":
+		writeLeafCommandHelp(w,
+			"Estimate configured and on-load context footprint.",
+			"harness-lint context [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
+	case "stale":
+		writeLeafCommandHelp(w,
+			"Show only capabilities classified STALE under the selected threshold.",
+			"harness-lint stale [options]",
+			[]string{
+				"--db PATH                  SQLite database path",
+				"--days N                   Stale threshold in days (default 60)",
+				"--verbose                  Include exact stale evidence",
+				"--json                     Stable machine-readable JSON output",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
+	case "doctor":
+		writeLeafCommandHelp(w,
+			"Find runtime configuration and discovery problems.",
+			"harness-lint doctor [options]",
+			[]string{
+				"--home PATH                Synthetic user home",
+				"--project PATH             Project root",
+				"--codex-home PATH          Codex configuration root",
+				"--claude-config PATH       Claude configuration root",
+				"--verbose                  Include compatibility details",
+				"--now RFC3339              Observation clock",
+				"--color auto|always|never  Status color policy",
+			})
 	default:
 		fmt.Fprintf(w, "usage: harness-lint %s [options]\n", command)
-		fmt.Fprintln(w, "options:")
-		fmt.Fprintln(w, "  --db PATH                  SQLite database path")
-		fmt.Fprintln(w, "  --home PATH                synthetic user home")
-		fmt.Fprintln(w, "  --project PATH             project root")
-		fmt.Fprintln(w, "  --config-dir PATH          configuration directory")
-		fmt.Fprintln(w, "  --codex-home PATH          Codex configuration root")
-		fmt.Fprintln(w, "  --claude-config PATH       Claude configuration root")
-		fmt.Fprintln(w, "  --hook-capture PATH        repeatable metadata-only hook capture path")
-		fmt.Fprintln(w, "  --since RFC3339            inclusive usage-import boundary")
-		fmt.Fprintf(w, "  --days N                   stale threshold in days (default %d)\n", defaultDays(command))
-		fmt.Fprintln(w, "  --now RFC3339              observation time")
-		fmt.Fprintln(w, "  --color auto|always|never  status color policy")
-		if command == "scan" {
-			fmt.Fprintln(w, "  --verbose                  include inventory recording details")
-		}
-		if command == "stale" {
-			fmt.Fprintln(w, "  --verbose                  include exact stale evidence")
-		}
-		if command == "doctor" {
-			fmt.Fprintln(w, "  --verbose                  include compatibility details")
-		}
-		if command == "report" || command == "stale" {
-			fmt.Fprintln(w, "  --json                     stable JSON output")
-		}
+	}
+}
+
+func writeLeafCommandHelp(w io.Writer, description, usage string, options []string) {
+	fmt.Fprintln(w, description)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintf(w, "  %s\n", usage)
+	if len(options) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Options:")
+	for _, option := range options {
+		fmt.Fprintf(w, "  %s\n", option)
 	}
 }

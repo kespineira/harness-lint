@@ -50,7 +50,7 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 		t.Fatalf("report error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "Runtime overview") || !strings.Contains(report, "advertised ·") || !strings.Contains(report, "loaded ·") || !strings.Contains(report, "invoked") {
+	if !strings.Contains(report, "Overview") || !strings.Contains(report, "advertised ·") || !strings.Contains(report, "loaded ·") || !strings.Contains(report, "invoked") {
 		t.Fatalf("report output = %q, want structured runtime and totals sections", report)
 	}
 	if !strings.Contains(report, "usage-only") {
@@ -128,7 +128,7 @@ func TestExecuteScanIsIdempotentAndEmptySnapshotPreservesHistory(t *testing.T) {
 		t.Fatalf("report after empty scan error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "Codex") || !strings.Contains(report, "Claude Code") || !strings.Contains(report, "Runtime overview") {
+	if !strings.Contains(report, "Codex") || !strings.Contains(report, "Claude Code") || !strings.Contains(report, "Overview") {
 		t.Fatalf("report after empty scan = %q, want empty current inventories", report)
 	}
 	if !strings.Contains(report, "usage-only") {

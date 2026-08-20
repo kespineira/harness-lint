@@ -67,7 +67,11 @@ func renderDoctorView(out io.Writer, renderer presentation.HumanRenderer, verbos
 	} else if doctorHasUnavailable(ordered) {
 		fmt.Fprintln(out, "Doctor could not complete every runtime discovery check.")
 	} else {
-		fmt.Fprintf(out, "%s require attention.\n", humanCount(renderer, len(findings), "finding", "findings"))
+		verb := "require"
+		if len(findings) == 1 {
+			verb = "requires"
+		}
+		fmt.Fprintf(out, "%s %s attention.\n", humanCount(renderer, len(findings), "finding", "findings"), verb)
 	}
 }
 

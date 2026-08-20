@@ -158,7 +158,7 @@ func renderReportView(out io.Writer, renderer presentation.HumanRenderer, all, v
 				reportCapabilityRows(renderer, items))
 		}
 	} else {
-		fmt.Fprintln(out, "Attention")
+		fmt.Fprintln(out, "Needs attention")
 		if len(displayed) == 0 {
 			fmt.Fprintln(out, "  No stale or review capabilities need attention.")
 		} else {
@@ -294,7 +294,7 @@ func renderReportRuntimeOverview(out io.Writer, renderer presentation.HumanRende
 		return runtimes[left] < runtimes[right]
 	})
 
-	fmt.Fprintln(out, "Runtime overview")
+	fmt.Fprintln(out, "Overview")
 	rows := make([][]string, 0, len(runtimes))
 	for _, runtimeName := range runtimes {
 		row := totals[runtimeName]
@@ -319,7 +319,7 @@ func runtimeOrder(value domain.Runtime) int {
 }
 
 func renderReportObservationNote(out io.Writer, renderer presentation.HumanRenderer, items []reportCapability) {
-	fmt.Fprintln(out, "Observation note")
+	fmt.Fprintln(out, "Observation")
 	note := "Only local observations are shown. Missing observations do not prove non-use. Lifetime coverage remains unknown unless a positive capture/presence intersection is shown."
 	fmt.Fprintln(out, indentHumanBlock(reportWrap(renderer, note, 2), 2))
 	unknownAdvertisement := 0
@@ -345,7 +345,7 @@ func renderTopUsed(out io.Writer, renderer presentation.HumanRenderer, items []r
 	if len(used) > 3 {
 		used = used[:3]
 	}
-	fmt.Fprintln(out, "Top used")
+	fmt.Fprintln(out, "Most used")
 	if len(used) == 0 {
 		fmt.Fprintln(out, "  No invocations were observed for current capabilities.")
 		return

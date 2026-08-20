@@ -40,7 +40,11 @@ func renderStaleView(out io.Writer, renderer presentation.HumanRenderer, verbose
 			if reviewCount == 0 {
 				fmt.Fprintln(out, "No capabilities remain REVIEW.")
 			} else {
-				writeReportText(out, renderer, fmt.Sprintf("%s remain REVIEW; REVIEW is not evidence of staleness.", humanCount(renderer, reviewCount, "capability", "capabilities")), 0)
+				verb := "remain"
+				if reviewCount == 1 {
+					verb = "remains"
+				}
+				writeReportText(out, renderer, fmt.Sprintf("%s %s REVIEW; REVIEW is not evidence of staleness.", humanCount(renderer, reviewCount, "capability", "capabilities"), verb), 0)
 			}
 		}
 		return

@@ -118,7 +118,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 			t.Fatalf("human report contains private or misleading text %q: %s", forbidden, human.String())
 		}
 	}
-	for _, want := range []string{"Harness report", "Runtime overview", "Observation note", "Totals", "Explore", "2 invoked"} {
+	for _, want := range []string{"Harness report", "Overview", "Observation", "Totals", "Explore", "2 invoked"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human report = %q, missing %q", human.String(), want)
 		}
