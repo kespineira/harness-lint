@@ -84,6 +84,22 @@ func openStore(config commandConfig) (*store.Store, error) {
 	return db, nil
 }
 
+var errDatabaseNotInitialized = errors.New("database is not initialized")
+
+func openExistingStore(config commandConfig) (*store.Store, error) {
+	if config.dbPath == "" {
+		return nil, errors.New("database path is empty")
+	}
+	db, err := store.OpenExisting(config.dbPath)
+	if errors.Is(err, store.ErrStoreNotFound) {
+		return nil, fmt.Errorf("%w; run `harness-lint scan` first", errDatabaseNotInitialized)
+	}
+	if err != nil {
+		return nil, errors.New("database is unavailable")
+	}
+	return db, nil
+}
+
 func runScan(ctx context.Context, config commandConfig, out io.Writer) error {
 	db, err := openStore(config)
 	if err != nil {
@@ -94,35 +110,8 @@ func runScan(ctx context.Context, config commandConfig, out io.Writer) error {
 }
 
 func runScanWithAdapters(ctx context.Context, config commandConfig, db *store.Store, out io.Writer, adapters []runtime.Adapter) error {
-	var failures []string
-	for _, adapter := range adapters {
-		runtimeName := adapter.Runtime()
-		discovery, discoverErr := adapter.Discover(ctx)
-		inventoryRecorded := false
-		if discoverErr == nil {
-			if recordErr := db.RecordInventory(ctx, runtimeName, config.now, discovery.Capabilities); recordErr != nil {
-				discoverErr = fmt.Errorf("record inventory: %w", recordErr)
-			} else {
-				inventoryRecorded = true
-			}
-		}
-
-		events, usageErr := adapter.ImportUsage(ctx, config.since)
-		if usageErr == nil && len(events) > 0 {
-			usageErr = db.InsertUsageEvents(ctx, events)
-		}
-		if discoverErr != nil {
-			failures = append(failures, fmt.Sprintf("runtime %s discovery: %v", runtimeName, discoverErr))
-		}
-		if usageErr != nil {
-			failures = append(failures, fmt.Sprintf("runtime %s usage import: %v", runtimeName, usageErr))
-		}
-		status := "recorded"
-		if !inventoryRecorded {
-			status = "not-recorded"
-		}
-		fmt.Fprintf(out, "scan runtime=%s capabilities=%d events=%d findings=%d inventory=%s\n", runtimeName, len(discovery.Capabilities), len(events), len(discovery.Findings), status)
-	}
+	view, failures := collectScanView(ctx, config, db, adapters)
+	renderScanView(out, config.renderer, config.verbose, view)
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))
 	}
@@ -158,7 +147,7 @@ func runUsage(ctx context.Context, config commandConfig, flags parsedFlags, out 
 	if !mcpUnion {
 		query.CapabilityType = typeFilter
 	}
-	db, err := openStore(config)
+	db, err := openExistingStore(config)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -176,22 +165,33 @@ func runUsage(ctx context.Context, config commandConfig, flags parsedFlags, out 
 	}
 	runtimeFilterText := usageRuntimeFilterText(runtimeFilter, flags.runtimeSet)
 	typeFilterText := usageTypeFilterText(typeFilter, mcpUnion, flags.typeSet)
-	document, err := usagedto.Build(usagedto.BuildInput{
-		GeneratedAt:    config.now,
-		Days:           config.days,
-		RuntimeFilter:  runtimeFilterText,
-		TypeFilter:     typeFilterText,
-		Aggregates:     aggregates,
-		Monthly:        monthly,
-		IncludeMonthly: flags.monthly,
-	})
-	if err != nil {
-		return fmt.Errorf("build usage output: %w", err)
-	}
 	if config.json {
+		document, err := usagedto.Build(usagedto.BuildInput{
+			GeneratedAt:    config.now,
+			Days:           config.days,
+			RuntimeFilter:  runtimeFilterText,
+			TypeFilter:     typeFilterText,
+			Aggregates:     aggregates,
+			Monthly:        monthly,
+			IncludeMonthly: flags.monthly,
+		})
+		if err != nil {
+			return fmt.Errorf("build usage output: %w", err)
+		}
 		return usagedto.WriteJSON(out, document)
 	}
-	printUsageDocument(out, document)
+	renderUsageView(out, config.renderer, usageView{
+		now:            config.now,
+		days:           config.days,
+		runtimeFilter:  runtimeFilter,
+		typeFilter:     typeFilter,
+		mcpUnion:       mcpUnion,
+		runtimeSet:     flags.runtimeSet,
+		typeSet:        flags.typeSet,
+		aggregates:     aggregates,
+		monthly:        monthly,
+		includeMonthly: flags.monthly,
+	})
 	return nil
 }
 
@@ -318,7 +318,7 @@ func loadReport(ctx context.Context, config commandConfig, staleDays int) (analy
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("--days %w", err)
 	}
-	db, err := openStore(config)
+	db, err := openExistingStore(config)
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("open database: %w", err)
 	}
@@ -355,12 +355,7 @@ func runReport(ctx context.Context, config commandConfig, out io.Writer) error {
 		}
 		return reportdto.WriteJSON(out, document)
 	}
-	fmt.Fprintf(out, "report as-of=%s stale-days=%d\n", config.now.Format(time.RFC3339), config.days)
-	aggregateIndex := buildAggregateIndex(aggregates)
-	printRuntimeCounts(out, result, aggregates, config.now)
-	printCapabilityEvidenceWithHistory(out, result, aggregateIndex, config.now)
-	printDuplicateFindings(out, result)
-	printUsageOnlyWithAnalysis(out, result, aggregateIndex, config.now)
+	renderReportView(out, config.renderer, config.all, config.verbose, result, aggregates, config.now, config.days)
 	return nil
 }
 
@@ -376,14 +371,7 @@ func runStale(ctx context.Context, config commandConfig, out io.Writer) error {
 		}
 		return reportdto.WriteJSON(out, document)
 	}
-	fmt.Fprintf(out, "stale as-of=%s days=%d\n", config.now.Format(time.RFC3339), config.days)
-	if len(result.Capabilities) == 0 {
-		fmt.Fprintln(out, "no current capabilities")
-		return nil
-	}
-	aggregateIndex := buildAggregateIndex(aggregates)
-	printCapabilityEvidenceWithHistory(out, result, aggregateIndex, config.now)
-	printDuplicateFindings(out, result)
+	renderStaleView(out, config.renderer, config.verbose, result, config.now, config.days)
 	return nil
 }
 
@@ -392,57 +380,37 @@ func runContext(ctx context.Context, config commandConfig, out io.Writer) error 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "context as-of=%s\n", config.now.Format(time.RFC3339))
-	if len(result.Context.Groups) == 0 {
-		fmt.Fprintln(out, "no configured capabilities; configured baseline exposure=unknown; on-load footprint=unknown")
-		return nil
-	}
-	for _, group := range result.Context.Groups {
-		fmt.Fprintf(out, "runtime=%s type=%s capabilities=%d\n", group.Runtime, group.CapabilityType, group.CapabilityCount)
-		switch group.CapabilityType {
-		case domain.CapabilitySkill:
-			fmt.Fprintf(out, "  configured baseline exposure: metadata=%s (according to Advertisement); body=not included (Skill body is on-load only)\n", formatMeasurementSummary(group.MetadataTokens))
-			fmt.Fprintf(out, "  on-load footprint estimate: body=%s; metadata=not measured (unknown)\n", formatMeasurementSummary(group.BodyTokens))
-		case domain.CapabilityInstructionFile:
-			fmt.Fprintf(out, "  configured baseline exposure: body=%s; metadata=unknown\n", formatMeasurementSummary(group.BodyTokens))
-			fmt.Fprintln(out, "  on-load footprint: unknown (not separately measured)")
-		default:
-			fmt.Fprintf(out, "  configured baseline exposure: metadata=%s; body=not included in baseline\n", formatMeasurementSummary(group.MetadataTokens))
-			fmt.Fprintf(out, "  on-load/on-invocation footprint: body=%s\n", formatMeasurementSummary(group.BodyTokens))
-		}
-	}
+	renderContextView(out, config.renderer, result.Context)
 	return nil
 }
 
 func runDoctor(ctx context.Context, config commandConfig, out io.Writer) error {
 	set := newAdapters(config)
 	var failures []string
+	runtimes := make([]doctorRuntimeView, 0, len(knownRuntimes))
 	for _, adapter := range orderedAdapters(set) {
 		runtimeName := adapter.Runtime()
-		printCompatibilityDiagnostic(out, detectCompatibility(ctx, config, runtimeName))
+		view := doctorRuntimeView{runtime: runtimeName, compatibility: detectCompatibility(ctx, config, runtimeName)}
 		discovery, err := adapter.Discover(ctx)
 		if err != nil {
-			fmt.Fprintf(out, "runtime=%s discovery=error error=%s\n", runtimeName, cleanText(err.Error()))
+			view.discoveryUnavailable = true
+			runtimes = append(runtimes, view)
 			failures = append(failures, fmt.Sprintf("runtime %s discovery: %v", runtimeName, err))
 			continue
 		}
-		fmt.Fprintf(out, "runtime=%s capabilities=%d findings=%d\n", runtimeName, len(discovery.Capabilities), len(discovery.Findings))
-		for _, finding := range discovery.Findings {
-			printFinding(out, finding)
-		}
+		view.capabilities = len(discovery.Capabilities)
+		view.findings = append(view.findings, discovery.Findings...)
 		duplicates, duplicateErr := analysis.DetectDuplicateNames(discovery.Capabilities)
 		if duplicateErr != nil {
+			view.duplicateCheckError = true
+			runtimes = append(runtimes, view)
 			failures = append(failures, fmt.Sprintf("runtime %s duplicate analysis: %v", runtimeName, duplicateErr))
 			continue
 		}
-		for _, duplicate := range duplicates {
-			fmt.Fprintf(out, "finding runtime=%s code=duplicate-capability severity=warning confidence=observed capability=%s/%s evidence=definitions=%d", duplicate.Runtime, duplicate.CapabilityType, cleanText(duplicate.Name), len(duplicate.Definitions))
-			for _, definition := range duplicate.Definitions {
-				fmt.Fprintf(out, " source=%s scope=%s", cleanText(definition.Source), definition.Scope)
-			}
-			fmt.Fprintln(out)
-		}
+		view.duplicates = duplicates
+		runtimes = append(runtimes, view)
 	}
+	renderDoctorView(out, config.renderer, config.verbose, runtimes)
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))
 	}

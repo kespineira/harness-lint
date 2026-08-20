@@ -1,0 +1,13 @@
+Doctor
+
+Runtime overview
+  Runtime      Status             Capabilities  Findings
+  Claude Code  ✓ Healthy          0             0
+  Codex        ! Needs attention  1             1
+
+Findings
+  ! Malformed agent TOML
+    Codex · Agent · broken
+    agent TOML configuration could not be parsed
+
+1 finding requires attention.

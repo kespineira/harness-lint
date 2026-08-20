@@ -1,0 +1,26 @@
+review-never
+Codex · Skill · project · ! Review
+
+Usage
+  Invocations:    0
+  Sessions:       0
+  First observed: Never
+  Last observed:  Never
+
+Exposure
+  Metadata:      Unknown
+  Body:          Unknown
+  Advertisement: unknown (no exposure inferred)
+
+Coverage
+  Direct coverage: Unknown
+  Status:          Unknown
+  Confidence:      Unknown
+
+Why REVIEW?
+  No loaded or invoked activity was observed; missing observations do not prove
+  non-use.
+
+Interpretation
+  No activity was observed; this is not evidence that the capability was never
+  used.

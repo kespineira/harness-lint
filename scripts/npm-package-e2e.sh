@@ -101,11 +101,12 @@ cache=$work_dir/cache
 user_config=$work_dir/npmrc
 global_config=$work_dir/global-npmrc
 consumer_home=$work_dir/home
+consumer_project=$work_dir/project
 xdg_config=$work_dir/xdg-config
 xdg_data=$work_dir/xdg-data
 sqlite_path=$work_dir/state/harness-lint.db
 global_sentinel=$work_dir/global-prefix
-mkdir -p "$prefix" "$cache" "$consumer_home" "$xdg_config" "$xdg_data" "$(dirname "$sqlite_path")" "$global_sentinel"
+mkdir -p "$prefix" "$cache" "$consumer_home" "$consumer_project" "$xdg_config" "$xdg_data" "$(dirname "$sqlite_path")" "$global_sentinel"
 printf '' > "$user_config"
 printf '' > "$global_config"
 printf 'sentinel\n' > "$global_sentinel/DO_NOT_TOUCH"
@@ -170,6 +171,7 @@ case "$launcher_version" in
 esac
 "$launcher" --help | grep -Fi 'usage:' >/dev/null || fail "installed harness-lint --help output is incomplete"
 "$launcher" hooks status >/dev/null || fail "installed harness-lint hooks status command failed"
+"$launcher" scan --db "$sqlite_path" --home "$consumer_home" --project "$consumer_project" --now 2026-08-20T12:00:00Z --color never >/dev/null || fail "installed harness-lint scan command failed"
 "$launcher" usage --db "$sqlite_path" >/dev/null || fail "installed harness-lint usage command failed"
 npm_exec_version=$(npm exec --prefix "$prefix" --cache "$cache" --userconfig "$user_config" --globalconfig "$global_config" --offline --ignore-scripts --no-audit --no-fund --no-update-notifier -- harness-lint version) || fail "npm exec could not run the local harness-lint command"
 [ "$npm_exec_version" = "$launcher_version" ] || fail "npm exec version output differs from launcher version output"

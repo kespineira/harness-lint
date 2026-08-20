@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +44,11 @@ type SchemaStatus struct {
 // the actionable parse detail carried by the wrapped error.
 var ErrMalformedSchemaVersion = errors.New("malformed schema version")
 
+// ErrStoreNotFound identifies an existing-only open whose filesystem-backed
+// database does not exist. Read-only CLI commands use this path so inspecting
+// status or health cannot initialize or migrate local state as a side effect.
+var ErrStoreNotFound = errors.New("store does not exist")
+
 const sqliteBusyTimeoutMilliseconds = 5000
 
 // Store is a concurrency-safe database handle. SQLite serializes writes and
@@ -58,6 +64,41 @@ type Store struct {
 // to this package.
 func Open(path string) (*Store, error) {
 	return openWithMigrationFS(path, migrations)
+}
+
+// OpenExisting opens an initialized store without creating its file or
+// applying migrations. It is intended for diagnostics and other read-only CLI
+// operations. The returned handle can still run the health self-test, whose
+// writes occur only inside a transaction that is always rolled back.
+//
+// In-memory databases remain useful deterministic test fixtures, so they are
+// initialized normally and cannot mutate filesystem state.
+func OpenExisting(path string) (*Store, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("store path is required")
+	}
+	if isInMemoryPath(path) {
+		return Open(path)
+	}
+	if filesystemPath, ok := sqliteFilesystemPath(path); ok {
+		if _, err := os.Stat(filesystemPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, ErrStoreNotFound
+			}
+			return nil, fmt.Errorf("stat sqlite: %w", err)
+		}
+	}
+	db, err := sql.Open("sqlite", sqliteExistingDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("open existing sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open existing sqlite: %w", err)
+	}
+	return &Store{db: db, path: path}, nil
 }
 
 func openWithMigrationFS(path string, migrationFS fs.FS) (*Store, error) {
@@ -84,6 +125,68 @@ func sqliteDSN(path string) string {
 		separator = "&"
 	}
 	return path + separator + "_pragma=busy_timeout%28" + strconv.Itoa(sqliteBusyTimeoutMilliseconds) + "%29"
+}
+
+func sqliteExistingDSN(path string) string {
+	separator := "?"
+	if strings.ContainsRune(path, '?') {
+		separator = "&"
+	}
+	mode := "mode=rw&"
+	if sqliteQueryHasKey(path, "mode") {
+		mode = ""
+	}
+	return path + separator + mode + "_pragma=busy_timeout%28" + strconv.Itoa(sqliteBusyTimeoutMilliseconds) + "%29"
+}
+
+func sqliteQueryHasKey(path, key string) bool {
+	index := strings.IndexByte(path, '?')
+	if index < 0 || index == len(path)-1 {
+		return false
+	}
+	for _, field := range strings.Split(path[index+1:], "&") {
+		name, _, _ := strings.Cut(field, "=")
+		if strings.EqualFold(name, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func isInMemoryPath(path string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(path))
+	return normalized == ":memory:" || strings.HasPrefix(normalized, "file::memory:") || sqliteQueryHasValue(normalized, "mode", "memory")
+}
+
+func sqliteQueryHasValue(path, key, value string) bool {
+	index := strings.IndexByte(path, '?')
+	if index < 0 || index == len(path)-1 {
+		return false
+	}
+	for _, field := range strings.Split(path[index+1:], "&") {
+		name, candidate, found := strings.Cut(field, "=")
+		if found && strings.EqualFold(name, key) && strings.EqualFold(candidate, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func sqliteFilesystemPath(path string) (string, bool) {
+	if isInMemoryPath(path) {
+		return "", false
+	}
+	value := strings.TrimSpace(path)
+	if strings.HasPrefix(strings.ToLower(value), "file:") {
+		value = value[len("file:"):]
+	}
+	if index := strings.IndexByte(value, '?'); index >= 0 {
+		value = value[:index]
+	}
+	if value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 // Close releases the underlying SQLite handle.

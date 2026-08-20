@@ -118,16 +118,15 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 			t.Fatalf("human report contains private or misleading text %q: %s", forbidden, human.String())
 		}
 	}
-	if strings.Contains(human.String(), "never-observed=") || strings.Contains(human.String(), "first-effective-activity=") {
-		t.Fatalf("human report uses imprecise activity labels: %s", human.String())
-	}
-	for _, want := range []string{"invocation-uses=2", "distinct-sessions=2", "first-observed=", "last-observed=", "first-invocation-effective=", "evidence-sources=hook,transcript", "definitions=2"} {
+	for _, want := range []string{"Harness report", "Overview", "Observation", "Totals", "Explore", "2 invoked"} {
 		if !strings.Contains(human.String(), want) {
 			t.Fatalf("human report = %q, missing %q", human.String(), want)
 		}
 	}
-	if !strings.Contains(human.String(), "invoked in 0 / 1 advertised sessions") {
-		t.Fatalf("human report omitted exact advertised-session relation: %s", human.String())
+	for _, line := range strings.Split(human.String(), "\n") {
+		if strings.Contains(line, "=") {
+			t.Fatalf("human report contains legacy key=value line %q: %s", line, human.String())
+		}
 	}
 	if strings.Contains(human.String(), "context-footprint-confidence") || strings.Contains(first, "context_footprint_confidence") {
 		t.Fatalf("human/JSON output collapsed independent footprint confidences: human=%s json=%s", human.String(), first)
@@ -137,6 +136,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 func TestReportAndStaleJSONEmptyDatasetsAreValid(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "empty.db")
+	initializeTestStore(t, dbPath)
 	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	options := Options{Home: filepath.Join(root, "home"), CWD: root, ProjectRoot: root, Now: func() time.Time { return now }}
 	for _, command := range []string{"report", "stale"} {

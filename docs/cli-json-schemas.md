@@ -7,6 +7,12 @@ commands; the Go structs behind them are implementation details and are not
 the public contract. `db backup` intentionally has no JSON mode because its
 output is a bounded destination/size confirmation.
 
+Human output is a separate presentation layer. Headings, prose, symbols,
+tables, wrapping, and status styling are intentionally optimized for people
+and are not a stable API; scripts should select `--json` and consume the
+versioned contract where a JSON mode is available. JSON output never includes
+terminal color sequences.
+
 All timestamps in these documents are UTC strings formatted with
 `time.RFC3339Nano`. A timestamp is `null` when the corresponding observation
 does not exist. Counts are evidence counts, not runtime billing or exact
@@ -140,11 +146,11 @@ JSON contract never embeds source-bearing definitions, paths, or hashes.
 `stale --json` uses the same `schema_version`, `generated_at`,
 `stale_after_days`, `runtimes`, `capabilities`, and `findings` shapes as
 `report --json`. It intentionally omits `usage_only` because stale policy
-evaluates current installed definitions only. It emits JSON only: terminal
-headings such as `as-of=` and `capabilities:` are not mixed into the JSON
-stream. Its capability rows therefore include the report fields `first_seen`,
-`last_seen`, and `effective_coverage` (as well as the always emitted nullable
-`observed_advertised_sessions`).
+evaluates current installed definitions only. It emits JSON only: human
+headings such as `Stale capabilities` and `Threshold: N days` are not mixed
+into the JSON stream. Its capability rows therefore include report fields such
+as `first_seen`, `last_seen`, and `effective_coverage` (as well as the always
+emitted nullable `observed_advertised_sessions`).
 
 The stale boundary is strict: an invocation exactly `N` days old is still
 within the threshold; only an older invocation is `STALE`. A definition with

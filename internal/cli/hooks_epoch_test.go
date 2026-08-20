@@ -129,7 +129,7 @@ func TestHooksUninstallLifecycleFailureDoesNotUndoConfigMutation(t *testing.T) {
 	options := Options{CWD: root, ConfigDir: configDir, LookPath: lookPath, Now: func() time.Time { return time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC) }}
 	var stdout, stderr bytes.Buffer
 	err := ExecuteWithOptions(options, []string{"hooks", "uninstall", "claude", "--claude-config", claudeRoot}, nil, &stdout, &stderr)
-	if err == nil || !strings.Contains(err.Error(), "capture lifecycle") || !strings.Contains(stdout.String(), "warning=capture lifecycle close failed") {
+	if err == nil || !strings.Contains(err.Error(), "capture lifecycle") || !strings.Contains(stdout.String(), "Capture lifecycle close failed") {
 		t.Fatalf("uninstall lifecycle failure err=%v stdout=%q", err, stdout.String())
 	}
 	status, statusErr := hooks.NewClaude(hooks.Options{ConfigRoot: claudeRoot, LookPath: lookPath}).Status(context.Background())

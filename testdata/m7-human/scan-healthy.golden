@@ -1,0 +1,9 @@
+Scan complete
+
+  Runtime      Capabilities  Events  Findings
+  Claude Code  0             1       0
+  Codex        1             1       0
+
+1 capability discovered · 2 observations imported
+
+Run `harness-lint report` to review usage and attention items.

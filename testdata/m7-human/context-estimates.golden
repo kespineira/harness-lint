@@ -1,0 +1,13 @@
+Context footprint
+
+Codex
+  MCP server (1)
+  Skill (1)
+    Configured baseline metadata ~12 tokens (Exact)
+    On-load body estimate ~34 tokens (Estimated)
+
+Caveats
+  Token values are estimates of context exposure, not a measurement of model
+  billing or runtime behavior.
+  2 token measurements are unknown and omitted from the subtotals.
+  MCP schema cost is unknown and is not included in these estimates.

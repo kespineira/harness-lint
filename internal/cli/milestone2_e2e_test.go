@@ -114,8 +114,8 @@ func TestExecuteMilestone2IsolatedHooksAndIngestE2E(t *testing.T) {
 	}
 
 	dryRun := execute([]string{"hooks", "uninstall", "--dry-run"}, nil)
-	if !strings.Contains(dryRun, "would-change=true") {
-		t.Fatalf("uninstall dry-run = %q, want would-change=true", dryRun)
+	if !strings.Contains(dryRun, "Changes would be made") {
+		t.Fatalf("uninstall dry-run = %q, want a human preview", dryRun)
 	}
 	if !strings.Contains(readMilestone2File(t, claudeConfig), "harness-lint") || !strings.Contains(readMilestone2File(t, codexConfig), "harness-lint") {
 		t.Fatal("uninstall dry-run changed or removed a managed configuration")

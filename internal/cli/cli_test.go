@@ -15,6 +15,20 @@ import (
 	"github.com/kespineira/harness-lint/internal/store"
 )
 
+func initializeTestStore(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create test database parent: %v", err)
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+}
+
 func TestExecuteScanAndReportTracer(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -40,7 +54,7 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"scan", "--db", db, "--home", home, "--project", project, "--hook-capture", hook, "--since", "2026-08-13T14:30:00Z"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("scan error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "runtime=codex") || !strings.Contains(stdout.String(), "capabilities=1") {
+	if !strings.Contains(stdout.String(), "Scan complete") || !strings.Contains(stdout.String(), "Codex") || !strings.Contains(stdout.String(), "1 capability discovered") {
 		t.Fatalf("scan output = %q, want codex capability total", stdout.String())
 	}
 
@@ -50,8 +64,8 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 		t.Fatalf("report error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "advertised=") || !strings.Contains(report, "loaded=") || !strings.Contains(report, "invoked=") {
-		t.Fatalf("report output = %q, want separate evidence counts", report)
+	if !strings.Contains(report, "Overview") || !strings.Contains(report, "advertised ·") || !strings.Contains(report, "loaded ·") || !strings.Contains(report, "invoked") {
+		t.Fatalf("report output = %q, want structured runtime and totals sections", report)
 	}
 	if !strings.Contains(report, "usage-only") {
 		t.Fatalf("report output = %q, want usage-only summary", report)
@@ -128,10 +142,10 @@ func TestExecuteScanIsIdempotentAndEmptySnapshotPreservesHistory(t *testing.T) {
 		t.Fatalf("report after empty scan error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "runtime=codex installed=0") || !strings.Contains(report, "runtime=claude-code installed=0") {
+	if !strings.Contains(report, "Codex") || !strings.Contains(report, "Claude Code") || !strings.Contains(report, "Overview") {
 		t.Fatalf("report after empty scan = %q, want empty current inventories", report)
 	}
-	if !strings.Contains(report, "usage-events=1") || !strings.Contains(report, "usage-only") {
+	if !strings.Contains(report, "usage-only") {
 		t.Fatalf("report after empty scan = %q, want preserved usage history", report)
 	}
 }
@@ -206,13 +220,15 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 		t.Fatalf("stale error = %v\nstderr=%s", err, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"name=dead status=REVIEW", "evidence=never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient", "name=stale status=STALE", "name=boundary status=KEEP", "name=review status=REVIEW", "name=keep status=REVIEW", "evidence="} {
+	for _, want := range []string{"Stale capabilities", "Threshold: 60 days", "Stale", "stale"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stale output = %q, missing %q", output, want)
 		}
 	}
-	if !strings.Contains(output, "name=future status=KEEP") || !strings.Contains(output, "first-invocation-effective=2026-08-13T16:00:00Z") {
-		t.Fatalf("stale output omitted future event evidence/diagnostics: %q", output)
+	for _, forbidden := range []string{"dead", "boundary", "future", "review", "keep", "="} {
+		if strings.Contains(strings.ToLower(output), forbidden) {
+			t.Fatalf("stale output includes non-stale or legacy detail %q: %q", forbidden, output)
+		}
 	}
 	if strings.Contains(strings.ToLower(output), "score") {
 		t.Fatalf("stale output = %q, must not contain numeric scores", output)
@@ -290,21 +306,26 @@ func TestExecuteContextLabelsBaselineOnLoadConfidenceAndPartialTotals(t *testing
 	}
 	output := stdout.String()
 	for _, want := range []string{
-		"configured baseline exposure",
-		"on-load footprint",
-		"exact",
-		"estimated",
-		"observed",
+		"Context footprint",
+		"Configured baseline metadata",
+		"On-load body estimate",
+		"Configured baseline body",
+		"Exact",
+		"Estimated",
+		"Observed",
 		"unknown",
 		"partial",
-		"Skill body is on-load only",
+		"MCP schema cost is unknown",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("context output = %q, missing %q", output, want)
 		}
 	}
-	if strings.Contains(output, "remote") && !strings.Contains(output, "type=mcp_server") {
+	if strings.Contains(output, "remote") && !strings.Contains(output, "MCP server") {
 		t.Fatalf("context output = %q, MCP semantics not explicit", output)
+	}
+	if strings.Contains(output, "runtime=") || strings.Contains(output, "type=") {
+		t.Fatalf("context output retained legacy key-value serialization: %q", output)
 	}
 }
 
@@ -351,9 +372,14 @@ func TestExecuteDoctorShowsDuplicateMalformedAndUnresolvedFindingsWithoutDatabas
 		t.Fatalf("doctor error = %v\nstderr=%s", err, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"duplicate-capability", "unresolved-mcp-command", "malformed-agent-toml"} {
+	for _, want := range []string{"Duplicate capability", "Unresolved MCP command", "Malformed agent TOML"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("doctor output = %q, missing %q", output, want)
+		}
+	}
+	for _, legacy := range []string{"duplicate-capability", "unresolved-mcp-command", "malformed-agent-toml"} {
+		if strings.Contains(output, legacy) {
+			t.Fatalf("doctor output = %q, contains internal finding code %q", output, legacy)
 		}
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
@@ -398,7 +424,7 @@ func TestScanDiscoveryFailureDoesNotReplaceCurrentInventoryWithEmpty(t *testing.
 		t.Fatalf("seed inventory: %v", err)
 	}
 	var stdout bytes.Buffer
-	err = runScanWithAdapters(context.Background(), commandConfig{now: now}, db, &stdout, []runtimepkg.Adapter{failingDiscoveryAdapter{}})
+	err = runScanWithAdapters(context.Background(), commandConfig{now: now, verbose: true}, db, &stdout, []runtimepkg.Adapter{failingDiscoveryAdapter{}})
 	if err == nil || !strings.Contains(err.Error(), "runtime codex discovery") {
 		t.Fatalf("scan failure = %v, want runtime-qualified error", err)
 	}
@@ -409,7 +435,7 @@ func TestScanDiscoveryFailureDoesNotReplaceCurrentInventoryWithEmpty(t *testing.
 	if len(current) != 1 || current[0].Name != capability.Name {
 		t.Fatalf("current inventory after failed discovery = %#v, want previous capability preserved", current)
 	}
-	if !strings.Contains(stdout.String(), "inventory=not-recorded") {
+	if !strings.Contains(stdout.String(), "Inventory") || !strings.Contains(stdout.String(), "not recorded") {
 		t.Fatalf("scan output = %q, want not-recorded status", stdout.String())
 	}
 	if err := db.Close(); err != nil {
@@ -456,7 +482,7 @@ func TestExecuteHelpFlagsSucceedForGlobalAndEveryCommand(t *testing.T) {
 			if err := ExecuteWithOptions(Options{}, testArgs, nil, &stdout, &stderr); err != nil {
 				t.Fatalf("help error = %v\nstderr=%s", err, stderr.String())
 			}
-			if !strings.Contains(stdout.String(), "usage: harness-lint") {
+			if !strings.Contains(strings.ToLower(stdout.String()), "usage:") || !strings.Contains(stdout.String(), "harness-lint") {
 				t.Fatalf("help output = %q, want usage", stdout.String())
 			}
 		})

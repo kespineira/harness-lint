@@ -1,0 +1,25 @@
+Hook health
+
+  Claude Code  - Idle  no direct activity yet
+
+0/1 runtime healthy · 1 idle
+
+Claude Code
+  State          - Idle
+  Configuration  ✓ Healthy
+  Managed hooks  ✓ Healthy
+  Executable     ✓ Healthy
+  Database       ✓ Healthy
+  Schema         ✓ Healthy
+  Self-test      ✓ Healthy
+  Live delivery  - Idle
+
+  Last delivery      Never
+  Failed deliveries  0
+  Runtime version    Unknown (version command failed)
+  Validation         Synthetic fixtures
+
+Limitations
+  Synthetic self-test verifies local ingest and SQLite; live delivery
+  requires observed runtime activity.
+  Runtime-version compatibility ranges are not yet encoded.

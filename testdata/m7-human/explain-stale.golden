@@ -1,0 +1,25 @@
+stale
+Codex · Skill · project · ! Stale
+
+Usage
+  Invocations:    1
+  Sessions:       1
+  First observed: Jun 20, 12:00
+  Last observed:  Jun 20, 12:00
+
+Exposure
+  Metadata:      Unknown
+  Body:          Unknown
+  Advertisement: not advertised
+
+Coverage
+  Direct coverage: Unknown
+  Status:          Unknown
+  Confidence:      Unknown
+
+Why STALE?
+  Last observed invocation is older than the 60-day stale threshold.
+
+Interpretation
+  STALE describes recency in this store only; it does not prove lifetime
+  non-use.

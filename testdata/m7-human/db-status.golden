@@ -1,0 +1,10 @@
+Database
+
+  Path       ~/state/database.db
+  Size       <SIZE>
+  Schema     7 (current)
+  Events     0
+  History    No observations
+  Integrity  Not checked
+
+Run `harness-lint db check` to verify integrity.
