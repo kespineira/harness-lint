@@ -193,7 +193,7 @@ func TestExecuteUsageNoHistoryCurrentCapabilityUsesObservationWording(t *testing
 	if err := ExecuteWithOptions(Options{Home: filepath.Join(root, "home"), CWD: root, ProjectRoot: root, Now: func() time.Time { return now }}, []string{"usage", "--db", dbPath, "--runtime", "claude-code"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("usage no-history error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "never observed") || strings.Contains(stdout.String(), "lifetime non-use") || strings.Contains(stdout.String(), "complete coverage") {
+	if !strings.Contains(stdout.String(), "No capability invocations were observed in this period.") || strings.Contains(stdout.String(), "lifetime non-use") || strings.Contains(stdout.String(), "complete coverage") {
 		t.Fatalf("usage no-history wording = %q", stdout.String())
 	}
 }

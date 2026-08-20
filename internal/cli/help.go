@@ -218,6 +218,12 @@ func writeCommandHelp(w io.Writer, command string) {
 		if command == "scan" {
 			fmt.Fprintln(w, "  --verbose                  include inventory recording details")
 		}
+		if command == "stale" {
+			fmt.Fprintln(w, "  --verbose                  include exact stale evidence")
+		}
+		if command == "doctor" {
+			fmt.Fprintln(w, "  --verbose                  include compatibility details")
+		}
 		if command == "report" || command == "stale" {
 			fmt.Fprintln(w, "  --json                     stable JSON output")
 		}

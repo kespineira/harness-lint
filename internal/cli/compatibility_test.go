@@ -12,6 +12,7 @@ import (
 	"github.com/kespineira/harness-lint/internal/compatibility"
 	"github.com/kespineira/harness-lint/internal/domain"
 	"github.com/kespineira/harness-lint/internal/hooks"
+	"github.com/kespineira/harness-lint/internal/presentation"
 )
 
 func TestDoctorCompatibilityDiagnosticsAreConservativeAndBounded(t *testing.T) {
@@ -64,23 +65,22 @@ func TestDoctorCompatibilityDiagnosticsAreConservativeAndBounded(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			if err := ExecuteWithOptions(options, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+			if err := ExecuteWithOptions(options, []string{"doctor", "--verbose"}, nil, &stdout, &stderr); err != nil {
 				t.Fatalf("doctor error = %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 			}
 			output := stdout.String()
-			want := "compatibility runtime=claude-code detected-version="
-			if !strings.Contains(output, want) || !strings.Contains(output, "latest-validated=unknown") || !strings.Contains(output, "validation-basis=synthetic runtime-conformance fixtures; no live runtime version validated") {
+			if !strings.Contains(output, "Compatibility") || !strings.Contains(output, "Runtime version") || !strings.Contains(output, "Validation basis") {
 				t.Fatalf("doctor output = %q, missing bounded compatibility fields", output)
 			}
-			line := compatibilityLine(output, "claude-code")
-			if !strings.Contains(line, "status="+test.wantStatus) || !strings.Contains(line, "detection="+test.wantDetect) {
-				t.Fatalf("Claude compatibility line = %q, want status=%s detection=%s", line, test.wantStatus, test.wantDetect)
+			claudeDetails := doctorCompatibilityBlock(output, "Claude Code", "Codex")
+			if !strings.Contains(claudeDetails, presentation.RenderStatus(test.wantStatus, false)) || !strings.Contains(claudeDetails, test.wantDetect) {
+				t.Fatalf("Claude compatibility details = %q, want status=%s detection=%s", claudeDetails, test.wantStatus, test.wantDetect)
 			}
-			if test.wantVersion != "" && !strings.Contains(line, "detected-version="+test.wantVersion) {
-				t.Fatalf("Claude compatibility line = %q, want detected version=%s", line, test.wantVersion)
+			if test.wantVersion != "" && !strings.Contains(claudeDetails, test.wantVersion) {
+				t.Fatalf("Claude compatibility details = %q, want detected version=%s", claudeDetails, test.wantVersion)
 			}
-			if test.name == "newer is not parser failure" && strings.Contains(line, "unparsable-output") {
-				t.Fatalf("newer version was reported as parser failure: %q", line)
+			if test.name == "newer is not parser failure" && strings.Contains(output, "unparsable-output") {
+				t.Fatalf("newer version was reported as parser failure: %q", output)
 			}
 			for _, sentinel := range []string{"COMMAND_SENTINEL", "COMMAND_OUTPUT_SENTINEL"} {
 				if strings.Contains(output, sentinel) || strings.Contains(stderr.String(), sentinel) {
@@ -89,6 +89,26 @@ func TestDoctorCompatibilityDiagnosticsAreConservativeAndBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+func doctorCompatibilityBlock(output, runtime, nextRuntime string) string {
+	sectionIndex := strings.Index(output, "\nCompatibility\n")
+	if sectionIndex < 0 {
+		return ""
+	}
+	section := output[sectionIndex:]
+	startMarker := "\n  " + runtime + "\n"
+	start := strings.Index(section, startMarker)
+	if start < 0 {
+		return ""
+	}
+	block := section[start+1:]
+	if nextRuntime != "" {
+		if end := strings.Index(block, "\n  "+nextRuntime+"\n"); end >= 0 {
+			block = block[:end]
+		}
+	}
+	return block
 }
 
 func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t *testing.T) {
@@ -158,15 +178,6 @@ func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t 
 			}
 		})
 	}
-}
-
-func compatibilityLine(output, runtime string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "compatibility runtime="+runtime+" ") {
-			return line
-		}
-	}
-	return ""
 }
 
 func TestIngestConfigDoesNotCarryCompatibilityDependencies(t *testing.T) {

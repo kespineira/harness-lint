@@ -276,7 +276,7 @@ func validateCommandFlags(command string, flags parsedFlags) error {
 	}
 	if flags.verboseSet {
 		switch command {
-		case "scan", "hooks", "db", "report", "explain":
+		case "scan", "hooks", "db", "report", "explain", "stale", "doctor":
 		default:
 			return fmt.Errorf("--verbose is not supported for %s", command)
 		}

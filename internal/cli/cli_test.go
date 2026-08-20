@@ -206,13 +206,15 @@ func TestExecuteStaleUsesStrictDaysBoundaryAndEvidenceStatuses(t *testing.T) {
 		t.Fatalf("stale error = %v\nstderr=%s", err, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"name=dead status=REVIEW", "evidence=never observed; no loaded or invoked activity evidence; lifetime activity coverage is insufficient", "name=stale status=STALE", "name=boundary status=KEEP", "name=review status=REVIEW", "name=keep status=REVIEW", "evidence="} {
+	for _, want := range []string{"Stale capabilities", "Threshold: 60 days", "Stale", "stale"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stale output = %q, missing %q", output, want)
 		}
 	}
-	if !strings.Contains(output, "name=future status=KEEP") || !strings.Contains(output, "first-invocation-effective=2026-08-13T16:00:00Z") {
-		t.Fatalf("stale output omitted future event evidence/diagnostics: %q", output)
+	for _, forbidden := range []string{"dead", "boundary", "future", "review", "keep", "="} {
+		if strings.Contains(strings.ToLower(output), forbidden) {
+			t.Fatalf("stale output includes non-stale or legacy detail %q: %q", forbidden, output)
+		}
 	}
 	if strings.Contains(strings.ToLower(output), "score") {
 		t.Fatalf("stale output = %q, must not contain numeric scores", output)
@@ -290,21 +292,26 @@ func TestExecuteContextLabelsBaselineOnLoadConfidenceAndPartialTotals(t *testing
 	}
 	output := stdout.String()
 	for _, want := range []string{
-		"configured baseline exposure",
-		"on-load footprint",
-		"exact",
-		"estimated",
-		"observed",
+		"Context footprint",
+		"Configured baseline metadata",
+		"On-load body estimate",
+		"Configured baseline body",
+		"Exact",
+		"Estimated",
+		"Observed",
 		"unknown",
 		"partial",
-		"Skill body is on-load only",
+		"MCP schema cost is unknown",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("context output = %q, missing %q", output, want)
 		}
 	}
-	if strings.Contains(output, "remote") && !strings.Contains(output, "type=mcp_server") {
+	if strings.Contains(output, "remote") && !strings.Contains(output, "MCP server") {
 		t.Fatalf("context output = %q, MCP semantics not explicit", output)
+	}
+	if strings.Contains(output, "runtime=") || strings.Contains(output, "type=") {
+		t.Fatalf("context output retained legacy key-value serialization: %q", output)
 	}
 }
 
@@ -351,9 +358,14 @@ func TestExecuteDoctorShowsDuplicateMalformedAndUnresolvedFindingsWithoutDatabas
 		t.Fatalf("doctor error = %v\nstderr=%s", err, stderr.String())
 	}
 	output := stdout.String()
-	for _, want := range []string{"duplicate-capability", "unresolved-mcp-command", "malformed-agent-toml"} {
+	for _, want := range []string{"Duplicate capability", "Unresolved MCP command", "Malformed agent TOML"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("doctor output = %q, missing %q", output, want)
+		}
+	}
+	for _, legacy := range []string{"duplicate-capability", "unresolved-mcp-command", "malformed-agent-toml"} {
+		if strings.Contains(output, legacy) {
+			t.Fatalf("doctor output = %q, contains internal finding code %q", output, legacy)
 		}
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
