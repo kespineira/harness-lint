@@ -102,6 +102,7 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	parsed.hooksAction = nested.hooksAction
 	parsed.hooksRuntime = nested.hooksRuntime
 	parsed.dbAction = nested.dbAction
+	parsed.explainName = nested.explainName
 	if command == "version" {
 		if err := validateCommandFlags(command, parsed); err != nil {
 			return err
@@ -145,6 +146,7 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 	rendererOptions.Now = config.now
 	config.renderer = presentation.NewHumanRenderer(rendererOptions)
 	config.verbose = parsed.verbose
+	config.all = parsed.all
 
 	switch command {
 	case "hooks":
@@ -155,6 +157,8 @@ func ExecuteWithOptions(options Options, args []string, stdin io.Reader, stdout,
 		return runScan(ctx, config, stdout)
 	case "report":
 		return runReport(ctx, config, stdout)
+	case "explain":
+		return runExplain(ctx, config, parsed, stdout)
 	case "context":
 		return runContext(ctx, config, stdout)
 	case "stale":

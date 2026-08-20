@@ -323,10 +323,15 @@ func wrapParagraph(value string, width int) []string {
 		}
 
 		cut := end
-		for candidate := end - 1; candidate > start; candidate-- {
-			if tokens[candidate].space {
-				cut = candidate
-				break
+		// When the remaining text already fits, keep the complete tail. Looking
+		// backwards for a break in that case strands the final word on a line of
+		// its own even though it fits on the preceding line.
+		if end < len(tokens) {
+			for candidate := end - 1; candidate > start; candidate-- {
+				if tokens[candidate].space {
+					cut = candidate
+					break
+				}
 			}
 		}
 		if cut == start {

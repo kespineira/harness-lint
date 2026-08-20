@@ -168,3 +168,16 @@ func TestTableKeeps80ColumnsAndIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapDoesNotStrandAFittingFinalWord(t *testing.T) {
+	input := "Lifetime coverage remains unknown unless a positive capture/presence intersection is shown."
+	got := Wrap(input, 78)
+	if strings.HasSuffix(got, "intersection is\nshown.") {
+		t.Fatalf("Wrap stranded a fitting final word: %q", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if VisibleWidth(line) > 78 {
+			t.Fatalf("wrapped line exceeds width: %q", line)
+		}
+	}
+}

@@ -50,8 +50,8 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 		t.Fatalf("report error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "advertised=") || !strings.Contains(report, "loaded=") || !strings.Contains(report, "invoked=") {
-		t.Fatalf("report output = %q, want separate evidence counts", report)
+	if !strings.Contains(report, "Runtime overview") || !strings.Contains(report, "advertised ·") || !strings.Contains(report, "loaded ·") || !strings.Contains(report, "invoked") {
+		t.Fatalf("report output = %q, want structured runtime and totals sections", report)
 	}
 	if !strings.Contains(report, "usage-only") {
 		t.Fatalf("report output = %q, want usage-only summary", report)
@@ -128,10 +128,10 @@ func TestExecuteScanIsIdempotentAndEmptySnapshotPreservesHistory(t *testing.T) {
 		t.Fatalf("report after empty scan error = %v\nstderr=%s", err, stderr.String())
 	}
 	report := stdout.String()
-	if !strings.Contains(report, "runtime=codex installed=0") || !strings.Contains(report, "runtime=claude-code installed=0") {
+	if !strings.Contains(report, "Codex") || !strings.Contains(report, "Claude Code") || !strings.Contains(report, "Runtime overview") {
 		t.Fatalf("report after empty scan = %q, want empty current inventories", report)
 	}
-	if !strings.Contains(report, "usage-events=1") || !strings.Contains(report, "usage-only") {
+	if !strings.Contains(report, "usage-only") {
 		t.Fatalf("report after empty scan = %q, want preserved usage history", report)
 	}
 }

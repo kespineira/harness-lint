@@ -328,12 +328,7 @@ func runReport(ctx context.Context, config commandConfig, out io.Writer) error {
 		}
 		return reportdto.WriteJSON(out, document)
 	}
-	fmt.Fprintf(out, "report as-of=%s stale-days=%d\n", config.now.Format(time.RFC3339), config.days)
-	aggregateIndex := buildAggregateIndex(aggregates)
-	printRuntimeCounts(out, result, aggregates, config.now)
-	printCapabilityEvidenceWithHistory(out, result, aggregateIndex, config.now)
-	printDuplicateFindings(out, result)
-	printUsageOnlyWithAnalysis(out, result, aggregateIndex, config.now)
+	renderReportView(out, config.renderer, config.all, config.verbose, result, aggregates, config.now, config.days)
 	return nil
 }
 
