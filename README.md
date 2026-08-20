@@ -201,6 +201,75 @@ The npm audit must show the exact package/version as verified with a SLSA
 provenance attestation. A real published release is required before any
 attestation result or provenance status can be claimed for a version.
 
+## Quick start
+
+From the project you want to inspect, refresh the local inventory and usage
+evidence, then read the report:
+
+```sh
+harness-lint scan --project "$PWD"
+harness-lint report
+```
+
+The scan and report use local metadata only. A representative human report
+is shown below; capability names and counts are synthetic:
+
+```text
+$ harness-lint scan --project "$PWD"
+Scan complete
+
+  Runtime      Capabilities  Events  Findings
+  Claude Code  1             0       0
+  Codex        5             4       0
+
+6 capabilities discovered · 4 observations imported
+
+$ harness-lint report
+Harness report
+
+Last 60 days
+
+Overview
+  Runtime      Installed  Used  Review  Stale
+  Claude Code  1          0     1       0
+  Codex        5          3     2       1
+
+Observation
+  Only local observations are shown. Missing observations do not prove non-use.
+  Lifetime coverage remains unknown unless a positive capture/presence
+  intersection is shown.
+  Advertisement is unknown for 2 capabilities; no exposure is inferred.
+  Per-session advertisement evidence is not available for every capability.
+
+Needs attention
+  Status    Runtime      Type   Name              Scope    Last used
+  ! Stale   Codex        Skill  stale             project  Jun 20, 12:00
+  ! Review  Claude Code  Skill  unknown-coverage  user     not observed
+  ! Review  Codex        Skill  high-coverage     user     not observed
+  ! Review  Codex        Skill  review-never      project  not observed
+
+Most used
+  Runtime  Type   Name          Scope    Uses  Last used
+  Codex    Skill  keep          user     2     1h ago
+  Codex    Skill  low-coverage  user     1     30m ago
+  Codex    Skill  stale         project  1     Jun 20, 12:00
+
+Totals
+  6 installed · 3 used · 4 total observations
+  0 advertised · 0 loaded · 4 invoked
+  1 stale · 3 review · 2 keep
+
+Explore
+  Use `harness-lint report --all` to inspect every current capability.
+  Use `harness-lint explain <name>` for evidence and rationale for one
+  capability.
+```
+
+The default report surfaces attention items and the most-used capabilities.
+Use the navigation under [Progressive reports](#progressive-reports) to open
+the full inventory, inspect one capability, or switch to the machine-facing
+JSON contract.
+
 ## First run
 
 Hook management is opt-in. Install and test hooks only for the runtime you
@@ -251,25 +320,36 @@ database.
 
 ## Commands and flags
 
-The implemented commands are `scan`, `usage`, `report`, `context`, `stale`,
-`doctor`, `hooks`, `db`, and `ingest`. Run `harness-lint <command> --help` for
-the same options shown by the binary. The relevant command forms are:
+The implemented commands are `scan`, `usage`, `report`, `explain`, `context`,
+`stale`, `doctor`, `hooks`, `db`, and `ingest`. Run
+`harness-lint <command> --help` for the same options shown by the binary. The
+primary command forms are:
 
 ```text
-harness-lint scan    [--db PATH] [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--hook-capture PATH]... [--since RFC3339] [--now RFC3339]
-harness-lint usage   [--json] [--db PATH] [--days N] [--runtime claude|claude-code|codex] [--type skill|mcp|tool|agent] [--monthly] [--now RFC3339]
-harness-lint report  [--json] [--db PATH] [--days N] [--now RFC3339]
-harness-lint context [--db PATH] [--days N] [--now RFC3339]
-harness-lint stale   [--json] [--db PATH] [--days N] [--now RFC3339]
-harness-lint doctor  [--home PATH] [--project PATH] [--config-dir PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint db      <status|check> [--json] [--db PATH] [--config-dir PATH] [--now RFC3339]
-harness-lint db      backup [--db PATH] [--config-dir PATH] [--output PATH] [--now RFC3339]
-harness-lint hooks status    [claude|codex] [--json] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint hooks test      [claude|codex] [--db PATH] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint hooks install   [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint hooks uninstall [claude|codex] [--dry-run] [--home PATH] [--codex-home PATH] [--claude-config PATH] [--now RFC3339]
-harness-lint ingest  --runtime <claude|codex> [--event EVENT] [--managed-by harness-lint-hooks/v1] [--db PATH] < one JSON document on stdin
+harness-lint scan [options]
+harness-lint usage [--json] [options]
+harness-lint report [--all] [--verbose] [--json] [options]
+harness-lint explain <name> [--runtime RUNTIME] [--type TYPE] [--scope SCOPE] [--verbose] [options]
+harness-lint context [options]
+harness-lint stale [--verbose] [--json] [options]
+harness-lint doctor [--verbose] [options]
+harness-lint hooks <status|test|install|uninstall> [claude|codex] [options]
+harness-lint db <status|check|backup> [options]
+harness-lint ingest --runtime <claude|codex> [options] < one JSON document on stdin
 ```
+
+| Command | Human-facing purpose |
+| --- | --- |
+| `scan` | Discover capabilities and import local usage evidence. |
+| `report` | Summarize usage and cleanup candidates; use `--all` to expand the inventory. |
+| `explain <name>` | Explain one current capability's evidence and classification. |
+| `context` | Estimate configured and on-load context footprint. |
+| `usage` | Rank observed usage over a closed UTC period; `--monthly` switches to compact month totals. |
+| `stale` | Show capabilities classified `STALE` by observed recency. |
+| `doctor` | Find runtime configuration and discovery problems. |
+| `hooks ...` | Inspect or manage runtime hook configuration. |
+| `db ...` | Inspect, check, or back up the local database. |
+| `ingest` | Receive one bounded metadata-only hook document on stdin. |
 
 Flag meanings:
 
@@ -288,15 +368,75 @@ Flag meanings:
 - `--days N` sets the stale threshold for `report`/`stale` (default `60`) or
   the closed UTC history period for `usage` (default `90`); it must be
   positive.
-- `--runtime`, `--type`, and `--monthly` are `usage`-only filters/output
-  controls. `--type mcp` includes both MCP servers and MCP tools while the
-  emitted filter remains `mcp`.
+- `--runtime` and `--type` filter `usage` and disambiguate `explain` names;
+  `--monthly` switches the human usage view to compact UTC month totals and
+  adds monthly evidence to usage JSON. `--type mcp` includes both MCP servers
+  and MCP tools while the emitted filter remains `mcp`.
+- `--all` is `report`-only and includes every current capability instead of
+  the default attention-focused view.
+- `--verbose` is available on `scan`, `report`, `explain`, `stale`, `doctor`,
+  and the `hooks`/`db` diagnostics. It adds detailed evidence or diagnostic
+  sections to human output; it does not change the JSON contracts.
+- `--color auto|always|never` controls ANSI status styling for human output.
+  `auto` styles only a terminal, `always` forces styling, and `never` forces
+  plain text. In `auto` mode, the presence of `NO_COLOR` disables styling.
+  JSON output is never styled.
 - `--now RFC3339` sets the observation/analysis clock, useful for reproducible
   reports and tests.
 
-The hook commands are a small machine-facing API. They are normally invoked
-by an operator during setup or diagnosis, while `ingest` is normally invoked
-by an installed runtime hook and is intentionally quiet on success:
+### Progressive reports
+
+Human report output is intentionally progressive:
+
+```sh
+harness-lint report                 # attention items and most-used evidence
+harness-lint report --all           # every current capability
+harness-lint explain alpha          # evidence and rationale for one name
+harness-lint report --json          # stable machine-readable contract
+```
+
+The default `report` keeps the first screen focused on `REVIEW` and `STALE`
+items, then shows the most-used current capabilities. `report --all` expands
+the capability table. `explain <name>` accepts `--runtime`, `--type`, and
+`--scope` when a name is ambiguous, and `--verbose` adds exact evidence and
+coverage details. The example name above is synthetic.
+
+Human output is a presentation for people, not a stable API: headings,
+wording, table layout, symbols, and wrapping may evolve. Machine users should
+use `--json` where it is supported (`report`, `stale`, `usage`, `hooks status`,
+`db status`, and `db check`) and consume the versioned schema described in
+[Public CLI JSON schemas](docs/cli-json-schemas.md). `ingest` remains silent on
+success, and `db backup` intentionally reports a bounded human destination and
+size confirmation without a JSON mode.
+
+By default `--color auto` emits plain text when stdout is redirected or is not
+a TTY. Set `--color never` for an explicit plain stream, `--color always` for
+ANSI styling even when redirected, or export `NO_COLOR` to disable styling in
+auto mode. These controls apply to human output; JSON is plain JSON regardless
+of terminal or color settings.
+
+The default human `usage` view shows the 20 highest-use capabilities and says
+when more rows exist. Narrow it with `--runtime` or `--type`, use `--monthly`
+for a compact UTC month table, or use `usage --json` for the complete
+machine-readable result.
+
+### Contextual navigation
+
+The human views point to the next bounded diagnostic when one is useful:
+
+- Scan findings point to `harness-lint doctor`.
+- Report output points to `report --all` and `explain <name>`.
+- A stale view with no current inventory points back to `harness-lint scan`.
+- `hooks status` shows managed entries and executable resolution; use
+  `hooks test` for read-only end-to-end local health, or `hooks install` and
+  `hooks uninstall` only when changing hook configuration is intended.
+- `db status` shows path and bounded metadata; its next step is `db check`,
+  while `db backup` creates an exclusive local copy.
+
+The hook commands are normally invoked by an operator during setup or
+diagnosis. For automation, use `hooks status --json`; the other human hook
+views are presentation-only. `ingest` is normally invoked by an installed
+runtime hook and is intentionally quiet on success:
 
 ```sh
 harness-lint hooks status [claude|codex] [--json]
@@ -340,53 +480,30 @@ Command responsibilities:
 - `scan` refreshes each runtime's current inventory and imports usage history.
   A failed discovery does not replace that runtime's previously successful
   current inventory.
-- `report` prints per-runtime counts, per-capability evidence, classifications,
-  and usage-only observations.
-- `usage` queries stored invocation history over a closed UTC interval. It can
-  filter by runtime/type and add UTC monthly evidence without reading live
-  runtime configuration.
+- `report` prints per-runtime counts, attention classifications, most-used
+  evidence, and usage-only observations; `--all` adds every current
+  capability.
+- `explain` expands one current capability's usage, exposure, coverage,
+  classification rationale, and interpretation. It is human-only by design.
+- `usage` queries stored invocation history over a closed UTC interval. Its
+  human view ranks at most 20 capabilities, can filter by runtime/type, and
+  switches to compact UTC month totals with `--monthly`, all without reading
+  live runtime configuration. JSON remains complete.
 - `context` prints configured baseline and on-load/body measurement summaries,
   keeping metadata and body semantics separate.
-- `stale` prints the same capability evidence focused on `KEEP`, `REVIEW`,
-  and `STALE` classifications. A definition is stale only when its last
-  observed invocation is older than the threshold; loaded-only observations
-  do not establish recency, and equality is still `KEEP`. Stale wording is
-  about the last observed invocation in this store only; it never loads a
-  capability or claims lifetime non-use. `DEAD` is reserved for a future
-  completeness signal: an absent event, source, or scan cannot prove terminal
-  non-use.
+- `stale` lists only capabilities classified `STALE`; when none qualify, it
+  distinguishes insufficient-evidence `REVIEW` results from stale results. A
+  definition is stale only when its last observed invocation is older than the
+  threshold; loaded-only observations do not establish recency, and equality
+  is still `KEEP`. Stale wording is about the last observed invocation in this
+  store only; it never loads a capability or claims lifetime non-use. `DEAD`
+  is reserved for a future completeness signal: an absent event, source, or
+  scan cannot prove terminal non-use.
 - `doctor` performs discovery and prints malformed, duplicate, broken-path,
   and unresolved-command findings without opening or creating the SQLite
   database.
 - `db status`, `db check`, and `db backup` operate only on the selected local
   SQLite file; they do not inspect runtime configuration or start commands.
-
-Representative output shape (the zero-inventory form is also a useful smoke
-test):
-
-```text
-$ harness-lint scan --db :memory: --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
-scan runtime=claude-code capabilities=0 events=0 findings=0 inventory=recorded
-scan runtime=codex capabilities=0 events=0 findings=0 inventory=recorded
-
-$ harness-lint report --db :memory: --now 2026-08-13T15:00:00Z
-report as-of=2026-08-13T15:00:00Z stale-days=60
-runtime=claude-code installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 no-activity-observed=0 usage-events=0
-runtime=codex installed=0 advertised=0 loaded=0 invoked=0 configured-advertised=0 used-last-30d=0 no-activity-observed=0 usage-events=0
-no current capabilities
-
-$ harness-lint context --db :memory: --now 2026-08-13T15:00:00Z
-context as-of=2026-08-13T15:00:00Z
-no configured capabilities; configured baseline exposure=unknown; on-load footprint=unknown
-
-$ harness-lint stale --db :memory: --days 60 --now 2026-08-13T15:00:00Z
-stale as-of=2026-08-13T15:00:00Z days=60
-no current capabilities
-
-$ harness-lint doctor --home /tmp/no-home --project /tmp/no-project --now 2026-08-13T15:00:00Z
-runtime=claude-code capabilities=0 findings=0
-runtime=codex capabilities=0 findings=0
-```
 
 An isolated history query against a populated state file is:
 
@@ -490,25 +607,19 @@ limitation: writing `hooks.json` cannot grant the trust/review decision needed
 by the Codex UI. The manager preserves inline configuration and does not try
 to enable or execute it.
 
-With inventory and observations, `report`/`stale` add lines in this form;
-values are evidence, not a runtime billing calculation:
+With inventory and observations, `report`/`stale` use headings and compact
+tables rather than legacy machine-oriented records. `report` keeps the default
+view focused on attention items and most-used evidence; `report --all` adds
+every current definition, and `explain <name>` expands one synthetic
+capability into usage, exposure, coverage, rationale, and interpretation.
+Values remain evidence, not a runtime billing calculation; the
+[Quick start](#quick-start) shows the human shape.
 
-```text
-runtime=codex installed=1 advertised=0 loaded=0 invoked=1 configured-advertised=1 used-last-30d=1 no-activity-observed=0 usage-events=1
-capabilities:
-  runtime=codex type=skill name=lint status=KEEP advertised=0 loaded=0 invocation-uses=1 distinct-sessions=1 exposure=fully_advertised used-last-30d=yes evidence-sources=hook confidence=observed coverage-confidence=unknown
-runtime=codex type=skill capabilities=1
-  configured baseline exposure: metadata=42 tokens (estimated) (according to Advertisement); body=not included (Skill body is on-load only)
-  on-load footprint estimate: body=18 tokens (estimated); metadata=not measured (unknown)
-finding runtime=codex code=unresolved-mcp-command severity=warning confidence=observed capability=mcp_server/example message=configured local MCP command is not resolvable
-```
-
-In `report`, `advertised=N`, `loaded=N`, and `invoked=N` are counts of
-observed usage events. `configured-advertised=N` is the count of current
-installed definitions whose configured `Advertisement` state is advertised;
-it is not an observed-event count. The per-capability `exposure=...` field is
-the configured exposure state, so these values must not be collapsed into a
-single notion of “used”.
+In `report`, the `advertised`, `loaded`, and `invoked` totals are counts of
+observed usage events. The configured-advertised total counts current installed
+definitions whose configured `Advertisement` state is advertised; it is not
+an observed-event count. Per-capability exposure is the configured exposure
+state, so these values must not be collapsed into a single notion of “used”.
 
 The `invoked_in_advertised_sessions` value is an observation-efficiency
 intersection: the number of distinct invocation sessions that also have an
@@ -687,6 +798,11 @@ non-guaranteed measurements for orientation, not performance promises.
 
 ## JSON contracts and examples
 
+These versioned JSON documents are the machine-facing interface. Human report
+headings, tables, wording, symbols, and wrapping are intentionally not a
+stable API; use `report --json`, `stale --json`, `usage --json`, `hooks status
+--json`, `db status --json`, or `db check --json` for automation.
+
 `report --json` and `stale --json` emit versioned schema-v2 objects with
 `schema_version`, `generated_at`, `stale_after_days`, `runtimes`,
 `capabilities`, and (for `report`) `usage_only` and `findings`. Arrays are
@@ -698,7 +814,7 @@ present as `[]` when empty. A privacy-safe abbreviated report looks like:
   "generated_at": "2026-08-14T12:00:00Z",
   "stale_after_days": 60,
   "runtimes": [{"runtime":"codex","installed":1,"advertised":0,"loaded":0,"invoked":1,"configured_advertised":1,"invoked_last_30d":1,"no_activity_observed":0,"usage_events":1}],
-  "capabilities": [{"runtime":"codex","type":"skill","name":"lint","scope":"user","enabled":"enabled","advertisement":"fully_advertised","status":"KEEP","confidence":"observed","coverage_confidence":"unknown","evidence_sources":["hook"],"invocation_count":1,"distinct_sessions":1}],
+  "capabilities": [{"runtime":"codex","type":"skill","name":"alpha","scope":"user","enabled":"enabled","advertisement":"fully_advertised","status":"KEEP","confidence":"observed","coverage_confidence":"unknown","evidence_sources":["hook"],"invocation_count":1,"distinct_sessions":1}],
   "usage_only": [],
   "findings": []
 }
@@ -818,12 +934,13 @@ go build -trimpath -o "$smoke_binary_root/harness-lint" ./cmd/harness-lint
 ./scripts/isolated-smoke.sh "$smoke_binary_root/harness-lint"
 ```
 
-The script runs help, scan, hooks install/status/test, usage (default, 90
-days, runtime/type filters, monthly, and JSON), report/stale (default and
-JSON), context, doctor, and database status/check (default and JSON). It also
-checks both default and explicit database backups are nonempty. It must
-receive the built binary path; it creates and removes its own disposable tree
-and never targets live Claude or Codex configuration.
+The script runs help, scan, hooks install/status/test (including verbose
+diagnostics), usage (default, 90 days, runtime/type filters, monthly, and
+JSON), report/stale (default, `--all`, verbose, and JSON), context, doctor
+(default and verbose), and database status/check (default, verbose, and JSON).
+It also checks both default and explicit database backups are nonempty. It
+must receive the built binary path; it creates and removes its own disposable
+tree and never targets live Claude or Codex configuration.
 
 ## License
 

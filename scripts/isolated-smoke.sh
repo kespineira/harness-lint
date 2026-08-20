@@ -52,7 +52,9 @@ smoke_run scan --db "$smoke_db" --home "$smoke_home" --project "$smoke_project" 
 smoke_run hooks install claude --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude"
 smoke_run hooks install codex --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude"
 smoke_run hooks status --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --now "$smoke_now"
+smoke_run hooks status --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --verbose --now "$smoke_now"
 smoke_run hooks test --db "$smoke_db" --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --now "$smoke_now"
+smoke_run hooks test --db "$smoke_db" --home "$smoke_home" --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --verbose --now "$smoke_now"
 smoke_run usage --db "$smoke_db" --now "$smoke_now"
 smoke_run usage --db "$smoke_db" --days 90 --now "$smoke_now"
 smoke_run usage --db "$smoke_db" --runtime claude --now "$smoke_now"
@@ -60,18 +62,44 @@ smoke_run usage --db "$smoke_db" --type skill --now "$smoke_now"
 smoke_run usage --db "$smoke_db" --monthly --now "$smoke_now"
 smoke_run usage --db "$smoke_db" --json --now "$smoke_now"
 smoke_run report --db "$smoke_db" --now "$smoke_now"
+smoke_run report --db "$smoke_db" --all --now "$smoke_now"
+smoke_run report --db "$smoke_db" --verbose --now "$smoke_now"
 smoke_run report --db "$smoke_db" --json --now "$smoke_now"
 smoke_run stale --db "$smoke_db" --now "$smoke_now"
+smoke_run stale --db "$smoke_db" --verbose --now "$smoke_now"
 smoke_run stale --db "$smoke_db" --json --now "$smoke_now"
 smoke_run context --db "$smoke_db" --now "$smoke_now"
 smoke_run doctor --home "$smoke_home" --project "$smoke_project" --config-dir "$smoke_config" \
   --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --now "$smoke_now"
+smoke_run doctor --home "$smoke_home" --project "$smoke_project" --config-dir "$smoke_config" \
+  --codex-home "$smoke_home/.codex" --claude-config "$smoke_home/.claude" --verbose --now "$smoke_now"
 smoke_run db status --db "$smoke_db" --now "$smoke_now"
+smoke_run db status --db "$smoke_db" --verbose --now "$smoke_now"
 smoke_run db status --db "$smoke_db" --json --now "$smoke_now"
 smoke_run db check --db "$smoke_db" --now "$smoke_now"
+smoke_run db check --db "$smoke_db" --verbose --now "$smoke_now"
 smoke_run db check --db "$smoke_db" --json --now "$smoke_now"
 smoke_default_backup_output=$(smoke_run db backup --db "$smoke_db" --now "$smoke_now")
-smoke_default_backup=$(printf '%s\n' "$smoke_default_backup_output" | sed -n 's/^db backup output=//p' | sed 's/ size-bytes=.*$//')
+# The human backup view is intentionally readable rather than field-style. Its
+# wrapped Destination row may span more than one physical line, so join the
+# indented continuation before checking the generated file.
+smoke_default_backup=$(printf '%s\n' "$smoke_default_backup_output" | awk '
+  /^  Destination[[:space:]]/ {
+    value = $0
+    sub(/^  Destination[[:space:]]+/, "", value)
+    destination = value
+    active = 1
+    next
+  }
+  active && /^               / {
+    value = $0
+    sub(/^[[:space:]]+/, "", value)
+    destination = destination value
+    next
+  }
+  active && /^  [^ ]/ { active = 0 }
+  END { print destination }
+')
 if [ -z "$smoke_default_backup" ] || [ ! -s "$smoke_default_backup" ]; then
   echo "default database backup is empty or missing: $smoke_default_backup" >&2
   exit 1
