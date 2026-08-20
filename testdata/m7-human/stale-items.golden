@@ -1,0 +1,5 @@
+Stale capabilities
+Threshold: 60 days
+
+  Status   Runtime  Type   Name   Scope    Last used
+  ! Stale  Codex    Skill  stale  project  Jun 20, 12:00

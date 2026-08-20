@@ -1,0 +1,31 @@
+Harness report
+
+Last 60 days
+
+Overview
+  Runtime      Installed  Used  Review  Stale
+  Claude Code  0          0     0       0
+  Codex        1          1     0       0
+
+Observation
+  Only local observations are shown. Missing observations do not prove non-use.
+  Lifetime coverage remains unknown unless a positive capture/presence
+  intersection is shown.
+  Per-session advertisement evidence is not available for every capability.
+
+Needs attention
+  No stale or review capabilities need attention.
+
+Most used
+  Runtime  Type   Name    Scope  Uses  Last used
+  Codex    Skill  recent  user   1     1h ago
+
+Totals
+  1 installed · 1 used · 1 total observations
+  0 advertised · 0 loaded · 1 invoked
+  0 stale · 0 review · 1 keep
+
+Explore
+  Use `harness-lint report --all` to inspect every current capability.
+  Use `harness-lint explain <name>` for evidence and rationale for one
+  capability.

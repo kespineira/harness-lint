@@ -1,0 +1,9 @@
+Scan complete
+
+  Runtime      Capabilities  Events  Findings
+  Claude Code  0             0       0
+  Codex        1             0       1
+
+1 capabilities discovered · 0 observations imported
+
+1 finding needs attention. Run `harness-lint doctor`.

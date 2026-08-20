@@ -1,0 +1,10 @@
+Database check
+
+  ✓ SQLite quick check
+  ✗ Foreign keys
+  ✓ Schema
+
+Database needs attention.
+
+Issues
+  ! Foreign key violations were found.

@@ -1,0 +1,65 @@
+Harness report
+
+Last 60 days
+  As of 2026-08-20T12:00:00Z
+
+Overview
+  Runtime      Installed  Used  Review  Stale
+  Claude Code  0          0     0       0
+  Codex        1          0     1       0
+
+Observation
+  Only local observations are shown. Missing observations do not prove non-use.
+  Lifetime coverage remains unknown unless a positive capture/presence
+  intersection is shown.
+  Advertisement is unknown for 1 capability; no exposure is inferred.
+  Per-session advertisement evidence is not available for every capability.
+
+Needs attention
+  Status    Runtime  Type   Name         Scope  Last used
+  ! Review  Codex    Skill  review-only  user   not observed
+
+Most used
+  No invocations were observed for current capabilities.
+
+Totals
+  1 installed · 0 used · 0 total observations
+  0 advertised · 0 loaded · 0 invoked
+  0 stale · 1 review · 0 keep
+
+Explore
+  Use `harness-lint explain <name>` for evidence and rationale for one
+  capability.
+
+Details
+  Codex · Skill · review-only · user
+    Decision       ! Review
+    Basis          no loaded or invoked activity was observed; missing
+    observations do not prove non-use
+    Interpretation  No activity was observed; this is not evidence that the
+    capability was never used.
+    Evidence
+      Advertisement:    unknown (no exposure inferred)
+      Enabled:          enabled
+      Uses:             0
+      Loaded:           0
+      Advertised:       0
+      Sessions:         0
+      Metadata:         Unknown
+      Body when loaded: Unknown
+      Coverage basis:   never observed; no loaded or invoked activity evidence;
+                        lifetime activity coverage is insufficient; no
+                        invocation evidence in the selected interval (not
+                        observed in period); coverage is observation-only
+                        (inventory observations 2026-08-20T12:00:00Z to
+                        2026-08-20T12:00:00Z); lifetime activity coverage is
+                        unknown; modeled coverage status=unknown; no positive
+                        capture/presence intersection; no confirmed
+                        capture/presence intersection
+      Modeled coverage: unknown (no confirmed capture/presence intersection)
+    Exact timestamps
+      First observed:  not observed
+      Last observed:   not observed
+      First effective: not observed
+      Last effective:  not observed
+    Provenance      unknown

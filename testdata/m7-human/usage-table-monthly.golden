@@ -1,0 +1,19 @@
+Usage
+Last 30 days
+
+Capabilities ranked by uses
+  Capability  Runtime  Uses  Sessions  Last used  Type
+  alpha       Codex    3     3         1h ago     Skill
+
+Observation totals
+  Runtime  Advertised  Loaded  Invoked
+  Codex    0           1       3
+
+Invocation evidence
+  Runtime  Hook  Transcript  Import
+  Codex    1     1           1
+
+Monthly usage (UTC)
+  Month    Uses
+  2026-07  1
+  2026-08  2

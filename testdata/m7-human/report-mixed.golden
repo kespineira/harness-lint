@@ -1,0 +1,38 @@
+Harness report
+
+Last 60 days
+
+Overview
+  Runtime      Installed  Used  Review  Stale
+  Claude Code  1          0     1       0
+  Codex        5          3     2       1
+
+Observation
+  Only local observations are shown. Missing observations do not prove non-use.
+  Lifetime coverage remains unknown unless a positive capture/presence
+  intersection is shown.
+  Advertisement is unknown for 2 capabilities; no exposure is inferred.
+  Per-session advertisement evidence is not available for every capability.
+
+Needs attention
+  Status    Runtime      Type   Name              Scope    Last used
+  ! Stale   Codex        Skill  stale             project  Jun 20, 12:00
+  ! Review  Claude Code  Skill  unknown-coverage  user     not observed
+  ! Review  Codex        Skill  high-coverage     user     not observed
+  ! Review  Codex        Skill  review-never      project  not observed
+
+Most used
+  Runtime  Type   Name          Scope    Uses  Last used
+  Codex    Skill  keep          user     2     1h ago
+  Codex    Skill  low-coverage  user     1     30m ago
+  Codex    Skill  stale         project  1     Jun 20, 12:00
+
+Totals
+  6 installed · 3 used · 4 total observations
+  0 advertised · 0 loaded · 4 invoked
+  1 stale · 3 review · 2 keep
+
+Explore
+  Use `harness-lint report --all` to inspect every current capability.
+  Use `harness-lint explain <name>` for evidence and rationale for one
+  capability.

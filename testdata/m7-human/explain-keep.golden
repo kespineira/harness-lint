@@ -1,0 +1,25 @@
+keep
+Codex · Skill · user · ✓ Keep
+
+Usage
+  Invocations:    2
+  Sessions:       2
+  First observed: 2h ago
+  Last observed:  1h ago
+
+Exposure
+  Metadata:      Unknown
+  Body:          Unknown
+  Advertisement: fully advertised
+
+Coverage
+  Direct coverage: Unknown
+  Status:          Unknown
+  Confidence:      Unknown
+
+Why KEEP?
+  Observed invocation is within the 60-day stale threshold.
+
+Interpretation
+  KEEP reflects observed recency only; it does not imply complete capture or
+  universal use.
