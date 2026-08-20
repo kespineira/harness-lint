@@ -1,0 +1,14 @@
+Monthly usage
+Last 30 days
+
+  Month (UTC)  Uses
+  2026-07      1
+  2026-08      2
+
+Observation totals
+  Runtime  Advertised  Loaded  Invoked
+  Codex    0           1       3
+
+Invocation evidence
+  Runtime  Hook  Transcript  Import
+  Codex    1     1           1

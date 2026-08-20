@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,33 @@ import (
 	"github.com/kespineira/harness-lint/internal/history"
 	"github.com/kespineira/harness-lint/internal/presentation"
 )
+
+func TestM7UsageDefaultRankingIsBounded(t *testing.T) {
+	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	aggregates := make([]history.Aggregate, 25)
+	for index := range aggregates {
+		lastUsed := now.Add(-time.Duration(index+1) * time.Hour)
+		aggregates[index] = history.Aggregate{
+			Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill,
+			CapabilityName: fmt.Sprintf("capability-%02d", index),
+			Uses:           int64(25 - index), DistinctInvocationSessions: 1,
+			LastObservedAt: &lastUsed,
+		}
+	}
+	var output bytes.Buffer
+	renderUsageView(&output, presentation.NewHumanRenderer(presentation.Options{Now: now, Width: 80}), usageView{
+		now: now, days: 90, aggregates: aggregates,
+	})
+	text := output.String()
+	for _, want := range []string{"capability-00", "capability-19", "Showing 20 of 25", "usage --json"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bounded usage output missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "capability-20") {
+		t.Fatalf("bounded usage output included rows past the limit: %s", text)
+	}
+}
 
 func TestM7HumanViewsFixedClockGoldenShape(t *testing.T) {
 	now := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
@@ -66,27 +94,26 @@ func TestM7HumanViewsFixedClockGoldenShape(t *testing.T) {
 		{Month: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill, CapabilityName: "alpha", Uses: 3, DistinctInvocationSessions: 1},
 		{Month: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill, CapabilityName: "beta", Uses: 4, DistinctInvocationSessions: 1},
 	}
+	usageAggregates := []history.Aggregate{
+		{
+			Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill, CapabilityName: "alpha", Uses: 12,
+			DistinctInvocationSessions: 3, LastObservedAt: &lastAlpha,
+			AdvertisedObservations: 4, LoadedObservations: 5,
+			InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceHook: 4, domain.ProvenanceImport: 8},
+		},
+		{
+			Runtime: domain.RuntimeClaudeCode, CapabilityType: domain.CapabilityTool, CapabilityName: "beta", Uses: 2,
+			DistinctInvocationSessions: 1, LastObservedAt: &lastBeta,
+			InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceTranscript: 2},
+		},
+	}
 	var usageOutput bytes.Buffer
 	renderUsageView(&usageOutput, renderer, usageView{
 		now: now, days: 30, runtimeSet: true, runtimeFilter: domain.RuntimeCodex,
-		aggregates: []history.Aggregate{
-			{
-				Runtime: domain.RuntimeCodex, CapabilityType: domain.CapabilitySkill, CapabilityName: "alpha", Uses: 12,
-				DistinctInvocationSessions: 3, LastObservedAt: &lastAlpha,
-				AdvertisedObservations: 4, LoadedObservations: 5,
-				InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceHook: 4, domain.ProvenanceImport: 8},
-			},
-			{
-				Runtime: domain.RuntimeClaudeCode, CapabilityType: domain.CapabilityTool, CapabilityName: "beta", Uses: 2,
-				DistinctInvocationSessions: 1, LastObservedAt: &lastBeta,
-				InvocationEvidence: map[domain.Provenance]int64{domain.ProvenanceTranscript: 2},
-			},
-		},
-		monthly:        monthly,
-		includeMonthly: true,
+		aggregates: usageAggregates,
 	})
 	usageText := usageOutput.String()
-	for _, want := range []string{"Usage", "Last 30 days", "Filters: Codex", "Capabilities ranked by uses", "Capability", "Uses", "2h ago", "Observation totals", "Invocation evidence", "Monthly usage (UTC)", "2026-08"} {
+	for _, want := range []string{"Usage", "Last 30 days", "Filters: Codex", "Capabilities ranked by uses", "Capability", "Uses", "2h ago", "Observation totals", "Invocation evidence"} {
 		if !strings.Contains(usageText, want) {
 			t.Fatalf("usage output = %q, missing %q", usageText, want)
 		}
@@ -94,8 +121,13 @@ func TestM7HumanViewsFixedClockGoldenShape(t *testing.T) {
 	if strings.Index(usageText, "alpha") > strings.Index(usageText, "beta") {
 		t.Fatalf("usage ranking does not lead with highest use: %q", usageText)
 	}
-	monthlyText := usageText[strings.Index(usageText, "Monthly usage (UTC)"):]
-	if !strings.Contains(monthlyText, "7") || strings.Contains(monthlyText, "Sessions") {
+	var monthlyOutput bytes.Buffer
+	renderUsageView(&monthlyOutput, renderer, usageView{
+		now: now, days: 30, runtimeSet: true, runtimeFilter: domain.RuntimeCodex,
+		aggregates: usageAggregates, monthly: monthly, includeMonthly: true,
+	})
+	monthlyText := monthlyOutput.String()
+	if !strings.Contains(monthlyText, "Monthly usage") || !strings.Contains(monthlyText, "2026-08") || !strings.Contains(monthlyText, "7") || strings.Contains(monthlyText, "Sessions") || strings.Contains(monthlyText, "Capabilities ranked by uses") {
 		t.Fatalf("monthly table is not compact uses-only output: %q", monthlyText)
 	}
 

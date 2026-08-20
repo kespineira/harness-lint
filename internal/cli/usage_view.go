@@ -40,11 +40,17 @@ type usageRuntimeTotals struct {
 	imported   int64
 }
 
+const defaultUsageRowLimit = 20
+
 // renderUsageView is deliberately separate from the usage JSON DTO builder.
 // It consumes the privacy-safe history query results directly so human
 // presentation cannot accidentally become coupled to a public wire contract.
 func renderUsageView(out io.Writer, renderer presentation.HumanRenderer, view usageView) {
-	fmt.Fprintln(out, "Usage")
+	if view.includeMonthly {
+		fmt.Fprintln(out, "Monthly usage")
+	} else {
+		fmt.Fprintln(out, "Usage")
+	}
 	fmt.Fprintf(out, "Last %s days\n", renderer.Integer(int64(view.days)))
 
 	filters := make([]string, 0, 2)
@@ -94,12 +100,23 @@ func renderUsageView(out io.Writer, renderer presentation.HumanRenderer, view us
 		return invocationRows[left].aggregate.CapabilityName < invocationRows[right].aggregate.CapabilityName
 	})
 
-	if len(invocationRows) == 0 {
+	if view.includeMonthly {
+		monthlyRows := usageMonthlyRows(renderer, view.monthly)
+		if table := reportTable(renderer, []string{"Month (UTC)", "Uses"}, monthlyRows); table != "" {
+			fmt.Fprintln(out, indentHumanBlock(table, 2))
+		} else {
+			fmt.Fprintln(out, "No monthly invocation observations were returned.")
+		}
+	} else if len(invocationRows) == 0 {
 		fmt.Fprintln(out, "No capability invocations were observed in this period.")
 	} else {
 		fmt.Fprintln(out, "Capabilities ranked by uses")
-		tableRows := make([][]string, 0, len(invocationRows))
-		for _, row := range invocationRows {
+		displayed := invocationRows
+		if len(displayed) > defaultUsageRowLimit {
+			displayed = displayed[:defaultUsageRowLimit]
+		}
+		tableRows := make([][]string, 0, len(displayed))
+		for _, row := range displayed {
 			aggregate := row.aggregate
 			tableRows = append(tableRows, []string{
 				cleanText(aggregate.CapabilityName),
@@ -112,6 +129,11 @@ func renderUsageView(out io.Writer, renderer presentation.HumanRenderer, view us
 		}
 		if table := reportTable(renderer, []string{"Capability", "Runtime", "Uses", "Sessions", "Last used", "Type"}, tableRows); table != "" {
 			fmt.Fprintln(out, indentHumanBlock(table, 2))
+		}
+		if len(displayed) < len(invocationRows) {
+			fmt.Fprintln(out)
+			writeReportText(out, renderer, fmt.Sprintf("Showing %s of %s capabilities with observed invocations.", renderer.Integer(int64(len(displayed))), renderer.Integer(int64(len(invocationRows)))), 2)
+			writeReportText(out, renderer, "Refine with --runtime or --type, or use `harness-lint usage --json` for complete data.", 2)
 		}
 	}
 
@@ -148,16 +170,6 @@ func renderUsageView(out io.Writer, renderer presentation.HumanRenderer, view us
 		}
 	}
 
-	if view.includeMonthly {
-		monthlyRows := usageMonthlyRows(renderer, view.monthly)
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Monthly usage (UTC)")
-		if table := reportTable(renderer, []string{"Month", "Uses"}, monthlyRows); table != "" {
-			fmt.Fprintln(out, indentHumanBlock(table, 2))
-		} else {
-			fmt.Fprintln(out, "  No monthly observations were returned.")
-		}
-	}
 }
 
 func usageLastUsed(renderer presentation.HumanRenderer, value *time.Time) string {

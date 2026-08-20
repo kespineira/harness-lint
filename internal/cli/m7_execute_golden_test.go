@@ -618,16 +618,21 @@ func TestM7UsageExecuteWithOptionsTableMonthlyAndEmptyGoldens(t *testing.T) {
 		m7UsageEvent(now.Add(-3*time.Hour), domain.RuntimeCodex, domain.CapabilitySkill, "beta", "b-1", domain.EventLoaded, domain.ProvenanceImport),
 	})
 	options := m7CLIOptions(root, nil)
-	output := m7RequireExecute(t, options, []string{"usage", "--db", dbPath, "--days", "30", "--monthly", "--now", m7ExecuteNow, "--color", "never"}, nil)
-	m7AssertGolden(t, "usage-table-monthly", root, output)
-	for _, want := range []string{"Capabilities ranked by uses", "Observation totals", "Invocation evidence", "Monthly usage (UTC)", "2026-08"} {
+	output := m7RequireExecute(t, options, []string{"usage", "--db", dbPath, "--days", "30", "--now", m7ExecuteNow, "--color", "never"}, nil)
+	m7AssertGolden(t, "usage-table", root, output)
+	for _, want := range []string{"Capabilities ranked by uses", "Observation totals", "Invocation evidence"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("usage output missing %q: %s", want, output)
 		}
 	}
+	monthlyOutput := m7RequireExecute(t, options, []string{"usage", "--db", dbPath, "--days", "30", "--monthly", "--now", m7ExecuteNow, "--color", "never"}, nil)
+	m7AssertGolden(t, "usage-monthly", root, monthlyOutput)
+	if !strings.Contains(monthlyOutput, "Monthly usage") || !strings.Contains(monthlyOutput, "2026-08") || strings.Contains(monthlyOutput, "Capabilities ranked by uses") {
+		t.Fatalf("monthly usage output is not compact: %s", monthlyOutput)
+	}
 	emptyRoot := t.TempDir()
 	emptyDB := filepath.Join(emptyRoot, "state", "usage.db")
-	empty := m7RequireExecute(t, m7CLIOptions(emptyRoot, nil), []string{"usage", "--db", emptyDB, "--days", "30", "--monthly", "--now", m7ExecuteNow, "--color", "never"}, nil)
+	empty := m7RequireExecute(t, m7CLIOptions(emptyRoot, nil), []string{"usage", "--db", emptyDB, "--days", "30", "--now", m7ExecuteNow, "--color", "never"}, nil)
 	m7AssertGolden(t, "usage-empty", emptyRoot, empty)
 	if !strings.Contains(empty, "No usage observations were found in this period.") {
 		t.Fatalf("empty usage output = %s", empty)
