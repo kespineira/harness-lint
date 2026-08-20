@@ -172,6 +172,72 @@ func TestDiscoverInventoryUsesInjectedRootsAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestDiscoverInlineHooksIgnoresCodexHookStateRegistry(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    string
+		wantHooks []string
+	}{
+		{
+			name: "state only",
+			config: `[hooks.state."/tmp/hooks.json"]
+enabled = true
+trusted_hash = "hash"
+`,
+		},
+		{
+			name: "state and real event",
+			config: `[hooks.state."/tmp/hooks.json"]
+enabled = true
+trusted_hash = "hash"
+
+[hooks.PostToolUse]
+matcher = "Bash"
+`,
+			wantHooks: []string{"PostToolUse"},
+		},
+		{
+			name: "unknown event remains reviewable",
+			config: `[hooks.UnknownEvent]
+matcher = "Bash"
+`,
+			wantHooks: []string{"UnknownEvent"},
+		},
+		{
+			name: "version remains reviewable inline",
+			config: `[hooks.version]
+value = 1
+`,
+			wantHooks: []string{"version"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configRoot := filepath.Join(t.TempDir(), ".codex")
+			writeFile(t, filepath.Join(configRoot, "config.toml"), test.config)
+			discovery, err := New(Options{
+				ConfigRoot: configRoot,
+				Now:        func() time.Time { return time.Unix(22, 0) },
+			}).Discover(context.Background())
+			if err != nil {
+				t.Fatalf("Discover() error = %v", err)
+			}
+			var gotHooks []string
+			for _, capability := range discovery.Capabilities {
+				if capability.Type == domain.CapabilityHook {
+					gotHooks = append(gotHooks, capability.Name)
+				}
+			}
+			sortStrings(gotHooks)
+			sortStrings(test.wantHooks)
+			if strings.Join(gotHooks, ",") != strings.Join(test.wantHooks, ",") {
+				t.Fatalf("discovered inline hooks = %#v, want %#v; capabilities = %#v", gotHooks, test.wantHooks, discovery.Capabilities)
+			}
+		})
+	}
+}
+
 func TestUserSkillConfigurationDisablesCanonicalPathOnly(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")

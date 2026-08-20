@@ -213,7 +213,7 @@ func appendInlineHooks(result *domain.Discovery, values map[string]any, source s
 		addFinding(result, "malformed-config", "hooks must be a TOML table", domain.CapabilityHook, filepath.Base(source.path))
 		return
 	}
-	appendHookCapabilities(result, hookEvents(hooks), source, content, now)
+	appendHookCapabilities(result, inlineHookEvents(hooks), source, content, now)
 }
 
 func appendHookCapabilities(result *domain.Discovery, hooks []hookEvent, source sourceRoot, content []byte, now time.Time) {
@@ -242,9 +242,23 @@ func hookEvents(value any) []hookEvent {
 			root = nestedMap
 		}
 	}
+	return filteredHookEvents(root, func(name string) bool {
+		return name == "hooks" || name == "version"
+	})
+}
+
+func inlineHookEvents(value any) []hookEvent {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return filteredHookEvents(root, func(name string) bool { return name == "state" })
+}
+
+func filteredHookEvents(root map[string]any, skip func(string) bool) []hookEvent {
 	names := make([]string, 0, len(root))
 	for name := range root {
-		if name == "hooks" || name == "version" {
+		if skip(name) {
 			continue
 		}
 		names = append(names, name)

@@ -1,8 +1,10 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kespineira/harness-lint/internal/domain"
+	"go.yaml.in/yaml/v3"
 )
 
 type sourceRoot struct {
@@ -427,15 +430,15 @@ func parseSkillDocument(content []byte) skillDocument {
 	text := strings.TrimPrefix(string(content), "\ufeff")
 	lines := strings.SplitAfter(text, "\n")
 	doc := skillDocument{}
-	if len(lines) == 0 || strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(lines[0], "\n"), "\r")) != "---" {
+	if len(lines) == 0 || !isFrontmatterDelimiter(lines[0], "---") {
 		doc.body = []byte(text)
 		doc.malformed = true
 		return doc
 	}
 	closeIndex := -1
 	for i := 1; i < len(lines); i++ {
-		line := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(lines[i], "\n"), "\r"))
-		if line == "---" || line == "..." {
+		line := strings.TrimSuffix(strings.TrimSuffix(lines[i], "\n"), "\r")
+		if isFrontmatterDelimiter(line, "---") || isFrontmatterDelimiter(line, "...") {
 			closeIndex = i
 			break
 		}
@@ -446,34 +449,13 @@ func parseSkillDocument(content []byte) skillDocument {
 	}
 	frontmatter := []byte(strings.Join(lines[1:closeIndex], ""))
 	doc.body = []byte(strings.Join(lines[closeIndex+1:], ""))
-	seenKeys := make(map[string]struct{})
-	for _, line := range strings.Split(string(frontmatter), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) == "" {
-			doc.malformed = true
-			continue
-		}
-		key = strings.TrimSpace(key)
-		if _, exists := seenKeys[key]; exists {
-			doc.malformed = true
-		}
-		seenKeys[key] = struct{}{}
-		var scalarOK bool
-		value, scalarOK = parseFrontmatterScalar(strings.TrimSpace(value))
-		if !scalarOK {
-			doc.malformed = true
-		}
-		switch key {
-		case "name":
-			doc.name = value
-		case "description":
-			doc.description = value
-		}
+	values, ok := decodeSkillFrontmatter(frontmatter)
+	if !ok {
+		doc.malformed = true
+		return doc
 	}
+	doc.name, _ = stringField(values, "name")
+	doc.description, _ = stringField(values, "description")
 	if strings.TrimSpace(doc.name) == "" || strings.TrimSpace(doc.description) == "" {
 		doc.malformed = true
 	}
@@ -483,21 +465,22 @@ func parseSkillDocument(content []byte) skillDocument {
 	return doc
 }
 
-func parseFrontmatterScalar(value string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", false
+func isFrontmatterDelimiter(line, delimiter string) bool {
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	return strings.TrimRight(line, " \t") == delimiter
+}
+
+func decodeSkillFrontmatter(frontmatter []byte) (map[string]any, bool) {
+	decoder := yaml.NewDecoder(bytes.NewReader(frontmatter))
+	var values map[string]any
+	if err := decoder.Decode(&values); err != nil || values == nil {
+		return nil, false
 	}
-	if value[0] == '"' || value[0] == '\'' {
-		if len(value) < 2 || value[len(value)-1] != value[0] {
-			return "", false
-		}
-		return value[1 : len(value)-1], true
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, false
 	}
-	if (value[0] == '[' && !strings.HasSuffix(value, "]")) || (value[0] == '{' && !strings.HasSuffix(value, "}")) {
-		return "", false
-	}
-	return value, true
+	return values, true
 }
 
 func stringField(values map[string]any, key string) (string, bool) {
