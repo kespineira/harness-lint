@@ -5,3 +5,5 @@ Scan complete
   Codex        0             0       0
 
 0 capabilities discovered · 0 observations imported
+
+Run `harness-lint report` to review usage and attention items.

@@ -82,13 +82,13 @@ func renderScanView(out io.Writer, renderer presentation.HumanRenderer, verbose 
 			renderer.Integer(int64(row.Findings)),
 		})
 	}
-	if table := renderer.Table(headers, rows); table != "" {
+	if table := humanTable(renderer, headers, rows, 2); table != "" {
 		fmt.Fprintln(out, indentHumanBlock(table, 2))
 	}
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "%s capabilities discovered · %s observations imported\n",
-		renderer.Integer(int64(view.Capabilities)),
-		renderer.Integer(int64(view.Events)))
+	fmt.Fprintf(out, "%s · %s\n",
+		humanCount(renderer, view.Capabilities, "capability discovered", "capabilities discovered"),
+		humanCount(renderer, view.Events, "observation imported", "observations imported"))
 	if verbose && len(view.Runtimes) > 0 {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Inventory")
@@ -104,4 +104,6 @@ func renderScanView(out io.Writer, renderer presentation.HumanRenderer, verbose 
 			fmt.Fprintf(out, "%s findings need attention. Run `harness-lint doctor`.\n", renderer.Integer(int64(view.Findings)))
 		}
 	}
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Run `harness-lint report` to review usage and attention items.")
 }

@@ -330,6 +330,9 @@ func TestM7HooksTestExecuteWithOptionsHealthMatrix(t *testing.T) {
 				t.Fatalf("seed healthy delivery: %v", err)
 			}
 		}
+		if state != "healthy" && state != "degraded" {
+			initializeTestStore(t, dbPath)
+		}
 		if state == "broken" {
 			m7WriteFile(t, filepath.Join(configRoot, "settings.json"), "{\n")
 		}
@@ -393,7 +396,9 @@ func TestM7HookStatusExecuteWithOptionsCoversRelativeMissingAndJSONColor(t *test
 	if stderr != "" || !strings.Contains(output, "Executable") || !strings.Contains(output, "Unavailable") || !strings.Contains(output, "Configuration") {
 		t.Fatalf("relative/missing hook status = %q (stderr=%q)", output, stderr)
 	}
-	if !strings.Contains(output, filepath.Join(configRoot, "settings.json")) {
+	compactOutput := strings.Join(strings.Fields(output), "")
+	compactConfigPath := strings.Join(strings.Fields(filepath.Join(configRoot, "settings.json")), "")
+	if !strings.Contains(compactOutput, compactConfigPath) {
 		t.Fatalf("relative hook status did not resolve config path %q: %s", configRoot, output)
 	}
 
@@ -411,6 +416,7 @@ func TestM7HookStatusExecuteWithOptionsCoversRelativeMissingAndJSONColor(t *test
 func TestM7DatabaseExecuteWithOptionsHumanGoldens(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "state", "database.db")
+	initializeTestStore(t, dbPath)
 	options := m7CLIOptions(root, nil)
 	statusOptions := options
 	statusOptions.Home = root
@@ -632,6 +638,7 @@ func TestM7UsageExecuteWithOptionsTableMonthlyAndEmptyGoldens(t *testing.T) {
 	}
 	emptyRoot := t.TempDir()
 	emptyDB := filepath.Join(emptyRoot, "state", "usage.db")
+	initializeTestStore(t, emptyDB)
 	empty := m7RequireExecute(t, m7CLIOptions(emptyRoot, nil), []string{"usage", "--db", emptyDB, "--days", "30", "--now", m7ExecuteNow, "--color", "never"}, nil)
 	m7AssertGolden(t, "usage-empty", emptyRoot, empty)
 	if !strings.Contains(empty, "No usage observations were found in this period.") {
@@ -693,6 +700,7 @@ func TestM7ExecuteWithOptionsColorRedirectJSONAndWidthContracts(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(root, "state", "json.db")
+	initializeTestStore(t, dbPath)
 	jsonCommands := [][]string{
 		{"hooks", "status", "claude", "--claude-config", configRoot, "--json"},
 		{"db", "status", "--db", dbPath, "--json"},

@@ -33,7 +33,7 @@ func TestM7ReportProgressiveDisclosureAndCanonicalAttention(t *testing.T) {
 	var output bytes.Buffer
 	renderReportView(&output, renderer, false, false, result, nil, now, 60)
 	text := output.String()
-	for _, want := range []string{"Harness report", "Last 60 days", "Overview"} {
+	for _, want := range []string{"Harness report", "Stale threshold: 60 days", "Overview"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("default report missing %q: %q", want, text)
 		}

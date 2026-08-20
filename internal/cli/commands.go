@@ -84,6 +84,22 @@ func openStore(config commandConfig) (*store.Store, error) {
 	return db, nil
 }
 
+var errDatabaseNotInitialized = errors.New("database is not initialized")
+
+func openExistingStore(config commandConfig) (*store.Store, error) {
+	if config.dbPath == "" {
+		return nil, errors.New("database path is empty")
+	}
+	db, err := store.OpenExisting(config.dbPath)
+	if errors.Is(err, store.ErrStoreNotFound) {
+		return nil, fmt.Errorf("%w; run `harness-lint scan` first", errDatabaseNotInitialized)
+	}
+	if err != nil {
+		return nil, errors.New("database is unavailable")
+	}
+	return db, nil
+}
+
 func runScan(ctx context.Context, config commandConfig, out io.Writer) error {
 	db, err := openStore(config)
 	if err != nil {
@@ -131,7 +147,7 @@ func runUsage(ctx context.Context, config commandConfig, flags parsedFlags, out 
 	if !mcpUnion {
 		query.CapabilityType = typeFilter
 	}
-	db, err := openStore(config)
+	db, err := openExistingStore(config)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -302,7 +318,7 @@ func loadReport(ctx context.Context, config commandConfig, staleDays int) (analy
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("--days %w", err)
 	}
-	db, err := openStore(config)
+	db, err := openExistingStore(config)
 	if err != nil {
 		return analysis.Report{}, nil, fmt.Errorf("open database: %w", err)
 	}

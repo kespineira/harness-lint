@@ -90,7 +90,7 @@ func TestM7HumanRenderersUseFixedCountsAndTimes(t *testing.T) {
 		Events:       7,
 		Findings:     1,
 	})
-	want := "Scan complete\n\n  Runtime      Capabilities  Events  Findings\n  Claude Code  2             3       0\n  Codex        1             4       1\n\n3 capabilities discovered · 7 observations imported\n\n1 finding needs attention. Run `harness-lint doctor`.\n"
+	want := "Scan complete\n\n  Runtime      Capabilities  Events  Findings\n  Claude Code  2             3       0\n  Codex        1             4       1\n\n3 capabilities discovered · 7 observations imported\n\n1 finding needs attention. Run `harness-lint doctor`.\n\nRun `harness-lint report` to review usage and attention items.\n"
 	if output.String() != want {
 		t.Fatalf("scan view =\n%s\nwant =\n%s", output.String(), want)
 	}

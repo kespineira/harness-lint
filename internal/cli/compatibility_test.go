@@ -137,6 +137,7 @@ func TestHooksTestCompatibilityDoesNotTurnMissingOrMalformedVersionIntoBroken(t 
 			if _, err := hooks.NewClaude(hooks.Options{ConfigRoot: claudeRoot, LookPath: installLookPath}).Install(context.Background()); err != nil {
 				t.Fatalf("install hooks: %v", err)
 			}
+			initializeTestStore(t, dbPath)
 			lookPath := func(name string) (string, error) {
 				if test.brokenBin {
 					return "", os.ErrNotExist

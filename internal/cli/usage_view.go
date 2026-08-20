@@ -51,7 +51,7 @@ func renderUsageView(out io.Writer, renderer presentation.HumanRenderer, view us
 	} else {
 		fmt.Fprintln(out, "Usage")
 	}
-	fmt.Fprintf(out, "Last %s days\n", renderer.Integer(int64(view.days)))
+	fmt.Fprintf(out, "Last %s\n", humanDayCount(renderer, view.days))
 
 	filters := make([]string, 0, 2)
 	if view.runtimeSet {

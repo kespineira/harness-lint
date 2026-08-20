@@ -21,6 +21,8 @@ func renderContextView(out io.Writer, renderer presentation.HumanRenderer, summa
 	if len(summary.Groups) == 0 {
 		fmt.Fprintln(out, "No configured capabilities were discovered.")
 		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Run `harness-lint scan` to refresh the current inventory.")
+		fmt.Fprintln(out)
 		renderContextCaveats(out, renderer, 0, false)
 		return
 	}
@@ -97,7 +99,11 @@ func renderContextCaveats(out io.Writer, renderer presentation.HumanRenderer, un
 	fmt.Fprintln(out, "Caveats")
 	writeReportText(out, renderer, "Token values are estimates of context exposure, not a measurement of model billing or runtime behavior.", 2)
 	if unknownMeasurements > 0 {
-		writeReportText(out, renderer, fmt.Sprintf("%s token measurements are unknown and omitted from the subtotals.", renderer.Integer(int64(unknownMeasurements))), 2)
+		verb := "are"
+		if unknownMeasurements == 1 {
+			verb = "is"
+		}
+		writeReportText(out, renderer, fmt.Sprintf("%s %s unknown and omitted from the subtotals.", humanCount(renderer, unknownMeasurements, "token measurement", "token measurements"), verb), 2)
 	}
 	// MCP schema size is not available from the inventory contract. Keep this
 	// caveat visible even when no MCP row is present so the view never implies

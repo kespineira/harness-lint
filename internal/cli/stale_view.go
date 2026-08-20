@@ -26,7 +26,7 @@ func renderStaleView(out io.Writer, renderer presentation.HumanRenderer, verbose
 	}
 
 	fmt.Fprintln(out, "Stale capabilities")
-	fmt.Fprintf(out, "Threshold: %s days\n", renderer.Integer(int64(staleDays)))
+	fmt.Fprintf(out, "Threshold: %s\n", humanDayCount(renderer, staleDays))
 	fmt.Fprintln(out)
 	if len(stale) == 0 {
 		if len(items) == 0 {

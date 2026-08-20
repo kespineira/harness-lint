@@ -15,6 +15,20 @@ import (
 	"github.com/kespineira/harness-lint/internal/store"
 )
 
+func initializeTestStore(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create test database parent: %v", err)
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+}
+
 func TestExecuteScanAndReportTracer(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -40,7 +54,7 @@ func TestExecuteScanAndReportTracer(t *testing.T) {
 	if err := ExecuteWithOptions(options, []string{"scan", "--db", db, "--home", home, "--project", project, "--hook-capture", hook, "--since", "2026-08-13T14:30:00Z"}, nil, &stdout, &stderr); err != nil {
 		t.Fatalf("scan error = %v\nstderr=%s", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Scan complete") || !strings.Contains(stdout.String(), "Codex") || !strings.Contains(stdout.String(), "1 capabilities discovered") {
+	if !strings.Contains(stdout.String(), "Scan complete") || !strings.Contains(stdout.String(), "Codex") || !strings.Contains(stdout.String(), "1 capability discovered") {
 		t.Fatalf("scan output = %q, want codex capability total", stdout.String())
 	}
 

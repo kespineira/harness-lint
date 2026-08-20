@@ -78,44 +78,15 @@ func reportStatusRank(value analysis.Classification) int {
 }
 
 func reportTable(renderer presentation.HumanRenderer, headers []string, rows [][]string) string {
-	// Tables are indented by two columns in command views. Reserve that space
-	// so long identities never make an 80-column view wider than requested.
-	options := renderer.Options()
-	width := options.Width
-	if width <= 0 {
-		width = presentation.DefaultWidth
-	}
-	if width > 2 {
-		width -= 2
-	}
-	options.Width = width
-	return presentation.NewHumanRenderer(options).Table(headers, rows)
+	return humanTable(renderer, headers, rows, 2)
 }
 
 func reportWrap(renderer presentation.HumanRenderer, value string, indent int) string {
-	options := renderer.Options()
-	width := options.Width
-	if width <= 0 {
-		width = presentation.DefaultWidth
-	}
-	if indent > 0 && width > indent {
-		width -= indent
-	}
-	options.Width = width
-	return presentation.NewHumanRenderer(options).Wrap(value)
+	return humanWrap(renderer, value, indent)
 }
 
 func reportKeyValues(renderer presentation.HumanRenderer, values []presentation.KeyValue, indent int) string {
-	options := renderer.Options()
-	width := options.Width
-	if width <= 0 {
-		width = presentation.DefaultWidth
-	}
-	if indent > 0 && width > indent {
-		width -= indent
-	}
-	options.Width = width
-	return presentation.NewHumanRenderer(options).KeyValues(values)
+	return humanKeyValues(renderer, values, indent)
 }
 
 func writeReportTable(out io.Writer, renderer presentation.HumanRenderer, headers []string, rows [][]string) {
@@ -137,7 +108,7 @@ func renderReportView(out io.Writer, renderer presentation.HumanRenderer, all, v
 
 	fmt.Fprintln(out, "Harness report")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Last %d days\n", staleDays)
+	fmt.Fprintf(out, "Stale threshold: %s\n", humanDayCount(renderer, staleDays))
 	if verbose {
 		fmt.Fprintf(out, "  As of %s\n", renderer.Timestamp(now))
 	}
@@ -424,7 +395,12 @@ func renderReportExploreHints(out io.Writer, renderer presentation.HumanRenderer
 		}
 	}
 	if usageOnly > 0 {
-		writeReportText(out, renderer, fmt.Sprintf("%s are not in current inventory; this does not prove installation or removal.", humanCount(renderer, usageOnly, "observed usage-only name", "observed usage-only names")), 2)
+		verb := "are"
+		if usageOnly == 1 {
+			verb = "is"
+		}
+		writeReportText(out, renderer, fmt.Sprintf("%s %s not in current inventory; this does not prove installation or removal.", humanCount(renderer, usageOnly, "observed usage-only name", "observed usage-only names"), verb), 2)
+		writeReportText(out, renderer, "Use `harness-lint usage` or `harness-lint usage --json` to inspect that evidence.", 2)
 	}
 	if len(result.Capabilities) == 0 && usageOnly == 0 {
 		writeReportText(out, renderer, "Run `harness-lint scan` to refresh current inventory and observations.", 2)
@@ -432,7 +408,7 @@ func renderReportExploreHints(out io.Writer, renderer presentation.HumanRenderer
 }
 
 func writeReportText(out io.Writer, renderer presentation.HumanRenderer, value string, indent int) {
-	fmt.Fprintln(out, indentHumanBlock(reportWrap(renderer, value, indent), indent))
+	writeHumanText(out, renderer, value, indent)
 }
 
 func renderCapabilityDetails(out io.Writer, renderer presentation.HumanRenderer, item reportCapability, staleDays int, now time.Time) {
@@ -665,7 +641,7 @@ func hasName(result analysis.Report, name string) bool {
 
 func renderExplainView(out io.Writer, renderer presentation.HumanRenderer, item reportCapability, staleDays int, now time.Time, verbose bool) {
 	evidence := item.evidence
-	fmt.Fprintln(out, cleanText(evidence.Capability.Name))
+	writeHumanText(out, renderer, cleanText(evidence.Capability.Name), 0)
 	writeReportText(out, renderer, fmt.Sprintf("%s · %s · %s · %s", renderer.Runtime(string(evidence.Capability.Runtime)), renderer.Type(string(evidence.Capability.Type)), scopeLabel(item.scope), reportStatus(renderer, evidence.Classification)), 0)
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Usage")

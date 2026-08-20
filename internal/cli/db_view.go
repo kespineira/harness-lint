@@ -29,7 +29,7 @@ func renderDatabaseStatusView(out io.Writer, renderer presentation.HumanRenderer
 		{"History", databaseHistoryRange(renderer, document.OldestObservedAt, document.LatestObservedAt)},
 		{"Integrity", "Not checked"},
 	}
-	fmt.Fprintln(out, indentHumanBlock(renderer.Rows(rows), 2))
+	fmt.Fprintln(out, indentHumanBlock(humanRows(renderer, rows, 2), 2))
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "Run `harness-lint db check` to verify integrity.")
 	if verbose {
@@ -83,10 +83,10 @@ func renderDatabaseCheckView(out io.Writer, renderer presentation.HumanRenderer,
 func renderDatabaseBackupView(out io.Writer, renderer presentation.HumanRenderer, verbose bool, destination string, size int64) {
 	fmt.Fprintln(out, "Database backup")
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, indentHumanBlock(renderer.Rows([][]string{
+	fmt.Fprintln(out, indentHumanBlock(humanRows(renderer, [][]string{
 		{"Destination", renderer.Path(destination)},
 		{"Size", renderer.Bytes(size)},
-	}), 2))
+	}, 2), 2))
 	if verbose {
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "SQLite online backup; existing destinations are never overwritten.")

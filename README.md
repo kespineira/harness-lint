@@ -224,10 +224,12 @@ Scan complete
 
 6 capabilities discovered · 4 observations imported
 
+Run `harness-lint report` to review usage and attention items.
+
 $ harness-lint report
 Harness report
 
-Last 60 days
+Stale threshold: 60 days
 
 Overview
   Runtime      Installed  Used  Review  Stale
@@ -264,6 +266,10 @@ Explore
   Use `harness-lint explain <name>` for evidence and rationale for one
   capability.
 ```
+
+The report considers retained local evidence; its `--days` value is the stale
+classification threshold, not a history-query window. Use `usage --days N`
+when you need a closed recent-usage period.
 
 The default report surfaces attention items and the most-used capabilities.
 Use the navigation under [Progressive reports](#progressive-reports) to open

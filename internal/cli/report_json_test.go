@@ -136,6 +136,7 @@ func TestReportAndStaleJSONExposeStableSafeUsageEvidence(t *testing.T) {
 func TestReportAndStaleJSONEmptyDatasetsAreValid(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "empty.db")
+	initializeTestStore(t, dbPath)
 	now := time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC)
 	options := Options{Home: filepath.Join(root, "home"), CWD: root, ProjectRoot: root, Now: func() time.Time { return now }}
 	for _, command := range []string{"report", "stale"} {

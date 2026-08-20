@@ -25,7 +25,7 @@ func renderHookStatusView(out io.Writer, renderer presentation.HumanRenderer, ve
 			humanCount(renderer, handlers, "handler", "handlers"),
 		})
 	}
-	if table := renderer.Rows(rows); table != "" {
+	if table := humanRows(renderer, rows, 2); table != "" {
 		fmt.Fprintln(out, indentHumanBlock(table, 2))
 	}
 
@@ -38,7 +38,7 @@ func renderHookStatusView(out io.Writer, renderer presentation.HumanRenderer, ve
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Warning")
 		for _, warning := range warnings {
-			fmt.Fprintf(out, "  %s\n", warning)
+			writeHumanText(out, renderer, warning, 2)
 		}
 	}
 
@@ -49,22 +49,23 @@ func renderHookStatusView(out io.Writer, renderer presentation.HumanRenderer, ve
 	fmt.Fprintln(out, "Details")
 	for _, report := range reports {
 		fmt.Fprintf(out, "  %s\n", renderer.Runtime(string(report.Runtime)))
+		details := make([][]string, 0, len(report.ManagedEntries)+3)
 		if report.ConfigPath != "" {
-			fmt.Fprintf(out, "    Configuration  %s\n", renderer.Path(report.ConfigPath))
+			details = append(details, []string{"Configuration", renderer.Path(report.ConfigPath)})
 		}
 		for _, entry := range report.ManagedEntries {
-			fmt.Fprintf(out, "    %-14s %s · exact %s · partial %s · lookalikes %s\n",
-				entry.Event,
-				renderer.Status(hookEntryStatusToken(entry.State)),
-				renderer.Integer(int64(entry.ExactHandlers)),
-				renderer.Integer(int64(entry.Partial)),
-				renderer.Integer(int64(entry.Lookalikes)))
+			details = append(details, []string{entry.Event, fmt.Sprintf("%s · exact %s · partial %s · lookalikes %s",
+				renderer.Status(hookEntryStatusToken(entry.State)), renderer.Integer(int64(entry.ExactHandlers)),
+				renderer.Integer(int64(entry.Partial)), renderer.Integer(int64(entry.Lookalikes)))})
 		}
 		if report.Binary.Resolved && report.Binary.ResolvedPath != "" {
-			fmt.Fprintf(out, "    Executable     %s\n", renderer.Path(report.Binary.ResolvedPath))
+			details = append(details, []string{"Executable", renderer.Path(report.Binary.ResolvedPath)})
 		}
 		if report.InlineHooks {
-			fmt.Fprintln(out, "    Ownership      inline Codex hooks require separate trust review")
+			details = append(details, []string{"Ownership", "inline Codex hooks require separate trust review"})
+		}
+		if table := humanRows(renderer, details, 4); table != "" {
+			fmt.Fprintln(out, indentHumanBlock(table, 4))
 		}
 	}
 }
@@ -81,16 +82,20 @@ func renderHookExecutable(out io.Writer, renderer presentation.HumanRenderer, re
 	}
 	if allResolved && len(paths) == 1 {
 		for path := range paths {
-			fmt.Fprintf(out, "  %s\n", renderer.Path(path))
+			writeHumanText(out, renderer, renderer.Path(path), 2)
 		}
 		return
 	}
+	rows := make([][]string, 0, len(reports))
 	for _, report := range reports {
 		value := renderer.Status("unavailable")
 		if report.Binary.Resolved && report.Binary.ResolvedPath != "" {
 			value = renderer.Path(report.Binary.ResolvedPath)
 		}
-		fmt.Fprintf(out, "  %-12s %s\n", renderer.Runtime(string(report.Runtime)), value)
+		rows = append(rows, []string{renderer.Runtime(string(report.Runtime)), value})
+	}
+	if table := humanRows(renderer, rows, 2); table != "" {
+		fmt.Fprintln(out, indentHumanBlock(table, 2))
 	}
 }
 
@@ -162,7 +167,7 @@ func renderHookTestView(out io.Writer, renderer presentation.HumanRenderer, verb
 			healthReason(renderer, report),
 		})
 	}
-	if table := renderer.Rows(rows); table != "" {
+	if table := humanRows(renderer, rows, 2); table != "" {
 		fmt.Fprintln(out, indentHumanBlock(table, 2))
 	}
 	fmt.Fprintln(out)
@@ -254,7 +259,7 @@ func renderHealthDetails(out io.Writer, renderer presentation.HumanRenderer, rep
 		{"Self-test", renderer.Status(componentStatusToken(report.Components.SelfTest.State))},
 		{"Live delivery", renderer.Status(componentStatusToken(report.Components.Delivery.State))},
 	}
-	fmt.Fprintln(out, indentHumanBlock(renderer.Rows(rows), 2))
+	fmt.Fprintln(out, indentHumanBlock(humanRows(renderer, rows, 2), 2))
 
 	details := make([][]string, 0, 6)
 	if report.Delivery.LastSuccessfulDelivery != nil {
@@ -280,7 +285,7 @@ func renderHealthDetails(out io.Writer, renderer presentation.HumanRenderer, rep
 	}
 	details = append(details, []string{"Validation", validation})
 	fmt.Fprintln(out)
-	fmt.Fprintln(out, indentHumanBlock(renderer.Rows(details), 2))
+	fmt.Fprintln(out, indentHumanBlock(humanRows(renderer, details, 2), 2))
 }
 
 func compatibilityVersion(diagnostic compatibilityDiagnostic) string {
@@ -346,7 +351,7 @@ func renderHookOperationView(out io.Writer, renderer presentation.HumanRenderer,
 	if result.BackupPath != "" {
 		rows = append(rows, []string{"Backup", renderer.Path(result.BackupPath)})
 	}
-	fmt.Fprintln(out, indentHumanBlock(renderer.Rows(rows), 2))
+	fmt.Fprintln(out, indentHumanBlock(humanRows(renderer, rows, 2), 2))
 	if len(result.Plan) == 0 {
 		return
 	}
@@ -354,14 +359,14 @@ func renderHookOperationView(out io.Writer, renderer presentation.HumanRenderer,
 	fmt.Fprintln(out, "Changes:")
 	for _, change := range result.Plan {
 		detail := boundedHookText(change.Detail)
+		line := boundedHookText(change.Kind) + ": " + detail
 		if change.Path != "" {
-			fmt.Fprintf(out, "  %s: %s (%s)\n", boundedHookText(change.Kind), detail, renderer.Path(change.Path))
-		} else {
-			fmt.Fprintf(out, "  %s: %s\n", boundedHookText(change.Kind), detail)
+			line += " (" + renderer.Path(change.Path) + ")"
 		}
+		writeHumanText(out, renderer, line, 2)
 	}
 	if verbose {
-		fmt.Fprintf(out, "\n%s planned changes\n", renderer.Integer(int64(len(result.Plan))))
+		fmt.Fprintf(out, "\n%s\n", humanCount(renderer, len(result.Plan), "planned change", "planned changes"))
 	}
 }
 

@@ -4,6 +4,8 @@ Scan complete
   Claude Code  0             0       0
   Codex        1             0       1
 
-1 capabilities discovered · 0 observations imported
+1 capability discovered · 0 observations imported
 
 1 finding needs attention. Run `harness-lint doctor`.
+
+Run `harness-lint report` to review usage and attention items.

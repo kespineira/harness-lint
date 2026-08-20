@@ -58,11 +58,9 @@ type DatabaseCheckDocument struct {
 }
 
 func runDatabase(ctx context.Context, config commandConfig, flags parsedFlags, out io.Writer) error {
-	db, err := openStore(config)
+	db, err := openExistingStore(config)
 	if err != nil {
-		// Diagnostics errors are deliberately bounded: SQLite may echo local
-		// paths or implementation details, neither of which is a CLI contract.
-		return errors.New("open database for diagnostics")
+		return err
 	}
 	defer db.Close()
 

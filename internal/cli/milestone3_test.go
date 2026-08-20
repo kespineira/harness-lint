@@ -124,6 +124,7 @@ func TestExecuteHooksTestIsReadOnlyAndReportsDeliveryState(t *testing.T) {
 	if _, err := hooks.NewCodex(hooks.Options{ConfigRoot: codexRoot, LookPath: lookPath}).Install(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	initializeTestStore(t, dbPath)
 	var stdout, stderr bytes.Buffer
 	options := Options{CWD: root, ProjectRoot: root, Now: func() time.Time { return now }, LookPath: lookPath}
 	args := []string{"hooks", "test", "--db", dbPath, "--claude-config", claudeRoot, "--codex-home", codexRoot}

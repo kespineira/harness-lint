@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -54,6 +56,59 @@ func TestOpenMigratesAndReopensPersistedDatabase(t *testing.T) {
 	}
 	if status != (SchemaStatus{Current: 7, Latest: 7}) {
 		t.Fatalf("schema status after reopen = %#v, want current/latest 7", status)
+	}
+}
+
+func TestOpenExistingDoesNotCreateOrMigrate(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	missing := filepath.Join(root, "missing.db")
+	if _, err := OpenExisting(missing); !errors.Is(err, ErrStoreNotFound) {
+		t.Fatalf("OpenExisting(missing) error = %v, want ErrStoreNotFound", err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing database was created: %v", err)
+	}
+
+	path := filepath.Join(root, "existing.db")
+	seed, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(seed): %v", err)
+	}
+	if _, err := seed.db.ExecContext(ctx, `UPDATE schema_meta SET value = '6' WHERE key = 'version'`); err != nil {
+		seed.Close()
+		t.Fatalf("set old schema marker: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+
+	existing, err := OpenExisting(path)
+	if err != nil {
+		t.Fatalf("OpenExisting(existing): %v", err)
+	}
+	status, err := existing.SchemaStatus(ctx)
+	if err != nil {
+		existing.Close()
+		t.Fatalf("SchemaStatus(existing): %v", err)
+	}
+	if status != (SchemaStatus{Current: 6, Latest: 7}) {
+		existing.Close()
+		t.Fatalf("OpenExisting migrated schema: %#v", status)
+	}
+	if err := existing.Close(); err != nil {
+		t.Fatalf("close existing: %v", err)
+	}
+}
+
+func TestOpenExistingLiteralModeMemoryFilenameDoesNotCreateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mode=memory.db")
+	_, err := OpenExisting(path)
+	if !errors.Is(err, ErrStoreNotFound) {
+		t.Fatalf("OpenExisting error = %v, want ErrStoreNotFound", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("OpenExisting created literal filename: %v", statErr)
 	}
 }
 

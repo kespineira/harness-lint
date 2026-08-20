@@ -117,7 +117,7 @@ func runHookOperation(ctx context.Context, config commandConfig, runtimes []hook
 			if lifecycleErr := closeManagedHookCaptureEpoch(ctx, config, runtime); lifecycleErr != nil {
 				fmt.Fprintln(out, "")
 				fmt.Fprintln(out, "Warning")
-				fmt.Fprintf(out, "  Capture lifecycle close failed after the configuration changed: %s\n", cleanText(lifecycleErr.Error()))
+				writeHumanText(out, config.renderer, "Capture lifecycle close failed after the configuration changed: "+cleanText(lifecycleErr.Error()), 2)
 				failures = append(failures, fmt.Sprintf("%s uninstall capture lifecycle: %s", runtime, cleanText(lifecycleErr.Error())))
 			}
 		}
@@ -175,7 +175,7 @@ type hookTestSummary struct {
 }
 
 func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Runtime, out io.Writer) error {
-	db, openErr := openStore(config)
+	db, openErr := openExistingStore(config)
 	if db != nil {
 		defer db.Close()
 	}
@@ -212,6 +212,9 @@ func runHookTest(ctx context.Context, config commandConfig, runtimes []hooks.Run
 		}
 	}
 	renderHookTestView(out, config.renderer, config.verbose, reports, compatibilityResults, summary)
+	if errors.Is(openErr, errDatabaseNotInitialized) {
+		return errors.New("hooks test needs an initialized database; run `harness-lint scan` first")
+	}
 	if summary.Broken > 0 || summary.Degraded > 0 || summary.Unknown > 0 {
 		return errors.New(hookTestFailureMessage)
 	}

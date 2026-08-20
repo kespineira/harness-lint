@@ -18,6 +18,7 @@ import (
 func TestDatabaseHelpAndStatusJSONAreStableAndPrivate(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "state", "private-status-sentinel.db")
+	initializeTestStore(t, dbPath)
 	options := databaseTestOptions(root)
 	var stdout, stderr bytes.Buffer
 	if err := ExecuteWithOptions(options, []string{"db", "--help"}, nil, &stdout, &stderr); err != nil {
