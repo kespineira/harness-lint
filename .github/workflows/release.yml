@@ -43,7 +43,7 @@ jobs:
         run: test "$(node --version)" = 'v24.19.0' && test "$(npm --version)" = '12.0.2'
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.51.0'
 
@@ -91,7 +91,7 @@ jobs:
         run: test "$(node --version)" = 'v24.19.0' && test "$(npm --version)" = '12.0.2'
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.51.0'
 
@@ -127,7 +127,7 @@ jobs:
           cache: true
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.51.0'
 
@@ -257,7 +257,7 @@ jobs:
         run: test "$(node --version)" = 'v24.19.0' && test "$(npm --version)" = '12.0.2'
 
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: 'v1.51.0'
 
